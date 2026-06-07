@@ -1,0 +1,5 @@
+train: datas/images/train
+val: datas/images/vel
+nc: 1
+names:
+  0: drone
