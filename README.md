@@ -17,28 +17,28 @@
 #### 1.2 精度曲线
 - **map_0.5**
 
-<img src="yolov7_result_png/mAP_0.5.png" width="800">
+<img src="yolov7_result_files/mAP_0.5.png" width="800">
 
 - **map_0.5:0.95**
 
-<img src="yolov7_result_png/mAP_0.5:0.95.png" width="800">
+<img src="yolov7_result_files/mAP_0.5:0.95.png" width="800">
 
 - **Precision**
 
-<img src="yolov7_result_png/Precision.png" width="800">
+<img src="yolov7_result_files/Precision.png" width="800">
 
 - **Recall**
 
-<img src="yolov7_result_png/Recall.png" width="800">
+<img src="yolov7_result_files/Recall.png" width="800">
 
 #### 1.3 损失曲线
 **训练集损失**
 
-<img src="yolov7_result_png/train_loss.png" width="800">
+<img src="yolov7_result_files/train_loss.png" width="800">
 
 **验证集损失**
 
-<img src="yolov7_result_png/val_loss.png" width="800">
+<img src="yolov7_result_files/val_loss.png" width="800">
 
 #### 1.4 预测效果
 
