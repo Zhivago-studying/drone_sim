@@ -42,7 +42,7 @@
 
 #### 1.4 预测效果
 
-| <img src="yolov7/runs/train/exp2/test_batch1_pred.jpg" width="500"> | <img src="yolov7/runs/train/exp2/test_batch2_pred.jpg" width="500"> |
+| <img src="yolov7_result_files/test_batch1_pred.jpg" width="500"> | <img src="yolov7_result_files/test_batch2_pred.jpg" width="500"> |
 
 #### 1.5 模型参数规模
 
