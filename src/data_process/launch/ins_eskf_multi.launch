@@ -1,0 +1,40 @@
+<launch>
+  <!-- 隔离实验: disable_attitude_update=true 则 EKF 不修正姿态, -->
+  <!-- 仅靠 IMU 积分传播, 用于定位误差来源           -->
+  <group ns="iris_0">
+    <node pkg="data_process" type="ins_eskf" name="ins_eskf" output="screen">
+      <param name="disable_attitude_update" value="true" />
+      <param name="imu_frame" value="auto" />
+      <param name="min_flow_quality" value="100" />
+      <param name="publish_pos_cov_scale" value="5.0" />
+      <param name="publish_vel_cov_scale" value="1.0" />
+    </node>
+  </group>
+  <group ns="iris_1">
+    <node pkg="data_process" type="ins_eskf" name="ins_eskf" output="screen">
+      <param name="disable_attitude_update" value="true" />
+      <param name="imu_frame" value="auto" />
+      <param name="min_flow_quality" value="100" />
+      <param name="publish_pos_cov_scale" value="5.0" />
+      <param name="publish_vel_cov_scale" value="1.0" />
+    </node>
+  </group>
+  <group ns="iris_2">
+    <node pkg="data_process" type="ins_eskf" name="ins_eskf" output="screen">
+      <param name="disable_attitude_update" value="true" />
+      <param name="imu_frame" value="auto" />
+      <param name="min_flow_quality" value="100" />
+      <param name="publish_pos_cov_scale" value="5.0" />
+      <param name="publish_vel_cov_scale" value="1.0" />
+    </node>
+  </group>
+  <group ns="iris_3">
+    <node pkg="data_process" type="ins_eskf" name="ins_eskf" output="screen">
+      <param name="disable_attitude_update" value="true" />
+      <param name="imu_frame" value="auto" />
+      <param name="min_flow_quality" value="100" />
+      <param name="publish_pos_cov_scale" value="5.0" />
+      <param name="publish_vel_cov_scale" value="1.0" />
+    </node>
+  </group>
+</launch>

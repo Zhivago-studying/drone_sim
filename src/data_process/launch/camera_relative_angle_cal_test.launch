@@ -1,0 +1,14 @@
+<launch>
+  <group ns="iris_0">
+    <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
+  </group>
+  <group ns="iris_1">
+    <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
+  </group>
+  <group ns="iris_2">
+    <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
+  </group>
+  <group ns="iris_3">
+    <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
+  </group>
+</launch>

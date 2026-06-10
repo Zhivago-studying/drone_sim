@@ -1,0 +1,3 @@
+<launch>
+  <node pkg="sensors" type="image_func_test.py" name="image_func_test" output="screen" />
+</launch>

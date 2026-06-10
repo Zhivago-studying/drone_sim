@@ -1,0 +1,14 @@
+<launch>
+  <group ns="iris_0">
+    <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
+  </group>
+  <group ns="iris_1">
+    <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
+  </group>
+  <group ns="iris_2">
+    <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
+  </group>
+  <group ns="iris_3">
+    <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
+  </group>
+</launch>

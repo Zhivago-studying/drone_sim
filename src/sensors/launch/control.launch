@@ -1,0 +1,3 @@
+<launch>
+  <node pkg="sensors" type="control_node" name="swarm_controller" output="screen" />
+</launch>

@@ -1,0 +1,16 @@
+<launch>
+  <!-- 1. 启动 4 架无人机的 ins_eskf 节点 -->
+  <include file="$(find data_process)/launch/ins_eskf_multi.launch" />
+
+  <!-- 2. 启动编队控制器 (7 阶段: 起飞→悬停→扩张收缩→平移→旋转→降落→完成) -->
+  <node pkg="sensors" type="xtdrone_four_uav_formation" name="xtdrone_formation" output="screen">
+    <param name="takeoff_timeout" value="15.0" />
+    <param name="landing_timeout" value="25.0" />
+  </node>
+
+  <!-- 3. 启动评估节点 (Ctrl-C 时打印指标 + 输出 CSV 轨迹文件) -->
+  <node pkg="data_process" type="ins_eskf_test" name="ins_eskf_test" output="screen">
+    <rosparam param="drone_names">["iris_0", "iris_1", "iris_2", "iris_3"]</rosparam>
+    <param name="csv_dir" value="$(find data_process)/logs" />
+  </node>
+</launch>

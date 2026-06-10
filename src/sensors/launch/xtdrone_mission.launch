@@ -1,0 +1,21 @@
+<launch>
+  <!-- XTDrone 四机编队控制器 -->
+  <node pkg="sensors" type="xtdrone_four_uav_formation" name="xtdrone_controller" output="screen">
+    <param name="takeoff_timeout" value="12.0" />
+    <param name="landing_timeout" value="20.0" />
+  </node>
+
+  <!-- 四台无人机图像录制 -->
+  <group ns="iris_0">
+    <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
+  </group>
+  <group ns="iris_1">
+    <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
+  </group>
+  <group ns="iris_2">
+    <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
+  </group>
+  <group ns="iris_3">
+    <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
+  </group>
+</launch>

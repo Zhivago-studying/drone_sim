@@ -1,0 +1,33 @@
+<launch>
+  <!-- drone_detector (image.py) + camera_relative_angle_cal 联调 launch -->
+
+  <arg name="model" default="iris"/>
+
+  <!-- iris_0 -->
+  <group ns="iris_0">
+    <node pkg="sensors" type="image.py" name="drone_detector" output="screen"/>
+    <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen"/>
+    <node pkg="data_process" type="tf_bridge.py" name="tf_bridge" output="screen"/>
+  </group>
+
+  <!-- iris_1 -->
+  <group ns="iris_1">
+    <node pkg="sensors" type="image.py" name="drone_detector" output="screen"/>
+    <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen"/>
+    <node pkg="data_process" type="tf_bridge.py" name="tf_bridge" output="screen"/>
+  </group>
+
+  <!-- iris_2 -->
+  <group ns="iris_2">
+    <node pkg="sensors" type="image.py" name="drone_detector" output="screen"/>
+    <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen"/>
+    <node pkg="data_process" type="tf_bridge.py" name="tf_bridge" output="screen"/>
+  </group>
+
+  <!-- iris_3 -->
+  <group ns="iris_3">
+    <node pkg="sensors" type="image.py" name="drone_detector" output="screen"/>
+    <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen"/>
+    <node pkg="data_process" type="tf_bridge.py" name="tf_bridge" output="screen"/>
+  </group>
+</launch>

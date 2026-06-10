@@ -1,0 +1,18 @@
+<launch>
+  <!-- Swarm formation controller (centralized, no namespace) -->
+  <node pkg="sensors" type="control_node" name="swarm_controller" output="screen" />
+
+  <!-- Image recording on all 4 UAVs -->
+  <group ns="iris_0">
+    <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
+  </group>
+  <group ns="iris_1">
+    <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
+  </group>
+  <group ns="iris_2">
+    <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
+  </group>
+  <group ns="iris_3">
+    <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
+  </group>
+</launch>

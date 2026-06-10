@@ -1,0 +1,14 @@
+<launch>
+  <group ns="iris_0">
+    <node pkg="sensors" type="uwb" name="uwb" output="screen" />
+  </group>
+  <group ns="iris_1">
+    <node pkg="sensors" type="uwb" name="uwb" output="screen" />
+  </group>
+  <group ns="iris_2">
+    <node pkg="sensors" type="uwb" name="uwb" output="screen" />
+  </group>
+  <group ns="iris_3">
+    <node pkg="sensors" type="uwb" name="uwb" output="screen" />
+  </group>
+</launch>
