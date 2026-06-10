@@ -1,0 +1,33 @@
+# Python virtual environment
+venv/
+.venv/
+
+# Build artifacts
+build/
+devel/
+logs/
+
+# Catkin tools
+.catkin_tools/
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
+.codex
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# YOLOv7 training artifacts (large)
+yolov7/runs/
+yolov7/utils/__pycache__/
+yolov7/models/__pycache__/
+
+# OS
+.DS_Store
+Thumbs.db
