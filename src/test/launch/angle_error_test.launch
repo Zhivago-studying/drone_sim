@@ -1,0 +1,48 @@
+<launch>
+  <!--
+    两机角度误差评估启动文件
+    启动 iris_0 + iris_1 的处理节点和编队控制器
+  -->
+
+  <!-- ===== 1. iris_0 节点组 ===== -->
+  <group ns="iris_0">
+    <!-- 图像消息转发 -->
+    <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
+
+    <!-- TF 桥接: map → iris_X/base_link (供 camera_relative_angle_cal 使用) -->
+    <node pkg="data_process" type="tf_bridge.py" name="tf_bridge" output="screen" />
+
+    <!-- 相机相对角度计算 (图像→ENU 世界系射线) -->
+    <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
+
+    <!-- 角度误差评估 (真值 vs 检测值) -->
+    <node pkg="test" type="angle_error_cal" name="angle_error_cal" output="screen">
+      <param name="max_match_error" value="1.0" />
+    </node>
+  </group>
+
+  <!-- ===== 2. iris_1 节点组 ===== -->
+  <group ns="iris_1">
+    <!-- 图像消息转发 -->
+    <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
+
+    <!-- TF 桥接: map → iris_X/base_link -->
+    <node pkg="data_process" type="tf_bridge.py" name="tf_bridge" output="screen" />
+
+    <!-- 相机相对角度计算 -->
+    <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
+
+    <!-- 角度误差评估 -->
+    <node pkg="test" type="angle_error_cal" name="angle_error_cal" output="screen">
+      <param name="max_match_error" value="1.0" />
+    </node>
+  </group>
+
+  <!-- ===== 3. 两机编队控制器 (集中式) ===== -->
+  <node pkg="test" type="two_uavs_formation" name="two_uavs_formation" output="screen">
+    <param name="takeoff_timeout" value="15.0" />
+    <param name="landing_timeout" value="25.0" />
+    <param name="takeoff_climb_rate" value="0.45" />
+  </node>
+
+</launch>

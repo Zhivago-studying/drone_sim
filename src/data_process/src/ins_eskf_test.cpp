@@ -6,7 +6,7 @@
  *   /<drone>/ins_estimate                 — EKF 估计值 (nav_msgs/Odometry)
  *
  * 计算指标:
- *   ATE      — 绝对轨迹误差 (RMSE, 已做初始偏移补偿)
+ *   ATE      — 绝对轨迹误差 (RMSE, GT/EST 均使用相对初始 ENU 位置)
  *   RPE(Δ)   — 相对平移误差 (Δ=1s,5s,10s)
  *   Attitude — 姿态误差 (RMSE, deg)
  *   Velocity — 速度误差 (RMSE, m/s)
@@ -105,6 +105,8 @@ private:
         std::vector<Eigen::Quaterniond> quat;    // (w,x,y,z)
         std::vector<Eigen::Matrix3d> pos_cov;     // 位置协方差 3×3
         std::vector<Eigen::Matrix3d> vel_cov;     // 速度协方差 3×3
+        bool has_pos_origin = false;
+        Eigen::Vector3d pos_origin{0.0, 0.0, 0.0};
     };
 
     struct AlignedSample
@@ -158,10 +160,17 @@ private:
     void gtCallback(const nav_msgs::Odometry::ConstPtr& msg, int drone_id)
     {
         TimeSeries& gt = gt_data_[drone_id];
-        gt.t.push_back(msg->header.stamp);  // ✓ SITL 仿真时间
-        gt.pos.emplace_back(msg->pose.pose.position.x,
+        Eigen::Vector3d pos(msg->pose.pose.position.x,
                             msg->pose.pose.position.y,
                             msg->pose.pose.position.z);
+        if (!gt.has_pos_origin)
+        {
+            gt.pos_origin = pos;
+            gt.has_pos_origin = true;
+        }
+
+        gt.t.push_back(msg->header.stamp);  // ✓ SITL 仿真时间
+        gt.pos.push_back(pos - gt.pos_origin);
         gt.vel.emplace_back(msg->twist.twist.linear.x,
                             msg->twist.twist.linear.y,
                             msg->twist.twist.linear.z);
@@ -261,22 +270,19 @@ private:
 
     /**
      * ATE: 绝对轨迹误差 (RMSE)，单位 m
-     * 减去初始偏移消除起始位置对齐的影响
+     * GT 与 EST 都已在数据入口转换为相对初始 ENU 位置.
      */
     static double computeATE(const std::vector<AlignedSample>& data)
     {
-        if (data.size() < 2) return 0.0;
-
-        // 减去初始偏移 (论文标准做法: 消除 SE(3) 初始化差异)
-        Eigen::Vector3d p0_offset = data[0].est_pos - data[0].gt_pos;
+        if (data.empty()) return 0.0;
 
         double sum = 0.0;
-        for (size_t i = 1; i < data.size(); i++)
+        for (const auto& s : data)
         {
-            Eigen::Vector3d err = (data[i].est_pos - p0_offset) - data[i].gt_pos;
+            Eigen::Vector3d err = s.est_pos - s.gt_pos;
             sum += err.squaredNorm();
         }
-        return std::sqrt(sum / (data.size() - 1));
+        return std::sqrt(sum / data.size());
     }
 
     /** 漂移率: ATE / 时长，单位 m/s (即 m/min 除以 60) */
@@ -340,6 +346,7 @@ private:
         for (const auto& s : data)
         {
             // 归一化四元数，防止数值误差导致 cos_angle 越界
+            // ins_estimate 与 MAVROS GT 均为 body -> ENU.
             Eigen::Quaterniond qe = s.est_quat.normalized();
             Eigen::Quaterniond qg = s.gt_quat.normalized();
 
@@ -373,15 +380,13 @@ private:
      */
     static double computeNEES_pos(const std::vector<AlignedSample>& data)
     {
-        if (data.size() < 2) return 0.0;
-        Eigen::Vector3d p0_offset = data[0].est_pos - data[0].gt_pos;
+        if (data.empty()) return 0.0;
 
         double sum = 0.0;
         int count = 0;
-        for (size_t i = 1; i < data.size(); i++)
+        for (const auto& s : data)
         {
-            const auto& s = data[i];
-            Eigen::Vector3d e = (s.est_pos - p0_offset) - s.gt_pos;
+            Eigen::Vector3d e = s.est_pos - s.gt_pos;
             // 检查协方差是否有效 (正定)
             if (s.est_pos_cov.determinant() < 1e-30)
                 continue;
@@ -480,6 +485,13 @@ private:
     {
         if (data.empty()) return;
 
+        // 按时间戳排序 (解决 IMU/Flow 回调交叉调用导致的非单调时间戳)
+        std::vector<AlignedSample> sorted = data;
+        std::sort(sorted.begin(), sorted.end(),
+                  [](const AlignedSample& a, const AlignedSample& b) {
+                      return a.t.toSec() < b.t.toSec();
+                  });
+
         // 真值轨迹
         std::string gt_file = csv_dir_ + "/" + name + "_gt_traj.csv";
         std::ofstream f_gt(gt_file);
@@ -489,15 +501,19 @@ private:
             return;
         }
         f_gt << std::fixed << std::setprecision(9);
-        for (const auto& s : data)
+        double last_t_gt = -1.0;
+        for (const auto& s : sorted)
         {
-            f_gt << s.t.toSec() << " "
+            double t = s.t.toSec();
+            if (t == last_t_gt) continue;
+            last_t_gt = t;
+            f_gt << t << " "
                  << s.gt_pos.x() << " " << s.gt_pos.y() << " " << s.gt_pos.z() << " "
                  << s.gt_quat.x() << " " << s.gt_quat.y() << " "
                  << s.gt_quat.z() << " " << s.gt_quat.w() << "\n";
         }
         f_gt.close();
-        ROS_INFO("[INS TEST] 真值轨迹已保存: %s (%zu 采样)", gt_file.c_str(), data.size());
+        ROS_INFO("[INS TEST] 真值轨迹已保存: %s (%zu 采样)", gt_file.c_str(), sorted.size());
 
         // 估计轨迹
         std::string est_file = csv_dir_ + "/" + name + "_est_traj.csv";
@@ -508,15 +524,19 @@ private:
             return;
         }
         f_est << std::fixed << std::setprecision(9);
-        for (const auto& s : data)
+        double last_t_est = -1.0;
+        for (const auto& s : sorted)
         {
-            f_est << s.t.toSec() << " "
+            double t = s.t.toSec();
+            if (t == last_t_est) continue;
+            last_t_est = t;
+            f_est << t << " "
                   << s.est_pos.x() << " " << s.est_pos.y() << " " << s.est_pos.z() << " "
                   << s.est_quat.x() << " " << s.est_quat.y() << " "
                   << s.est_quat.z() << " " << s.est_quat.w() << "\n";
         }
         f_est.close();
-        ROS_INFO("[INS TEST] 估计轨迹已保存: %s (%zu 采样)", est_file.c_str(), data.size());
+        ROS_INFO("[INS TEST] 估计轨迹已保存: %s (%zu 采样)", est_file.c_str(), sorted.size());
     }
 
     void writeAllCSV() const

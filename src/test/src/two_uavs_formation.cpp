@@ -1,54 +1,19 @@
 /**
- * @file  xtdrone_four_uav_formation.cpp
- * @brief XTDrone 四机编队飞行控制器 (Section 5.2)
+ * @file  two_uavs_formation.cpp
+ * @brief 两机编队飞行控制器 (iris_0 + iris_1)
  *
- * =========================== 功能描述 ===========================
- * 实现面向 XTDrone 仿真平台的 4 机编队飞行控制器。包含 7 阶段状态机：
- * WAIT → TAKEOFF → HOVER → EXPAND_SHRINK → TRANSLATE → CHASE_RESTORE → LAND → DONE。
- * 支持起飞稳定等待、编队扩张-收缩、整体平移、位置追逐与复原等多模态编队机动，
- * 以及自动重试 OFFBOARD/ARM 的容错机制。
+ * =========================== 5 阶段状态机 ===========================
+ * WAIT → TAKEOFF → HOVER → EXPAND_SHRINK → ROTATE → LAND → DONE
  *
- * =========================== 数据流 ===========================
- * 订阅:
- *   /gazebo/model_states           (gazebo_msgs/ModelStates)
- *     - 获取所有无人机 Gazebo 真值位置，用于闭环控制
- *   /iris_X/mavros/state           (mavros_msgs/State)
- *     - 监控各无人机连接、解锁、模式状态
- *   /iris_X/mavros/local_position/pose (geometry_msgs/PoseStamped)
- *     - 获取每架无人机 MAVROS local 坐标原点下的位置和初始 yaw
- *
- * 发布:
- *   /iris_X/mavros/setpoint_position/local  (geometry_msgs/PoseStamped)
- *     - 起飞/悬停/降落阶段的位置控制指令
- *   /iris_X/mavros/setpoint_velocity/cmd_vel (geometry_msgs/TwistStamped)
- *     - 编队机动阶段的速度控制指令 (比例导引)
- *
- * 服务调用:
- *   /iris_X/mavros/set_mode    (mavros_msgs/SetMode)      — OFFBOARD
- *   /iris_X/mavros/cmd/arming  (mavros_msgs/CommandBool)  — 解锁/上锁
- *
- * =========================== 7 阶段状态机 ===========================
- *   WAIT_FOR_GAZEBO  — 等待 Gazebo 真值数据 + MAVROS 连接就绪
- *   TAKEOFF          — 爬升至 kFlightZ=3.0m，稳定 1s 后推进
- *   HOVER            — 悬停 2s
- *   EXPAND_SHRINK    — 沿径向扩张 2.0m 再收缩回原位 (5s + 5s)
- *   TRANSLATE        — 整体沿 ENU +Y 方向平移 3.0m 再返回 (5s + 5s)
- *   CHASE_RESTORE    — iris_0→p1, iris_1→p2, iris_2→p3, iris_3→p0，再复原 (5s + 5s)
- *   LAND / DONE      — 逐步下降至 0m，上锁退出
- *
- * =========================== 关键参数 ===========================
- *   - 控制频率: 20 Hz
- *   - 最大速度: 1.0 m/s
- *   - 起飞超时: 12.0 s (可通过参数设置)
- *   - 降落超时: 20.0 s (可通过参数设置)
- *   - 可配置参数: ~takeoff_timeout, ~landing_timeout
+ *   1. TAKEOFF       — 爬升至 3m，稳定后推进
+ *   2. HOVER         — 悬停 3s
+ *   3. EXPAND_SHRINK — 沿径向扩展 2.0m 再收缩回原位 (5s + 5s)
+ *   4. ROTATE        — 以两机中心为原点沿圆弧旋转 180° 再返回 (5s + 5s)
+ *   5. LAND          — 着陆并上锁退出
  *
  * =========================== 启动方式 ===========================
- *   单节点集中式控制:
- *   <node pkg="sensors" type="xtdrone_four_uav_formation" name="xtdrone_controller">
- *     <param name="takeoff_timeout" value="12.0"/>
- *     <param name="landing_timeout" value="20.0"/>
- *   </node>
+ *   rosrun test two_uavs_formation
+ *   或通过 launch 文件启动
  */
 
 #include <ros/ros.h>
@@ -67,93 +32,73 @@
 
 struct Vec3
 {
-  double x;
-  double y;
-  double z;
+  Vec3() = default;
+  Vec3(double x_in, double y_in, double z_in)
+    : x(x_in), y(y_in), z(z_in) {}
+
+  double x = 0.0;
+  double y = 0.0;
+  double z = 0.0;
 };
 
-Vec3 opAdd(const Vec3& a, const Vec3& b)
+Vec3 opAdd(const Vec3& a, const Vec3& b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
+Vec3 opSub(const Vec3& a, const Vec3& b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+Vec3 opMul(const Vec3& a, double s)      { return {a.x * s, a.y * s, a.z * s}; }
+
+double length(const Vec3& v) { return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z); }
+
+double norm2d(const Vec3& v) { return std::sqrt(v.x * v.x + v.y * v.y); }
+
+Vec3 normalize2d(const Vec3& v)
 {
-  return {a.x + b.x, a.y + b.y, a.z + b.z};
+  double n = norm2d(v);
+  if (n < 1e-6) return {0.0, 0.0, 0.0};
+  return {v.x / n, v.y / n, 0.0};
 }
-
-Vec3 opSub(const Vec3& a, const Vec3& b)
-{
-  return {a.x - b.x, a.y - b.y, a.z - b.z};
-}
-
-Vec3 opMul(const Vec3& a, double s)
-{
-  return {a.x * s, a.y * s, a.z * s};
-}
-
-double length(const Vec3& v)
-{
-  return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
-}
-
-bool zero(const Vec3& v)
-{
-  return length(v) < 1.0e-6;
-}
-
-Vec3 normalize(const Vec3& v)
-{
-  if (zero(v))
-  {
-    return {0.0, 0.0, 0.0};
-  }
-  return opMul(v, 1.0 / length(v));
-}
-
-namespace
-{
-constexpr int kUavCount = 4;
-constexpr double kRateHz = 20.0;
-constexpr double kFlightZ = 3.0;
-constexpr double kMaxSpeed = 1.0;
-constexpr double kTakeoffAltitudeTolerance = 0.15;
-constexpr double kStageAltitudeTolerance = 0.25;
-
-const std::array<std::string, kUavCount> kModelNames = {
-  "iris_0", "iris_1", "iris_2", "iris_3"
-};
 
 double clamp(double value, double lo, double hi)
 {
   return std::max(lo, std::min(value, hi));
 }
 
-double norm2d(const Vec3& v)
+Vec3 rotate2d(const Vec3& p, const Vec3& center, double angle_rad)
 {
-  return std::sqrt(v.x * v.x + v.y * v.y);
-}
-
-Vec3 normalize2d(const Vec3& v)
-{
-  const double n = norm2d(v);
-  if (n < 1.0e-6)
-  {
-    return {0.0, 0.0, 0.0};
-  }
-  return {v.x / n, v.y / n, 0.0};
+  double dx = p.x - center.x;
+  double dy = p.y - center.y;
+  double c = std::cos(angle_rad);
+  double s = std::sin(angle_rad);
+  return {center.x + dx * c - dy * s,
+          center.y + dx * s + dy * c,
+          p.z};
 }
 
 double yawFromPose(const geometry_msgs::PoseStamped& pose)
 {
   const auto& q = pose.pose.orientation;
-  const double siny_cosp = 2.0 * (q.w * q.z + q.x * q.y);
-  const double cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
+  double siny_cosp = 2.0 * (q.w * q.z + q.x * q.y);
+  double cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
   return std::atan2(siny_cosp, cosy_cosp);
 }
+
+namespace
+{
+constexpr int kUavCount = 2;
+constexpr double kRateHz = 20.0;
+constexpr double kFlightZ = 3.0;
+constexpr double kMaxSpeed = 1.0;
+constexpr double kTakeoffAltitudeTolerance = 0.15;
+constexpr double kStageAltitudeTolerance = 0.25;
+constexpr double kExpandDistance = 2.0;
+constexpr double kRotateAngle = M_PI;  // 180度
+
+const std::array<std::string, kUavCount> kModelNames = {"iris_0", "iris_1"};
 }  // namespace
 
-class XtdroneFormationController
+class TwoUavsFormation
 {
 public:
-  XtdroneFormationController()
-    : nh_(),
-      private_nh_("~"),
+  TwoUavsFormation()
+    : nh_(), private_nh_("~"),
       model_received_(false),
       stage_(Stage::WAIT_FOR_GAZEBO),
       landing_target_z_(kFlightZ),
@@ -166,7 +111,7 @@ public:
     home_yaws_.fill(0.0);
 
     gazebo_sub_ = nh_.subscribe("/gazebo/model_states", 10,
-                                &XtdroneFormationController::gazeboCb, this);
+                                &TwoUavsFormation::gazeboCb, this);
 
     for (int i = 0; i < kUavCount; ++i)
     {
@@ -177,10 +122,10 @@ public:
         mavros_ns + "/setpoint_velocity/cmd_vel", 10);
       state_subs_[i] = nh_.subscribe<mavros_msgs::State>(
         mavros_ns + "/state", 10,
-        boost::bind(&XtdroneFormationController::stateCb, this, _1, i));
+        boost::bind(&TwoUavsFormation::stateCb, this, _1, i));
       local_pose_subs_[i] = nh_.subscribe<geometry_msgs::PoseStamped>(
         mavros_ns + "/local_position/pose", 10,
-        boost::bind(&XtdroneFormationController::localPoseCb, this, _1, i));
+        boost::bind(&TwoUavsFormation::localPoseCb, this, _1, i));
       arm_clients_[i] = nh_.serviceClient<mavros_msgs::CommandBool>(
         mavros_ns + "/cmd/arming");
       mode_clients_[i] = nh_.serviceClient<mavros_msgs::SetMode>(
@@ -196,11 +141,11 @@ public:
   {
     ros::Rate rate(kRateHz);
 
-    ROS_INFO("[formation] waiting for /gazebo/model_states, MAVROS states, and local poses");
+    ROS_INFO("[formation2] waiting for /gazebo/model_states, MAVROS states, and local poses");
     while (ros::ok() && (!model_received_ || !statesConnected() || !localPosesReceived()))
     {
       ros::spinOnce();
-      ROS_INFO_THROTTLE(2.0, "[formation] model_received=%d connected=%d local_pose=%d",
+      ROS_INFO_THROTTLE(2.0, "[formation2] model_received=%d connected=%d local_pose=%d",
                         model_received_, statesConnected(), localPosesReceived());
       rate.sleep();
     }
@@ -216,28 +161,23 @@ public:
     center_ = formationCenter(home_);
     buildMotionTargets();
 
-    ROS_INFO("[formation] home positions captured, gazebo center=(%.2f, %.2f); local position setpoints use each UAV local XY and initial yaw",
-             center_.x, center_.y);
+    ROS_INFO("[formation2] home positions: iris_0=(%.2f, %.2f) iris_1=(%.2f, %.2f) center=(%.2f, %.2f)",
+             home_[0].x, home_[0].y, home_[1].x, home_[1].y, center_.x, center_.y);
 
     primeSetpoints(rate);
 
-    ROS_INFO("[formation] requesting OFFBOARD mode and arming");
+    ROS_INFO("[formation2] requesting OFFBOARD mode and arming");
     for (int i = 0; i < kUavCount && ros::ok(); ++i)
-    {
       setMode(i);
-    }
     streamFor(0.5);
 
     for (int i = 0; i < kUavCount && ros::ok(); ++i)
-    {
       arm(i);
-    }
 
     waitForAllReady(rate, 8.0);
     if (!allReady())
     {
-      ROS_WARN("[formation] not all vehicles report armed OFFBOARD yet; takeoff will keep retrying");
-      logVehicleStates();
+      ROS_WARN("[formation2] not all vehicles ready; takeoff will keep retrying");
     }
 
     enterStage(Stage::TAKEOFF);
@@ -248,27 +188,14 @@ public:
 
       switch (stage_)
       {
-        case Stage::TAKEOFF:
-          runTakeoff();
-          break;
-        case Stage::HOVER:
-          runHover();
-          break;
-        case Stage::EXPAND_SHRINK:
-          runExpandShrink();
-          break;
-        case Stage::TRANSLATE:
-          runTranslate();
-          break;
-        case Stage::CHASE_RESTORE:
-          runChaseRestore();
-          break;
-        case Stage::LAND:
-          runLand();
-          break;
+        case Stage::TAKEOFF:       runTakeoff();       break;
+        case Stage::HOVER:         runHover();         break;
+        case Stage::EXPAND_SHRINK: runExpandShrink();  break;
+        case Stage::ROTATE:        runRotate();        break;
+        case Stage::LAND:          runLand();          break;
         case Stage::DONE:
           disarmAll();
-          ROS_INFO("[formation] mission complete, landed and disarm requested");
+          ROS_INFO("[formation2] mission complete");
           return;
         case Stage::WAIT_FOR_GAZEBO:
           break;
@@ -287,15 +214,14 @@ private:
     TAKEOFF,
     HOVER,
     EXPAND_SHRINK,
-    TRANSLATE,
-    CHASE_RESTORE,
+    ROTATE,
     LAND,
     DONE
   };
 
   void gazeboCb(const gazebo_msgs::ModelStates::ConstPtr& msg)
   {
-    std::array<bool, kUavCount> seen = {false, false, false, false};
+    std::array<bool, kUavCount> seen = {false, false};
 
     for (std::size_t j = 0; j < msg->name.size(); ++j)
     {
@@ -314,9 +240,7 @@ private:
 
     model_received_ = true;
     for (int i = 0; i < kUavCount; ++i)
-    {
       model_received_ = model_received_ && seen[i];
-    }
   }
 
   void stateCb(const mavros_msgs::State::ConstPtr& msg, int i)
@@ -341,7 +265,6 @@ private:
     pose.pose.position.x = x;
     pose.pose.position.y = y;
     pose.pose.position.z = z;
-
     pose.pose.orientation.w = std::cos(yaw * 0.5);
     pose.pose.orientation.x = 0.0;
     pose.pose.orientation.y = 0.0;
@@ -357,9 +280,6 @@ private:
     twist.twist.linear.x = vx;
     twist.twist.linear.y = vy;
     twist.twist.linear.z = vz;
-    twist.twist.angular.x = 0.0;
-    twist.twist.angular.y = 0.0;
-    twist.twist.angular.z = 0.0;
     return twist;
   }
 
@@ -373,13 +293,12 @@ private:
       publishCurrentPoseSetpoints();
       if (mode_clients_[i].call(srv) && srv.response.mode_sent)
       {
-        ROS_INFO("[formation] %s OFFBOARD request accepted on attempt %d",
+        ROS_INFO("[formation2] %s OFFBOARD accepted attempt %d",
                  kModelNames[i].c_str(), attempt);
         streamFor(0.3);
         return true;
       }
-      ROS_WARN("[formation] %s OFFBOARD request failed on attempt %d",
-               kModelNames[i].c_str(), attempt);
+      ROS_WARN("[formation2] %s OFFBOARD failed attempt %d", kModelNames[i].c_str(), attempt);
       streamFor(0.3);
     }
     return false;
@@ -395,13 +314,11 @@ private:
       publishCurrentPoseSetpoints();
       if (arm_clients_[i].call(srv) && srv.response.success)
       {
-        ROS_INFO("[formation] %s armed on attempt %d",
-                 kModelNames[i].c_str(), attempt);
+        ROS_INFO("[formation2] %s armed attempt %d", kModelNames[i].c_str(), attempt);
         streamFor(0.3);
         return true;
       }
-      ROS_WARN("[formation] %s arm failed on attempt %d",
-               kModelNames[i].c_str(), attempt);
+      ROS_WARN("[formation2] %s arm failed attempt %d", kModelNames[i].c_str(), attempt);
       streamFor(0.3);
     }
     return false;
@@ -423,7 +340,7 @@ private:
 
   void waitForAllReady(ros::Rate& rate, double timeout)
   {
-    const ros::Time start = ros::Time::now();
+    ros::Time start = ros::Time::now();
     ros::Time last_retry = ros::Time(0);
 
     while (ros::ok() && !allReady() && (ros::Time::now() - start).toSec() < timeout)
@@ -436,16 +353,11 @@ private:
         for (int i = 0; i < kUavCount; ++i)
         {
           if (states_[i].connected && states_[i].mode != "OFFBOARD")
-          {
             requestOffboardOnce(i);
-          }
           if (states_[i].connected && !states_[i].armed)
-          {
             requestArmOnce(i);
-          }
         }
         last_retry = ros::Time::now();
-        logVehicleStates();
       }
 
       rate.sleep();
@@ -455,69 +367,39 @@ private:
   void reassertReadyForFlight()
   {
     if (stage_ == Stage::TAKEOFF)
-    {
       publishTakeoffTargets();
-    }
     else
-    {
       publishLocalHomePoseSetpoints();
-    }
 
     for (int i = 0; i < kUavCount; ++i)
     {
-      if (!states_[i].connected)
-      {
-        continue;
-      }
+      if (!states_[i].connected) continue;
 
       if (states_[i].mode != "OFFBOARD")
       {
         if (requestOffboardOnce(i))
-        {
-          ROS_INFO("[formation] %s OFFBOARD re-request accepted", kModelNames[i].c_str());
-        }
+          ROS_INFO("[formation2] %s OFFBOARD re-request accepted", kModelNames[i].c_str());
         else
-        {
-          ROS_WARN("[formation] %s OFFBOARD re-request failed", kModelNames[i].c_str());
-        }
+          ROS_WARN("[formation2] %s OFFBOARD re-request failed", kModelNames[i].c_str());
       }
 
       if (!states_[i].armed)
       {
         if (requestArmOnce(i))
-        {
-          ROS_INFO("[formation] %s arm re-request accepted", kModelNames[i].c_str());
-        }
+          ROS_INFO("[formation2] %s arm re-request accepted", kModelNames[i].c_str());
         else
-        {
-          ROS_WARN("[formation] %s arm re-request failed", kModelNames[i].c_str());
-        }
+          ROS_WARN("[formation2] %s arm re-request failed", kModelNames[i].c_str());
       }
     }
-  }
-
-  void logVehicleStates() const
-  {
-    ROS_INFO("[formation] states: %s[%s armed=%d conn=%d] %s[%s armed=%d conn=%d] %s[%s armed=%d conn=%d] %s[%s armed=%d conn=%d]",
-             kModelNames[0].c_str(), states_[0].mode.c_str(), states_[0].armed, states_[0].connected,
-             kModelNames[1].c_str(), states_[1].mode.c_str(), states_[1].armed, states_[1].connected,
-             kModelNames[2].c_str(), states_[2].mode.c_str(), states_[2].armed, states_[2].connected,
-             kModelNames[3].c_str(), states_[3].mode.c_str(), states_[3].armed, states_[3].connected);
   }
 
   bool allReady() const
   {
-    if (!model_received_)
-    {
-      return false;
-    }
-
+    if (!model_received_) return false;
     for (int i = 0; i < kUavCount; ++i)
     {
       if (!states_[i].connected || !states_[i].armed || states_[i].mode != "OFFBOARD")
-      {
         return false;
-      }
     }
     return true;
   }
@@ -525,31 +407,21 @@ private:
   bool statesConnected() const
   {
     for (int i = 0; i < kUavCount; ++i)
-    {
-      if (!states_[i].connected)
-      {
-        return false;
-      }
-    }
+      if (!states_[i].connected) return false;
     return true;
   }
 
   bool localPosesReceived() const
   {
     for (int i = 0; i < kUavCount; ++i)
-    {
-      if (!local_pose_received_[i])
-      {
-        return false;
-      }
-    }
+      if (!local_pose_received_[i]) return false;
     return true;
   }
 
   void primeSetpoints(ros::Rate& rate)
   {
-    ROS_INFO("[formation] priming OFFBOARD setpoint stream for 2 seconds");
-    const ros::Time start = ros::Time::now();
+    ROS_INFO("[formation2] priming OFFBOARD setpoint stream for 2 seconds");
+    ros::Time start = ros::Time::now();
     while (ros::ok() && (ros::Time::now() - start).toSec() < 2.0)
     {
       ros::spinOnce();
@@ -561,7 +433,7 @@ private:
   void streamFor(double seconds)
   {
     ros::Rate rate(kRateHz);
-    const ros::Time start = ros::Time::now();
+    ros::Time start = ros::Time::now();
     while (ros::ok() && (ros::Time::now() - start).toSec() < seconds)
     {
       ros::spinOnce();
@@ -600,15 +472,13 @@ private:
   {
     for (int i = 0; i < kUavCount; ++i)
     {
-      const Vec3 err = opSub(targets[i], positions_[i]);
+      Vec3 err = opSub(targets[i], positions_[i]);
       Vec3 v = opMul({err.x, err.y, 0.0}, 0.8);
-      const double speed = norm2d(v);
+      double speed = norm2d(v);
       if (speed > kMaxSpeed)
-      {
         v = opMul(v, kMaxSpeed / speed);
-      }
 
-      const double vz = clamp((kFlightZ - positions_[i].z) * 0.6, -0.4, 0.4);
+      double vz = clamp((kFlightZ - positions_[i].z) * 0.6, -0.4, 0.4);
       twist_pubs_[i].publish(toTwist(v.x, v.y, vz));
     }
   }
@@ -616,9 +486,7 @@ private:
   void publishZeroVelocity()
   {
     for (int i = 0; i < kUavCount; ++i)
-    {
       twist_pubs_[i].publish(toTwist(0.0, 0.0, 0.0));
-    }
   }
 
   void enterStage(Stage next)
@@ -629,32 +497,29 @@ private:
     switch (stage_)
     {
       case Stage::TAKEOFF:
+      {
         takeoff_start_z_ = local_positions_[0].z;
         for (int i = 0; i < kUavCount; ++i)
-        {
           takeoff_start_z_ = std::min(takeoff_start_z_, local_positions_[i].z);
-        }
         takeoff_target_z_ = takeoff_start_z_;
         takeoff_altitude_ready_since_ = ros::Time(0);
-        ROS_INFO("[formation] Stage TAKEOFF: climb from %.2f m to %.1f m at %.2f m/s",
-                 takeoff_start_z_, kFlightZ, takeoff_climb_rate_);
+        ROS_INFO("[formation2] Stage TAKEOFF: climb from %.2f m to %.1f m",
+                 takeoff_start_z_, kFlightZ);
         break;
+      }
       case Stage::HOVER:
-        ROS_INFO("[formation] Stage 1 Hovering: 2 seconds");
+        ROS_INFO("[formation2] Stage HOVER: 3 seconds");
         break;
       case Stage::EXPAND_SHRINK:
-        ROS_INFO("[formation] Stage 2 Expanding & Shrinking: 2.0 m outward and back");
+        ROS_INFO("[formation2] Stage EXPAND_SHRINK: 2.0m radial and back");
         break;
-      case Stage::TRANSLATE:
-        ROS_INFO("[formation] Stage 3 Translating: +3.0 m ENU-Y and back");
-        break;
-      case Stage::CHASE_RESTORE:
-        captureChaseTargets();
-        ROS_INFO("[formation] Stage 4 Chase/Restore: cyclic position swap and return");
+      case Stage::ROTATE:
+        captureRotateTargets();
+        ROS_INFO("[formation2] Stage ROTATE: 180 deg around center");
         break;
       case Stage::LAND:
         landing_target_z_ = kFlightZ;
-        ROS_INFO("[formation] Landing: descending gradually");
+        ROS_INFO("[formation2] Landing");
         break;
       default:
         break;
@@ -663,38 +528,31 @@ private:
 
   void runTakeoff()
   {
-    const double elapsed = stageElapsed();
+    double elapsed = stageElapsed();
     publishTakeoffTargets();
-    const bool altitude_ready = allAtAltitude(kFlightZ, kTakeoffAltitudeTolerance);
+    bool altitude_ready = allAtAltitude(kFlightZ, kTakeoffAltitudeTolerance);
 
     if (altitude_ready)
     {
       if (takeoff_altitude_ready_since_.isZero())
-      {
         takeoff_altitude_ready_since_ = ros::Time::now();
-      }
     }
     else
     {
       takeoff_altitude_ready_since_ = ros::Time(0);
     }
 
-    const double stable_time = takeoff_altitude_ready_since_.isZero()
-                                 ? 0.0
-                                 : (ros::Time::now() - takeoff_altitude_ready_since_).toSec();
+    double stable_time = takeoff_altitude_ready_since_.isZero()
+                           ? 0.0
+                           : (ros::Time::now() - takeoff_altitude_ready_since_).toSec();
 
     ROS_INFO_THROTTLE(1.0,
-                      "[formation] TAKEOFF t=%.1f target_z=%.2f z=[%.2f %.2f %.2f %.2f] ready=%d stable=%.1f",
-                      elapsed,
-                      takeoff_target_z_,
-                      positions_[0].z, positions_[1].z,
-                      positions_[2].z, positions_[3].z, allReady(), stable_time);
+                      "[formation2] TAKEOFF t=%.1f z=[%.2f %.2f] stable=%.1f",
+                      elapsed, positions_[0].z, positions_[1].z, stable_time);
 
     if (!allReady() && (ros::Time::now() - last_ready_retry_).toSec() > 1.0)
     {
-      ROS_WARN("[formation] waiting for all vehicles to be armed and OFFBOARD before completing takeoff");
       reassertReadyForFlight();
-      logVehicleStates();
       last_ready_retry_ = ros::Time::now();
     }
 
@@ -706,13 +564,9 @@ private:
 
     if (elapsed > takeoff_timeout_)
     {
-      ROS_WARN_THROTTLE(2.0,
-                        "[formation] takeoff exceeds %.1f s; holding TAKEOFF until all UAVs reach %.1f m",
-                        takeoff_timeout_, kFlightZ);
       if ((ros::Time::now() - last_ready_retry_).toSec() > 1.0)
       {
         reassertReadyForFlight();
-        logVehicleStates();
         last_ready_retry_ = ros::Time::now();
       }
     }
@@ -720,31 +574,27 @@ private:
 
   void publishTakeoffTargets()
   {
-    const double elapsed = stageElapsed();
+    double elapsed = stageElapsed();
     takeoff_target_z_ = std::min(kFlightZ, takeoff_start_z_ + takeoff_climb_rate_ * elapsed);
 
     std::array<Vec3, kUavCount> targets = local_home_;
     for (int i = 0; i < kUavCount; ++i)
-    {
       targets[i].z = takeoff_target_z_;
-    }
     publishLocalPoseTargets(targets);
   }
 
   void runHover()
   {
-    const double elapsed = stageElapsed();
+    double elapsed = stageElapsed();
     publishLocalHomePoseSetpoints();
-    ROS_INFO_THROTTLE(1.0, "[formation] Stage 1 Hovering t=%.1f/2.0", elapsed);
-    if (elapsed >= 2.0)
-    {
+    ROS_INFO_THROTTLE(1.0, "[formation2] HOVER t=%.1f/3.0", elapsed);
+    if (elapsed >= 3.0)
       enterStage(Stage::EXPAND_SHRINK);
-    }
   }
 
   void runExpandShrink()
   {
-    const double elapsed = stageElapsed();
+    double elapsed = stageElapsed();
     std::array<Vec3, kUavCount> targets;
     if (elapsed < 5.0)
     {
@@ -756,59 +606,32 @@ private:
     }
 
     publishVelocityToTargets(targets);
-    ROS_INFO_THROTTLE(1.0, "[formation] Stage 2 Expand/Shrink t=%.1f/10.0", elapsed);
+    ROS_INFO_THROTTLE(1.0, "[formation2] EXPAND_SHRINK t=%.1f/10.0", elapsed);
 
     if (elapsed >= 10.0 && allAtTargets(home_, 0.6) &&
         allAtAltitude(kFlightZ, kStageAltitudeTolerance))
     {
       publishZeroVelocity();
-      enterStage(Stage::TRANSLATE);
+      enterStage(Stage::ROTATE);
     }
   }
 
-  void runTranslate()
+  void runRotate()
   {
-    const double elapsed = stageElapsed();
-    std::array<Vec3, kUavCount> targets;
+    double elapsed = stageElapsed();
     if (elapsed < 5.0)
     {
-      targets = interpolateTargets(home_, translate_targets_, clamp(elapsed / 5.0, 0.0, 1.0));
+      const double angle = kRotateAngle * clamp(elapsed / 5.0, 0.0, 1.0);
+      publishVelocityToTargets(rotateTargets(angle));
     }
     else
     {
-      targets = interpolateTargets(translate_targets_, home_, clamp((elapsed - 5.0) / 5.0, 0.0, 1.0));
+      const double angle = kRotateAngle * (1.0 - clamp((elapsed - 5.0) / 5.0, 0.0, 1.0));
+      publishVelocityToTargets(rotateTargets(angle));
     }
+    ROS_INFO_THROTTLE(1.0, "[formation2] ROTATE t=%.1f/10.0", elapsed);
 
-    publishVelocityToTargets(targets);
-    ROS_INFO_THROTTLE(1.0, "[formation] Stage 3 Translating t=%.1f/10.0", elapsed);
-
-    if (elapsed >= 10.0 && allAtTargets(home_, 0.6) &&
-        allAtAltitude(kFlightZ, kStageAltitudeTolerance))
-    {
-      publishZeroVelocity();
-      enterStage(Stage::CHASE_RESTORE);
-    }
-  }
-
-  void runChaseRestore()
-  {
-    const double elapsed = stageElapsed();
-    std::array<Vec3, kUavCount> targets;
-    if (elapsed < 5.0)
-    {
-      targets = interpolateTargets(chase_start_positions_, chase_swap_targets_,
-                                   clamp(elapsed / 5.0, 0.0, 1.0));
-    }
-    else
-    {
-      targets = interpolateTargets(chase_swap_targets_, chase_start_positions_,
-                                   clamp((elapsed - 5.0) / 5.0, 0.0, 1.0));
-    }
-
-    publishVelocityToTargets(targets);
-    ROS_INFO_THROTTLE(1.0, "[formation] Stage 4 Chase/Restore t=%.1f/10.0", elapsed);
-
-    if (elapsed >= 10.0 && allAtTargets(chase_start_positions_, 0.6) &&
+    if (elapsed >= 10.0 && allAtTargets(rotate_start_positions_, 0.6) &&
         allAtAltitude(kFlightZ, kStageAltitudeTolerance))
     {
       publishZeroVelocity();
@@ -818,8 +641,8 @@ private:
 
   void runLand()
   {
-    const double elapsed = stageElapsed();
-    const double dt = 1.0 / kRateHz;
+    double elapsed = stageElapsed();
+    double dt = 1.0 / kRateHz;
     landing_target_z_ = std::max(0.0, landing_target_z_ - 0.35 * dt);
 
     for (int i = 0; i < kUavCount; ++i)
@@ -829,18 +652,13 @@ private:
     }
 
     ROS_INFO_THROTTLE(1.0,
-                      "[formation] LAND t=%.1f target_z=%.2f z=[%.2f %.2f %.2f %.2f]",
-                      elapsed, landing_target_z_,
-                      positions_[0].z, positions_[1].z,
-                      positions_[2].z, positions_[3].z);
+                      "[formation2] LAND t=%.1f z=[%.2f %.2f]",
+                      elapsed, positions_[0].z, positions_[1].z);
 
     if (allLanded() || elapsed > landing_timeout_)
     {
       if (elapsed > landing_timeout_)
-      {
-        ROS_WARN("[formation] landing timeout %.1f s, requesting disarm anyway",
-                 landing_timeout_);
-      }
+        ROS_WARN("[formation2] landing timeout %.1f s", landing_timeout_);
       enterStage(Stage::DONE);
     }
   }
@@ -850,9 +668,7 @@ private:
     for (int i = 0; i < kUavCount; ++i)
     {
       if (std::fabs(positions_[i].z - z) > tolerance)
-      {
         return false;
-      }
     }
     return true;
   }
@@ -861,11 +677,9 @@ private:
   {
     for (int i = 0; i < kUavCount; ++i)
     {
-      const Vec3 err = opSub(targets[i], positions_[i]);
+      Vec3 err = opSub(targets[i], positions_[i]);
       if (norm2d(err) > tolerance)
-      {
         return false;
-      }
     }
     return true;
   }
@@ -875,9 +689,7 @@ private:
     for (int i = 0; i < kUavCount; ++i)
     {
       if (positions_[i].z > 0.25)
-      {
         return false;
-      }
     }
     return true;
   }
@@ -888,12 +700,11 @@ private:
     {
       mavros_msgs::CommandBool srv;
       srv.request.value = false;
-
       for (int attempt = 1; attempt <= 5 && ros::ok(); ++attempt)
       {
         if (arm_clients_[i].call(srv) && srv.response.success)
         {
-          ROS_INFO("[formation] %s disarmed", kModelNames[i].c_str());
+          ROS_INFO("[formation2] %s disarmed", kModelNames[i].c_str());
           break;
         }
         ros::Duration(0.3).sleep();
@@ -903,25 +714,58 @@ private:
 
   Vec3 formationCenter(const std::array<Vec3, kUavCount>& points) const
   {
-    Vec3 center{0.0, 0.0, 0.0};
+    Vec3 c{0.0, 0.0, 0.0};
     for (int i = 0; i < kUavCount; ++i)
-    {
-      center = opAdd(center, points[i]);
-    }
-    return opMul(center, 1.0 / static_cast<double>(kUavCount));
+      c = opAdd(c, points[i]);
+    return opMul(c, 1.0 / static_cast<double>(kUavCount));
   }
 
   void buildMotionTargets()
   {
+    // Stage 3: 径向扩展 2.0m
     for (int i = 0; i < kUavCount; ++i)
     {
-      const Vec3 radial = normalize2d(opSub(home_[i], center_));
-      expand_targets_[i] = opAdd(home_[i], opMul(radial, 2.0));
+      Vec3 radial = normalize2d(opSub(home_[i], center_));
+      expand_targets_[i] = opAdd(home_[i], opMul(radial, kExpandDistance));
       expand_targets_[i].z = kFlightZ;
-
-      translate_targets_[i] = opAdd(home_[i], {0.0, 3.0, 0.0});
-      translate_targets_[i].z = kFlightZ;
     }
+  }
+
+  void captureRotateTargets()
+  {
+    // 记录进入 Stage 4 时的当前位置 (Gazebo 真值)
+    for (int i = 0; i < kUavCount; ++i)
+    {
+      rotate_start_positions_[i] = positions_[i];
+      rotate_start_positions_[i].z = kFlightZ;
+    }
+
+    // 以两机中心为原点，旋转 180 度后的目标位置
+    rotate_center_ = formationCenter(rotate_start_positions_);
+    for (int i = 0; i < kUavCount; ++i)
+    {
+      rotate_swap_targets_[i] = rotate2d(rotate_start_positions_[i], rotate_center_, kRotateAngle);
+      rotate_swap_targets_[i].z = kFlightZ;
+    }
+
+    ROS_INFO("[formation2] rotate around (%.2f, %.2f): iris_0 (%.2f,%.2f)->(%.2f,%.2f), "
+             "iris_1 (%.2f,%.2f)->(%.2f,%.2f)",
+             rotate_center_.x, rotate_center_.y,
+             rotate_start_positions_[0].x, rotate_start_positions_[0].y,
+             rotate_swap_targets_[0].x, rotate_swap_targets_[0].y,
+             rotate_start_positions_[1].x, rotate_start_positions_[1].y,
+             rotate_swap_targets_[1].x, rotate_swap_targets_[1].y);
+  }
+
+  std::array<Vec3, kUavCount> rotateTargets(double angle_rad) const
+  {
+    std::array<Vec3, kUavCount> targets;
+    for (int i = 0; i < kUavCount; ++i)
+    {
+      targets[i] = rotate2d(rotate_start_positions_[i], rotate_center_, angle_rad);
+      targets[i].z = kFlightZ;
+    }
+    return targets;
   }
 
   std::array<Vec3, kUavCount> interpolateTargets(
@@ -939,20 +783,6 @@ private:
       };
     }
     return targets;
-  }
-
-  void captureChaseTargets()
-  {
-    for (int i = 0; i < kUavCount; ++i)
-    {
-      chase_start_positions_[i] = positions_[i];
-      chase_start_positions_[i].z = kFlightZ;
-    }
-
-    chase_swap_targets_[0] = chase_start_positions_[1];
-    chase_swap_targets_[1] = chase_start_positions_[2];
-    chase_swap_targets_[2] = chase_start_positions_[3];
-    chase_swap_targets_[3] = chase_start_positions_[0];
   }
 
   double stageElapsed() const
@@ -975,9 +805,8 @@ private:
   std::array<Vec3, kUavCount> home_;
   std::array<Vec3, kUavCount> local_home_;
   std::array<Vec3, kUavCount> expand_targets_;
-  std::array<Vec3, kUavCount> translate_targets_;
-  std::array<Vec3, kUavCount> chase_start_positions_;
-  std::array<Vec3, kUavCount> chase_swap_targets_;
+  std::array<Vec3, kUavCount> rotate_start_positions_;
+  std::array<Vec3, kUavCount> rotate_swap_targets_;
   std::array<mavros_msgs::State, kUavCount> states_;
   std::array<double, kUavCount> local_yaws_;
   std::array<double, kUavCount> home_yaws_;
@@ -989,6 +818,7 @@ private:
   ros::Time takeoff_altitude_ready_since_;
   ros::Time last_ready_retry_;
   Vec3 center_;
+  Vec3 rotate_center_;
   double landing_target_z_;
   double takeoff_target_z_;
   double takeoff_start_z_;
@@ -999,8 +829,8 @@ private:
 
 int main(int argc, char** argv)
 {
-  ros::init(argc, argv, "xtdrone_four_uav_formation");
-  XtdroneFormationController controller;
+  ros::init(argc, argv, "two_uavs_formation");
+  TwoUavsFormation controller;
   controller.spin();
   return 0;
 }

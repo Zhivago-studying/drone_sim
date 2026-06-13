@@ -147,6 +147,7 @@ private:
             p_.x() = msg->pose.pose.position.x;
             p_.y() = msg->pose.pose.position.y;
             p_.z() = msg->pose.pose.position.z;
+            p0_ = p_;
             v_.x() = msg->twist.twist.linear.x;
             v_.y() = msg->twist.twist.linear.y;
             v_.z() = msg->twist.twist.linear.z;
@@ -158,9 +159,9 @@ private:
             odom_inited_ = true;
 
             Eigen::Vector3d rpy = quatToRPY(q_);
-            ROS_INFO("[INS ESKF] state initialized from odom: p=(%.2f, %.2f, %.2f) v=(%.2f, %.2f, %.2f) "
+            ROS_INFO("[INS ESKF] state initialized from odom: p0=(%.2f, %.2f, %.2f) v=(%.2f, %.2f, %.2f) "
                      "q=(%.3f, %.3f, %.3f, %.3f) RPY(deg)=(%.1f, %.1f, %.1f)",
-                     p_.x(), p_.y(), p_.z(), v_.x(), v_.y(), v_.z(),
+                     p0_.x(), p0_.y(), p0_.z(), v_.x(), v_.y(), v_.z(),
                      q_.w(), q_.x(), q_.y(), q_.z(), rpy.x(), rpy.y(), rpy.z());
         }
     }
@@ -591,14 +592,17 @@ private:
         msg.header.frame_id = "map";
         msg.child_frame_id  = "base_link";
 
-        msg.pose.pose.position.x = p_.x();
-        msg.pose.pose.position.y = p_.y();
-        msg.pose.pose.position.z = p_.z();
+        Eigen::Vector3d p_rel = p_ - p0_;
+        msg.pose.pose.position.x = p_rel.x();
+        msg.pose.pose.position.y = p_rel.y();
+        msg.pose.pose.position.z = p_rel.z();
 
-        msg.pose.pose.orientation.w = q_.w();
-        msg.pose.pose.orientation.x = q_.x();
-        msg.pose.pose.orientation.y = q_.y();
-        msg.pose.pose.orientation.z = q_.z();
+        // 内部 q_ 表示 body(FLU) -> ENU; 对外保持同一语义发布.
+        Eigen::Quaterniond q_pub = q_.normalized();
+        msg.pose.pose.orientation.w = q_pub.w();
+        msg.pose.pose.orientation.x = q_pub.x();
+        msg.pose.pose.orientation.y = q_pub.y();
+        msg.pose.pose.orientation.z = q_pub.z();
 
         msg.twist.twist.linear.x = v_.x();
         msg.twist.twist.linear.y = v_.y();
@@ -651,6 +655,7 @@ private:
 
     // --- 名义状态 (16维) ---
     Eigen::Vector3d    p_{0, 0, 0};
+    Eigen::Vector3d    p0_{0, 0, 0};
     Eigen::Vector3d    v_{0, 0, 0};
     Eigen::Quaterniond q_{1, 0, 0, 0};
     Eigen::Vector3d    ba_{0, 0, 0};

@@ -1,0 +1,91 @@
+<launch>
+  <!--
+    ID 匹配测试启动文件
+    启动全部功能节点 + 2×2 可视化窗口 (带 ID 标注)
+
+    节点清单:
+      每机: ins_eskf + camera_relative_angle_cal + id_match + image.py + tf_bridge
+      全局: xtdrone_four_uav_formation + id_match_test (可视化)
+  -->
+
+  <!-- ===== 1. 每架无人机独立节点 (iris_0 ~ iris_3) ===== -->
+
+  <group ns="iris_0">
+    <node pkg="data_process" type="ins_eskf" name="ins_eskf" output="screen">
+      <param name="disable_attitude_update" value="true" />
+      <param name="imu_frame" value="auto" />
+      <param name="min_flow_quality" value="100" />
+      <param name="publish_pos_cov_scale" value="5.0" />
+      <param name="publish_vel_cov_scale" value="1.0" />
+    </node>
+    <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
+    <node pkg="data_process" type="id_match" name="id_match" output="screen">
+      <rosparam param="drone_names">["iris_0", "iris_1", "iris_2", "iris_3"]</rosparam>
+      <param name="max_match_error" value="0.8" />
+    </node>
+    <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
+    <node pkg="data_process" type="tf_bridge.py" name="tf_bridge" output="screen" />
+  </group>
+
+  <group ns="iris_1">
+    <node pkg="data_process" type="ins_eskf" name="ins_eskf" output="screen">
+      <param name="disable_attitude_update" value="true" />
+      <param name="imu_frame" value="auto" />
+      <param name="min_flow_quality" value="100" />
+      <param name="publish_pos_cov_scale" value="5.0" />
+      <param name="publish_vel_cov_scale" value="1.0" />
+    </node>
+    <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
+    <node pkg="data_process" type="id_match" name="id_match" output="screen">
+      <rosparam param="drone_names">["iris_0", "iris_1", "iris_2", "iris_3"]</rosparam>
+      <param name="max_match_error" value="0.8" />
+    </node>
+    <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
+    <node pkg="data_process" type="tf_bridge.py" name="tf_bridge" output="screen" />
+  </group>
+
+  <group ns="iris_2">
+    <node pkg="data_process" type="ins_eskf" name="ins_eskf" output="screen">
+      <param name="disable_attitude_update" value="true" />
+      <param name="imu_frame" value="auto" />
+      <param name="min_flow_quality" value="100" />
+      <param name="publish_pos_cov_scale" value="5.0" />
+      <param name="publish_vel_cov_scale" value="1.0" />
+    </node>
+    <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
+    <node pkg="data_process" type="id_match" name="id_match" output="screen">
+      <rosparam param="drone_names">["iris_0", "iris_1", "iris_2", "iris_3"]</rosparam>
+      <param name="max_match_error" value="0.8" />
+    </node>
+    <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
+    <node pkg="data_process" type="tf_bridge.py" name="tf_bridge" output="screen" />
+  </group>
+
+  <group ns="iris_3">
+    <node pkg="data_process" type="ins_eskf" name="ins_eskf" output="screen">
+      <param name="disable_attitude_update" value="true" />
+      <param name="imu_frame" value="auto" />
+      <param name="min_flow_quality" value="100" />
+      <param name="publish_pos_cov_scale" value="5.0" />
+      <param name="publish_vel_cov_scale" value="1.0" />
+    </node>
+    <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
+    <node pkg="data_process" type="id_match" name="id_match" output="screen">
+      <rosparam param="drone_names">["iris_0", "iris_1", "iris_2", "iris_3"]</rosparam>
+      <param name="max_match_error" value="0.8" />
+    </node>
+    <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
+    <node pkg="data_process" type="tf_bridge.py" name="tf_bridge" output="screen" />
+  </group>
+
+  <!-- ===== 2. 编队控制器 ===== -->
+  <node pkg="sensors" type="xtdrone_four_uav_formation" name="xtdrone_formation" output="screen">
+    <param name="takeoff_timeout" value="15.0" />
+    <param name="takeoff_climb_rate" value="0.45" />
+    <param name="landing_timeout" value="25.0" />
+  </node>
+
+  <!-- ===== 3. 可视化: 2×2 网格 + ID 标注 ===== -->
+  <node pkg="data_process" type="id_match_test.py" name="id_match_test" output="screen" />
+
+</launch>

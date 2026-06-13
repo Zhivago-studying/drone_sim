@@ -1,0 +1,20 @@
+<launch>
+  <!-- Start INS estimators that provide /iris_X/ins_estimate. -->
+  <include file="$(find data_process)/launch/ins_eskf_multi.launch" />
+
+  <group ns="iris_0">
+    <node pkg="sensors" type="communication" name="communication" output="screen" />
+  </group>
+
+  <group ns="iris_1">
+    <node pkg="sensors" type="communication" name="communication" output="screen" />
+  </group>
+
+  <group ns="iris_2">
+    <node pkg="sensors" type="communication" name="communication" output="screen" />
+  </group>
+
+  <group ns="iris_3">
+    <node pkg="sensors" type="communication" name="communication" output="screen" />
+  </group>
+</launch>

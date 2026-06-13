@@ -5,6 +5,7 @@
   <!-- 2. 启动编队控制器 (7 阶段: 起飞→悬停→扩张收缩→平移→旋转→降落→完成) -->
   <node pkg="sensors" type="xtdrone_four_uav_formation" name="xtdrone_formation" output="screen">
     <param name="takeoff_timeout" value="15.0" />
+    <param name="takeoff_climb_rate" value="0.45" />
     <param name="landing_timeout" value="25.0" />
   </node>
 

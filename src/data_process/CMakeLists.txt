@@ -24,6 +24,7 @@ add_message_files(
   FILES
   UwbProcessed.msg
   CameraAngle.msg
+  CameraAngleMatch.msg
 )
 
 generate_messages(
@@ -119,4 +120,30 @@ add_dependencies(${PROJECT_NAME}_ins_eskf_test_node
 
 target_link_libraries(${PROJECT_NAME}_ins_eskf_test_node
   ${catkin_LIBRARIES}
+)
+
+## ---------- id_match ----------
+add_executable(${PROJECT_NAME}_id_match_node
+  src/id_match.cpp
+)
+
+set_target_properties(${PROJECT_NAME}_id_match_node PROPERTIES
+  OUTPUT_NAME id_match
+  PREFIX ""
+)
+
+add_dependencies(${PROJECT_NAME}_id_match_node
+  ${${PROJECT_NAME}_EXPORTED_TARGETS}
+  ${catkin_EXPORTED_TARGETS}
+)
+
+target_link_libraries(${PROJECT_NAME}_id_match_node
+  ${catkin_LIBRARIES}
+)
+
+## ---------- Python scripts ----------
+catkin_install_python(PROGRAMS
+  scripts/tf_bridge.py
+  scripts/id_match_test.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

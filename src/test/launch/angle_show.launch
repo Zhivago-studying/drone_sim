@@ -1,0 +1,34 @@
+<launch>
+  <!--
+    Angle Show 启动文件
+    显示 iris_0 和 iris_1 的前视相机图像，检测框上标注 angle_est / angle_gt
+  -->
+
+  <!-- ===== 1. iris_0 处理节点 ===== -->
+  <group ns="iris_0">
+    <!-- YOLOv7 无人机检测 -->
+    <node pkg="sensors" type="image.py" name="drone_detector" output="screen" />
+
+    <!-- TF 桥接: map -> iris_0/base_link -->
+    <node pkg="data_process" type="tf_bridge.py" name="tf_bridge" output="screen" />
+
+    <!-- 相机相对角度计算 (angle_est: ENU alpha/theta) -->
+    <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
+  </group>
+
+  <!-- ===== 2. iris_1 处理节点 ===== -->
+  <group ns="iris_1">
+    <!-- YOLOv7 无人机检测 -->
+    <node pkg="sensors" type="image.py" name="drone_detector" output="screen" />
+
+    <!-- TF 桥接: map -> iris_1/base_link -->
+    <node pkg="data_process" type="tf_bridge.py" name="tf_bridge" output="screen" />
+
+    <!-- 相机相对角度计算 (angle_est) -->
+    <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
+  </group>
+
+  <!-- ===== 3. 可视化节点 (集中式, 左右并排显示两机视图) ===== -->
+  <node pkg="test" type="angle_show.py" name="angle_show" output="screen" />
+
+</launch>

@@ -2,6 +2,7 @@
   <!-- XTDrone 四机编队控制器 -->
   <node pkg="sensors" type="xtdrone_four_uav_formation" name="xtdrone_controller" output="screen">
     <param name="takeoff_timeout" value="12.0" />
+    <param name="takeoff_climb_rate" value="0.45" />
     <param name="landing_timeout" value="20.0" />
   </node>
 
