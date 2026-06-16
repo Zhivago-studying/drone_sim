@@ -165,7 +165,7 @@ private:
         const int self_model_idx = findModelIndex(msg, self_name_);
         if (self_model_idx < 0)
         {
-            ROS_WARN_THROTTLE(2.0, "[ANGLE ERROR] model_states has no self model '%s'", self_name_.c_str());
+            ROS_WARN_THROTTLE(10.0, "[ANGLE ERROR] model_states has no self model '%s'", self_name_.c_str());
             has_gt_ = false;
             return;
         }
@@ -173,7 +173,7 @@ private:
         const int target_model_idx = findModelIndex(msg, target_name_);
         if (target_model_idx < 0)
         {
-            ROS_WARN_THROTTLE(2.0, "[ANGLE ERROR] model_states has no target model '%s'", target_name_.c_str());
+            ROS_WARN_THROTTLE(10.0, "[ANGLE ERROR] model_states has no target model '%s'", target_name_.c_str());
             has_gt_ = false;
             return;
         }
@@ -191,7 +191,7 @@ private:
         const double range = std::sqrt(dx * dx + dy * dy + dz * dz);
         if (range < min_range_)
         {
-            ROS_WARN_THROTTLE(2.0, "[ANGLE ERROR] %s -> %s range %.3f m is too small",
+            ROS_WARN_THROTTLE(10.0, "[ANGLE ERROR] %s -> %s range %.3f m is too small",
                               self_name_.c_str(), target_name_.c_str(), range);
             has_gt_ = false;
             return;
@@ -208,7 +208,7 @@ private:
     {
         if (!has_gt_)
         {
-            ROS_WARN_THROTTLE(2.0, "[ANGLE ERROR] no valid GT angles for %s yet", self_name_.c_str());
+            ROS_WARN_THROTTLE(10.0, "[ANGLE ERROR] no valid GT angles for %s yet", self_name_.c_str());
             return;
         }
 
@@ -218,7 +218,7 @@ private:
 
         if (n_det != msg->count)
         {
-            ROS_WARN_THROTTLE(2.0,
+            ROS_WARN_THROTTLE(10.0,
                               "[ANGLE ERROR] camera_angle count mismatch: count=%u alpha=%zu theta=%zu, use %zu",
                               msg->count, msg->alpha.size(), msg->theta.size(), n_det);
         }
@@ -239,7 +239,7 @@ private:
 
             if (!within_threshold)
             {
-                ROS_WARN_THROTTLE(2.0,
+                ROS_WARN_THROTTLE(10.0,
                                   "[ANGLE ERROR] large detection error: %s -> %s angle error %.3f rad > %.3f rad",
                                   self_name_.c_str(), target_name_.c_str(), error, max_match_error_);
                 ++over_threshold_count_;

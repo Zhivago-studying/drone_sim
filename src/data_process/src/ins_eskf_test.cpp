@@ -471,8 +471,8 @@ private:
         {
             size_t n_est = est_data_[d].t.size();
             size_t n_gt  = gt_data_[d].t.size();
-            ROS_INFO("[INS TEST] %s: 估计 %zu | 真值 %zu",
-                     drone_names_[d].c_str(), n_est, n_gt);
+            ROS_DEBUG("[INS TEST] %s: 估计 %zu | 真值 %zu",
+                      drone_names_[d].c_str(), n_est, n_gt);
         }
     }
 
@@ -513,7 +513,7 @@ private:
                  << s.gt_quat.z() << " " << s.gt_quat.w() << "\n";
         }
         f_gt.close();
-        ROS_INFO("[INS TEST] 真值轨迹已保存: %s (%zu 采样)", gt_file.c_str(), sorted.size());
+        ROS_DEBUG("[INS TEST] 真值轨迹已保存: %s (%zu 采样)", gt_file.c_str(), sorted.size());
 
         // 估计轨迹
         std::string est_file = csv_dir_ + "/" + name + "_est_traj.csv";
@@ -536,7 +536,33 @@ private:
                   << s.est_quat.z() << " " << s.est_quat.w() << "\n";
         }
         f_est.close();
-        ROS_INFO("[INS TEST] 估计轨迹已保存: %s (%zu 采样)", est_file.c_str(), sorted.size());
+        ROS_DEBUG("[INS TEST] 估计轨迹已保存: %s (%zu 采样)", est_file.c_str(), sorted.size());
+
+        std::string vel_file = csv_dir_ + "/" + name + "_vel_error.csv";
+        std::ofstream f_vel(vel_file);
+        if (!f_vel.is_open())
+        {
+            ROS_WARN("[INS TEST] cannot write velocity error CSV: %s", vel_file.c_str());
+            return;
+        }
+        f_vel << std::fixed << std::setprecision(9);
+        f_vel << "timestamp,est_vx,est_vy,est_vz,gt_vx,gt_vy,gt_vz,"
+              << "err_vx,err_vy,err_vz,err_norm\n";
+        double last_t_vel = -1.0;
+        for (const auto& s : sorted)
+        {
+            double t = s.t.toSec();
+            if (t == last_t_vel) continue;
+            last_t_vel = t;
+            Eigen::Vector3d err = s.est_vel - s.gt_vel;
+            f_vel << t << ","
+                  << s.est_vel.x() << "," << s.est_vel.y() << "," << s.est_vel.z() << ","
+                  << s.gt_vel.x() << "," << s.gt_vel.y() << "," << s.gt_vel.z() << ","
+                  << err.x() << "," << err.y() << "," << err.z() << ","
+                  << err.norm() << "\n";
+        }
+        f_vel.close();
+        ROS_DEBUG("[INS TEST] 速度误差已保存: %s (%zu 采样)", vel_file.c_str(), sorted.size());
     }
 
     void writeAllCSV() const

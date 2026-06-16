@@ -4,17 +4,41 @@
 
   <group ns="iris_0">
     <node pkg="sensors" type="communication" name="communication" output="screen" />
+    <node pkg="algorithm" type="DGO" name="DGO" output="screen">
+      <param name="uav_id" value="0" />
+      <param name="uav_num" value="4" />
+      <param name="initial_spacing" value="2.0" />
+      <param name="max_sensor_age" value="0.5" />
+    </node>
   </group>
 
   <group ns="iris_1">
     <node pkg="sensors" type="communication" name="communication" output="screen" />
+    <node pkg="algorithm" type="DGO" name="DGO" output="screen">
+      <param name="uav_id" value="1" />
+      <param name="uav_num" value="4" />
+      <param name="initial_spacing" value="2.0" />
+      <param name="max_sensor_age" value="0.5" />
+    </node>
   </group>
 
   <group ns="iris_2">
     <node pkg="sensors" type="communication" name="communication" output="screen" />
+    <node pkg="algorithm" type="DGO" name="DGO" output="screen">
+      <param name="uav_id" value="2" />
+      <param name="uav_num" value="4" />
+      <param name="initial_spacing" value="2.0" />
+      <param name="max_sensor_age" value="0.5" />
+    </node>
   </group>
 
   <group ns="iris_3">
     <node pkg="sensors" type="communication" name="communication" output="screen" />
+    <node pkg="algorithm" type="DGO" name="DGO" output="screen">
+      <param name="uav_id" value="3" />
+      <param name="uav_num" value="4" />
+      <param name="initial_spacing" value="2.0" />
+      <param name="max_sensor_age" value="0.5" />
+    </node>
   </group>
 </launch>

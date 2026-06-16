@@ -39,12 +39,11 @@ public:
             ROS_WARN("[communication] invalid rate %.2f, using 10Hz", publish_rate_);
             publish_rate_ = 10.0;
         }
-
         ins_sub_ = nh_.subscribe("ins_estimate", 10,
                                  &CommunicationNode::insCallback, this);
         com_pub_ = nh_.advertise<sensors::ComMsg>("communication", 10);
 
-        ROS_INFO("[communication] ns=%s id=%u rate=%.1fHz",
+        ROS_INFO("[communication] ns=%s id=%u rate=%.1fHz source=ins_estimate",
                  ns.c_str(), static_cast<unsigned int>(id_), publish_rate_);
     }
 
@@ -84,30 +83,31 @@ private:
 
     void insCallback(const nav_msgs::Odometry::ConstPtr &msg)
     {
-        latest_msg_ = msg;
+        latest_ins_msg_ = msg;
         has_ins_ = true;
     }
 
     void publish()
     {
-        if (!has_ins_)
+        if (!latest_ins_msg_)
         {
-            ROS_WARN_THROTTLE(2.0, "[communication] waiting for ins_estimate");
+            ROS_WARN_THROTTLE(10.0, "[communication] waiting for ins_estimate");
             return;
         }
 
         sensors::ComMsg msg;
+        msg.header.seq = seq_++;
         msg.header.stamp = ros::Time::now();
-        msg.header.frame_id = latest_msg_->header.frame_id;
+        msg.header.frame_id = latest_ins_msg_->header.frame_id;
         msg.id = id_;
 
-        msg.position.x = latest_msg_->pose.pose.position.x;
-        msg.position.y = latest_msg_->pose.pose.position.y;
-        msg.position.z = latest_msg_->pose.pose.position.z;
+        msg.position.x = latest_ins_msg_->pose.pose.position.x;
+        msg.position.y = latest_ins_msg_->pose.pose.position.y;
+        msg.position.z = latest_ins_msg_->pose.pose.position.z;
 
-        msg.velocity.x = latest_msg_->twist.twist.linear.x;
-        msg.velocity.y = latest_msg_->twist.twist.linear.y;
-        msg.velocity.z = latest_msg_->twist.twist.linear.z;
+        msg.velocity.x = latest_ins_msg_->twist.twist.linear.x;
+        msg.velocity.y = latest_ins_msg_->twist.twist.linear.y;
+        msg.velocity.z = latest_ins_msg_->twist.twist.linear.z;
 
         com_pub_.publish(msg);
     }
@@ -116,9 +116,10 @@ private:
     ros::NodeHandle pnh_;
     ros::Subscriber ins_sub_;
     ros::Publisher com_pub_;
-    nav_msgs::Odometry::ConstPtr latest_msg_;
+    nav_msgs::Odometry::ConstPtr latest_ins_msg_;
 
     uint8_t id_ = 0;
+    uint32_t seq_ = 0;
     double publish_rate_ = 10.0;
     bool has_ins_ = false;
 };

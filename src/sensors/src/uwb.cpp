@@ -44,10 +44,10 @@ class UWB
 public:
     UWB() : gen_(rd_()), noise_dist_(0.0, 0.08)
     {
-        ROS_INFO("UWB Simulator started.");
         // 从命名空间获取无人机ID，如 /iris_0 -> 0
         std::string ns = ros::this_node::getNamespace();
         iris_id_ = ns.back() - '0';
+        ROS_INFO("[UWB] ns=%s id=%d started", ns.c_str(), iris_id_);
 
         // UWB话题发布者，话题名为 /iris_X/uwb
         std::string uwb_topic = ns + "/uwb";
@@ -69,6 +69,8 @@ public:
 
             // 一次性发布本机到其他所有无人机的UWB测距
             sensors::UwbRange msg;
+            msg.header.stamp = ros::Time::now();
+            msg.header.frame_id = "uwb_link";
             for (int i = 0; i < 4; i++)
             {
                 if (i != iris_id_)

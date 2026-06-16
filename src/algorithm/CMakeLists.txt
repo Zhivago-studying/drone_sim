@@ -15,6 +15,9 @@ find_package(catkin REQUIRED COMPONENTS
   std_msgs
 )
 
+## Eigen3 (header-only linear algebra)
+find_package(Eigen3 REQUIRED)
+
 ## System dependencies are found with CMake's conventions
 # find_package(Boost REQUIRED COMPONENTS system)
 
@@ -120,6 +123,8 @@ catkin_package(
 include_directories(
 # include
   ${catkin_INCLUDE_DIRS}
+  ${EIGEN3_INCLUDE_DIRS}
+  ${PROJECT_SOURCE_DIR}/../LBFGSpp/include
 )
 
 ## Declare a C++ library
@@ -204,11 +209,10 @@ target_link_libraries(${PROJECT_NAME}_dgo_node
 # )
 
 ## Mark other files for installation (e.g. launch and bag files, etc.)
-# install(FILES
-#   # myfile1
-#   # myfile2
-#   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
-# )
+install(DIRECTORY launch/
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/launch
+  FILES_MATCHING PATTERN "*.launch"
+)
 
 #############
 ## Testing ##

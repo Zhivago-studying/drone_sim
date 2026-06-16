@@ -1,0 +1,138 @@
+<launch>
+  <!-- Full DGO chain:
+       INS + UWB simulation/filter + camera angle/id match + communication + DGO
+       + EKF/DGO evaluator. -->
+
+  <arg name="csv_dir" default="$(find test)/logs" />
+  <arg name="max_align_dt" default="0.08" />
+  <arg name="max_dgo_align_dt" default="$(arg max_align_dt)" />
+  <arg name="max_model_align_dt" default="0.03" />
+
+  <include file="$(find sensors)/launch/uwb.launch" />
+  <include file="$(find data_process)/launch/uwb_zero_score.launch" />
+
+  <group ns="iris_0">
+    <node pkg="data_process" type="ins_eskf" name="ins_eskf" output="screen">
+      <param name="disable_attitude_update" value="true" />
+      <param name="imu_frame" value="auto" />
+      <param name="min_flow_quality" value="100" />
+      <param name="publish_pos_cov_scale" value="5.0" />
+      <param name="publish_vel_cov_scale" value="1.0" />
+    </node>
+    <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
+    <node pkg="data_process" type="id_match" name="id_match" output="screen">
+      <rosparam param="drone_names">["iris_0", "iris_1", "iris_2", "iris_3"]</rosparam>
+    </node>
+    <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
+    <node pkg="data_process" type="tf_bridge.py" name="tf_bridge" output="screen" />
+    <node pkg="sensors" type="communication" name="communication" output="screen" />
+    <node pkg="algorithm" type="DGO" name="DGO" output="screen">
+      <param name="uav_id" value="0" />
+      <param name="uav_num" value="4" />
+      <param name="initial_spacing" value="2.0" />
+      <param name="max_sensor_age" value="0.5" />
+    </node>
+  </group>
+
+  <group ns="iris_1">
+    <node pkg="data_process" type="ins_eskf" name="ins_eskf" output="screen">
+      <param name="disable_attitude_update" value="true" />
+      <param name="imu_frame" value="auto" />
+      <param name="min_flow_quality" value="100" />
+      <param name="publish_pos_cov_scale" value="5.0" />
+      <param name="publish_vel_cov_scale" value="1.0" />
+    </node>
+    <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
+    <node pkg="data_process" type="id_match" name="id_match" output="screen">
+      <rosparam param="drone_names">["iris_0", "iris_1", "iris_2", "iris_3"]</rosparam>
+    </node>
+    <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
+    <node pkg="data_process" type="tf_bridge.py" name="tf_bridge" output="screen" />
+    <node pkg="sensors" type="communication" name="communication" output="screen" />
+    <node pkg="algorithm" type="DGO" name="DGO" output="screen">
+      <param name="uav_id" value="1" />
+      <param name="uav_num" value="4" />
+      <param name="initial_spacing" value="2.0" />
+      <param name="max_sensor_age" value="0.5" />
+    </node>
+  </group>
+
+  <group ns="iris_2">
+    <node pkg="data_process" type="ins_eskf" name="ins_eskf" output="screen">
+      <param name="disable_attitude_update" value="true" />
+      <param name="imu_frame" value="auto" />
+      <param name="min_flow_quality" value="100" />
+      <param name="publish_pos_cov_scale" value="5.0" />
+      <param name="publish_vel_cov_scale" value="1.0" />
+    </node>
+    <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
+    <node pkg="data_process" type="id_match" name="id_match" output="screen">
+      <rosparam param="drone_names">["iris_0", "iris_1", "iris_2", "iris_3"]</rosparam>
+    </node>
+    <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
+    <node pkg="data_process" type="tf_bridge.py" name="tf_bridge" output="screen" />
+    <node pkg="sensors" type="communication" name="communication" output="screen" />
+    <node pkg="algorithm" type="DGO" name="DGO" output="screen">
+      <param name="uav_id" value="2" />
+      <param name="uav_num" value="4" />
+      <param name="initial_spacing" value="2.0" />
+      <param name="max_sensor_age" value="0.5" />
+    </node>
+  </group>
+
+  <group ns="iris_3">
+    <node pkg="data_process" type="ins_eskf" name="ins_eskf" output="screen">
+      <param name="disable_attitude_update" value="true" />
+      <param name="imu_frame" value="auto" />
+      <param name="min_flow_quality" value="100" />
+      <param name="publish_pos_cov_scale" value="5.0" />
+      <param name="publish_vel_cov_scale" value="1.0" />
+    </node>
+    <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
+    <node pkg="data_process" type="id_match" name="id_match" output="screen">
+      <rosparam param="drone_names">["iris_0", "iris_1", "iris_2", "iris_3"]</rosparam>
+    </node>
+    <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
+    <node pkg="data_process" type="tf_bridge.py" name="tf_bridge" output="screen" />
+    <node pkg="sensors" type="communication" name="communication" output="screen" />
+    <node pkg="algorithm" type="DGO" name="DGO" output="screen">
+      <param name="uav_id" value="3" />
+      <param name="uav_num" value="4" />
+      <param name="initial_spacing" value="2.0" />
+      <param name="max_sensor_age" value="0.5" />
+    </node>
+  </group>
+
+  <node pkg="sensors" type="xtdrone_four_uav_formation" name="xtdrone_formation" output="screen">
+    <param name="takeoff_timeout" value="15.0" />
+    <param name="takeoff_climb_rate" value="0.45" />
+    <param name="landing_timeout" value="25.0" />
+  </node>
+
+  <group ns="iris_1">
+    <node pkg="test" type="ekf_dgo_test" name="ekf_dgo_test" output="screen">
+      <param name="csv_dir" value="$(arg csv_dir)" />
+      <param name="max_align_dt" value="$(arg max_align_dt)" />
+      <param name="max_dgo_align_dt" value="$(arg max_dgo_align_dt)" />
+      <param name="max_model_align_dt" value="$(arg max_model_align_dt)" />
+    </node>
+  </group>
+
+  <group ns="iris_2">
+    <node pkg="test" type="ekf_dgo_test" name="ekf_dgo_test" output="screen">
+      <param name="csv_dir" value="$(arg csv_dir)" />
+      <param name="max_align_dt" value="$(arg max_align_dt)" />
+      <param name="max_dgo_align_dt" value="$(arg max_dgo_align_dt)" />
+      <param name="max_model_align_dt" value="$(arg max_model_align_dt)" />
+    </node>
+  </group>
+
+  <group ns="iris_3">
+    <node pkg="test" type="ekf_dgo_test" name="ekf_dgo_test" output="screen">
+      <param name="csv_dir" value="$(arg csv_dir)" />
+      <param name="max_align_dt" value="$(arg max_align_dt)" />
+      <param name="max_dgo_align_dt" value="$(arg max_dgo_align_dt)" />
+      <param name="max_model_align_dt" value="$(arg max_model_align_dt)" />
+    </node>
+  </group>
+</launch>

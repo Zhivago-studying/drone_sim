@@ -10,10 +10,12 @@ add_compile_options(-std=c++11)
 find_package(catkin REQUIRED COMPONENTS
   data_process
   gazebo_msgs
+  nav_msgs
   roscpp
 )
 
 find_package(Boost REQUIRED COMPONENTS filesystem system)
+find_package(Eigen3 REQUIRED)
 
 ## System dependencies are found with CMake's conventions
 # find_package(Boost REQUIRED COMPONENTS system)
@@ -107,7 +109,7 @@ find_package(Boost REQUIRED COMPONENTS filesystem system)
 catkin_package(
 #  INCLUDE_DIRS include
 #  LIBRARIES test
-  CATKIN_DEPENDS data_process gazebo_msgs roscpp
+  CATKIN_DEPENDS data_process gazebo_msgs nav_msgs roscpp
 #  DEPENDS system_lib
 )
 
@@ -121,6 +123,7 @@ include_directories(
 # include
   ${catkin_INCLUDE_DIRS}
   ${Boost_INCLUDE_DIRS}
+  ${EIGEN3_INCLUDE_DIRS}
 )
 
 add_executable(angle_error_cal
@@ -145,6 +148,18 @@ add_dependencies(two_uavs_formation
 )
 
 target_link_libraries(two_uavs_formation
+  ${catkin_LIBRARIES}
+)
+
+add_executable(ekf_dgo_test
+  src/ekf_dgo_test.cpp
+)
+
+add_dependencies(ekf_dgo_test
+  ${catkin_EXPORTED_TARGETS}
+)
+
+target_link_libraries(ekf_dgo_test
   ${catkin_LIBRARIES}
 )
 

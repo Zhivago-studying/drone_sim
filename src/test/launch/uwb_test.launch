@@ -1,0 +1,10 @@
+<launch>
+  <!-- UWB 测距模拟 (4 架无人机) -->
+  <include file="$(find sensors)/launch/uwb.launch" />
+
+  <!-- UWB Zero-Score 异常值剔除 + 均值滤波 (4 架无人机) -->
+  <include file="$(find data_process)/launch/uwb_zero_score.launch" />
+
+  <!-- 编队飞行控制器 -->
+  <node pkg="test" type="two_uavs_formation" name="two_uavs_formation" output="screen" />
+</launch>

@@ -1,0 +1,14 @@
+<launch>
+  <arg name="csv_dir" default="$(find test)/logs" />
+  <arg name="max_align_dt" default="0.08" />
+  <arg name="max_dgo_align_dt" default="$(arg max_align_dt)" />
+  <arg name="max_model_align_dt" default="0.03" />
+
+  <!-- Alias launch: the full mission launch owns the evaluator node. -->
+  <include file="$(find algorithm)/launch/dgo_full_mission.launch">
+    <arg name="csv_dir" value="$(arg csv_dir)" />
+    <arg name="max_align_dt" value="$(arg max_align_dt)" />
+    <arg name="max_dgo_align_dt" value="$(arg max_dgo_align_dt)" />
+    <arg name="max_model_align_dt" value="$(arg max_model_align_dt)" />
+  </include>
+</launch>

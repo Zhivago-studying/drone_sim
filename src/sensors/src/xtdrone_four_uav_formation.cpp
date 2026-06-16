@@ -200,8 +200,8 @@ public:
     while (ros::ok() && (!model_received_ || !statesConnected() || !localPosesReceived()))
     {
       ros::spinOnce();
-      ROS_INFO_THROTTLE(2.0, "[formation] model_received=%d connected=%d local_pose=%d",
-                        model_received_, statesConnected(), localPosesReceived());
+      ROS_DEBUG_THROTTLE(2.0, "[formation] model_received=%d connected=%d local_pose=%d",
+                         model_received_, statesConnected(), localPosesReceived());
       rate.sleep();
     }
 
@@ -373,8 +373,8 @@ private:
       publishCurrentPoseSetpoints();
       if (mode_clients_[i].call(srv) && srv.response.mode_sent)
       {
-        ROS_INFO("[formation] %s OFFBOARD request accepted on attempt %d",
-                 kModelNames[i].c_str(), attempt);
+        ROS_DEBUG("[formation] %s OFFBOARD request accepted on attempt %d",
+                  kModelNames[i].c_str(), attempt);
         streamFor(0.3);
         return true;
       }
@@ -395,8 +395,8 @@ private:
       publishCurrentPoseSetpoints();
       if (arm_clients_[i].call(srv) && srv.response.success)
       {
-        ROS_INFO("[formation] %s armed on attempt %d",
-                 kModelNames[i].c_str(), attempt);
+        ROS_DEBUG("[formation] %s armed on attempt %d",
+                  kModelNames[i].c_str(), attempt);
         streamFor(0.3);
         return true;
       }
@@ -474,7 +474,7 @@ private:
       {
         if (requestOffboardOnce(i))
         {
-          ROS_INFO("[formation] %s OFFBOARD re-request accepted", kModelNames[i].c_str());
+          ROS_DEBUG("[formation] %s OFFBOARD re-request accepted", kModelNames[i].c_str());
         }
         else
         {
@@ -486,7 +486,7 @@ private:
       {
         if (requestArmOnce(i))
         {
-          ROS_INFO("[formation] %s arm re-request accepted", kModelNames[i].c_str());
+          ROS_DEBUG("[formation] %s arm re-request accepted", kModelNames[i].c_str());
         }
         else
         {
@@ -498,7 +498,7 @@ private:
 
   void logVehicleStates() const
   {
-    ROS_INFO("[formation] states: %s[%s armed=%d conn=%d] %s[%s armed=%d conn=%d] %s[%s armed=%d conn=%d] %s[%s armed=%d conn=%d]",
+    ROS_DEBUG("[formation] states: %s[%s armed=%d conn=%d] %s[%s armed=%d conn=%d] %s[%s armed=%d conn=%d] %s[%s armed=%d conn=%d]",
              kModelNames[0].c_str(), states_[0].mode.c_str(), states_[0].armed, states_[0].connected,
              kModelNames[1].c_str(), states_[1].mode.c_str(), states_[1].armed, states_[1].connected,
              kModelNames[2].c_str(), states_[2].mode.c_str(), states_[2].armed, states_[2].connected,
@@ -596,6 +596,18 @@ private:
     }
   }
 
+  void publishWorldTargetsAsLocalPoseSetpoints(const std::array<Vec3, kUavCount>& world_targets)
+  {
+    std::array<Vec3, kUavCount> local_targets;
+    for (int i = 0; i < kUavCount; ++i)
+    {
+      local_targets[i].x = local_home_[i].x + (world_targets[i].x - home_[i].x);
+      local_targets[i].y = local_home_[i].y + (world_targets[i].y - home_[i].y);
+      local_targets[i].z = kFlightZ;
+    }
+    publishLocalPoseTargets(local_targets);
+  }
+
   void publishVelocityToTargets(const std::array<Vec3, kUavCount>& targets)
   {
     for (int i = 0; i < kUavCount; ++i)
@@ -683,7 +695,7 @@ private:
                                  ? 0.0
                                  : (ros::Time::now() - takeoff_altitude_ready_since_).toSec();
 
-    ROS_INFO_THROTTLE(1.0,
+    ROS_DEBUG_THROTTLE(2.0,
                       "[formation] TAKEOFF t=%.1f target_z=%.2f z=[%.2f %.2f %.2f %.2f] ready=%d stable=%.1f",
                       elapsed,
                       takeoff_target_z_,
@@ -706,7 +718,7 @@ private:
 
     if (elapsed > takeoff_timeout_)
     {
-      ROS_WARN_THROTTLE(2.0,
+      ROS_WARN_THROTTLE(10.0,
                         "[formation] takeoff exceeds %.1f s; holding TAKEOFF until all UAVs reach %.1f m",
                         takeoff_timeout_, kFlightZ);
       if ((ros::Time::now() - last_ready_retry_).toSec() > 1.0)
@@ -735,7 +747,7 @@ private:
   {
     const double elapsed = stageElapsed();
     publishLocalHomePoseSetpoints();
-    ROS_INFO_THROTTLE(1.0, "[formation] Stage 1 Hovering t=%.1f/2.0", elapsed);
+    ROS_DEBUG_THROTTLE(2.0, "[formation] Stage 1 Hovering t=%.1f/2.0", elapsed);
     if (elapsed >= 2.0)
     {
       enterStage(Stage::EXPAND_SHRINK);
@@ -756,7 +768,7 @@ private:
     }
 
     publishVelocityToTargets(targets);
-    ROS_INFO_THROTTLE(1.0, "[formation] Stage 2 Expand/Shrink t=%.1f/10.0", elapsed);
+    ROS_DEBUG_THROTTLE(2.0, "[formation] Stage 2 Expand/Shrink t=%.1f/10.0", elapsed);
 
     if (elapsed >= 10.0 && allAtTargets(home_, 0.6) &&
         allAtAltitude(kFlightZ, kStageAltitudeTolerance))
@@ -780,7 +792,7 @@ private:
     }
 
     publishVelocityToTargets(targets);
-    ROS_INFO_THROTTLE(1.0, "[formation] Stage 3 Translating t=%.1f/10.0", elapsed);
+    ROS_DEBUG_THROTTLE(2.0, "[formation] Stage 3 Translating t=%.1f/10.0", elapsed);
 
     if (elapsed >= 10.0 && allAtTargets(home_, 0.6) &&
         allAtAltitude(kFlightZ, kStageAltitudeTolerance))
@@ -805,8 +817,8 @@ private:
                                    clamp((elapsed - 5.0) / 5.0, 0.0, 1.0));
     }
 
-    publishVelocityToTargets(targets);
-    ROS_INFO_THROTTLE(1.0, "[formation] Stage 4 Chase/Restore t=%.1f/10.0", elapsed);
+    publishWorldTargetsAsLocalPoseSetpoints(targets);
+    ROS_DEBUG_THROTTLE(2.0, "[formation] Stage 4 Chase/Restore t=%.1f/10.0", elapsed);
 
     if (elapsed >= 10.0 && allAtTargets(chase_start_positions_, 0.6) &&
         allAtAltitude(kFlightZ, kStageAltitudeTolerance))
@@ -828,7 +840,7 @@ private:
                                    landing_target_z_, home_yaws_[i]));
     }
 
-    ROS_INFO_THROTTLE(1.0,
+    ROS_DEBUG_THROTTLE(2.0,
                       "[formation] LAND t=%.1f target_z=%.2f z=[%.2f %.2f %.2f %.2f]",
                       elapsed, landing_target_z_,
                       positions_[0].z, positions_[1].z,
@@ -893,7 +905,7 @@ private:
       {
         if (arm_clients_[i].call(srv) && srv.response.success)
         {
-          ROS_INFO("[formation] %s disarmed", kModelNames[i].c_str());
+          ROS_DEBUG("[formation] %s disarmed", kModelNames[i].c_str());
           break;
         }
         ros::Duration(0.3).sleep();
@@ -953,6 +965,19 @@ private:
     chase_swap_targets_[1] = chase_start_positions_[2];
     chase_swap_targets_[2] = chase_start_positions_[3];
     chase_swap_targets_[3] = chase_start_positions_[0];
+
+    ROS_INFO("[formation] chase targets: iris_0 (%.2f,%.2f)->(%.2f,%.2f), "
+             "iris_1 (%.2f,%.2f)->(%.2f,%.2f), "
+             "iris_2 (%.2f,%.2f)->(%.2f,%.2f), "
+             "iris_3 (%.2f,%.2f)->(%.2f,%.2f)",
+             chase_start_positions_[0].x, chase_start_positions_[0].y,
+             chase_swap_targets_[0].x, chase_swap_targets_[0].y,
+             chase_start_positions_[1].x, chase_start_positions_[1].y,
+             chase_swap_targets_[1].x, chase_swap_targets_[1].y,
+             chase_start_positions_[2].x, chase_start_positions_[2].y,
+             chase_swap_targets_[2].x, chase_swap_targets_[2].y,
+             chase_start_positions_[3].x, chase_start_positions_[3].y,
+             chase_swap_targets_[3].x, chase_swap_targets_[3].y);
   }
 
   double stageElapsed() const

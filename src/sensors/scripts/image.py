@@ -168,7 +168,7 @@ class DroneDetector:
 
             # 发布检测结果
             det_msg = ImageDetection()
-            det_msg.header.stamp = now
+            det_msg.header.stamp = msg.header.stamp
             det_msg.header.frame_id = msg.header.frame_id
             det_msg.count = len(dets)
             for cx, cy, bw, bh, conf in dets:

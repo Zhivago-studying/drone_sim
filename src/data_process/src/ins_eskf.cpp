@@ -240,7 +240,7 @@ private:
         {
             last_imu_time_ = msg->header.stamp;
             has_imu_init_ = true;
-            ROS_INFO("[INS ESKF] IMU initialized at t=%.3f", last_imu_time_.toSec());
+            ROS_DEBUG("[INS ESKF] IMU initialized at t=%.3f", last_imu_time_.toSec());
             return;
         }
 
@@ -304,8 +304,8 @@ private:
             height0_ = msg->distance;
             height_ref_z_ = p_.z();
             height_initialized_ = true;
-            ROS_INFO("[INS ESKF] height0 = %.3f m, height_ref_z = %.3f m",
-                     height0_, height_ref_z_);
+            ROS_DEBUG("[INS ESKF] height0 = %.3f m, height_ref_z = %.3f m",
+                      height0_, height_ref_z_);
             return;
         }
 
@@ -348,7 +348,7 @@ private:
         }
         else
         {
-            ROS_WARN_THROTTLE(2.0,
+            ROS_WARN_THROTTLE(10.0,
                               "[INS ESKF] optical flow invalid, height-only update: "
                               "flow=(%.3f, %.3f) gyro=(%.3f, %.3f) distance=%.3f quality=%u",
                               flow_x, flow_y, gyro_x, gyro_y, msg->distance, msg->quality);
@@ -487,7 +487,7 @@ private:
         double nis = (y.transpose() * S_inv * y).value();
         if (!std::isfinite(nis) || nis > max_innovation_sigma_ * max_innovation_sigma_)
         {
-            ROS_WARN_THROTTLE(2.0, "[INS ESKF] reject update: NIS=%.2f y=(%.2f, %.2f, %.2f)",
+            ROS_WARN_THROTTLE(10.0, "[INS ESKF] reject update: NIS=%.2f y=(%.2f, %.2f, %.2f)",
                               nis, y.x(), y.y(), y.z());
             return;
         }
@@ -549,7 +549,7 @@ private:
         double nis = y * y / S;
         if (!std::isfinite(nis) || nis > max_innovation_sigma_ * max_innovation_sigma_)
         {
-            ROS_WARN_THROTTLE(2.0, "[INS ESKF] reject height update: NIS=%.2f y=%.2f",
+            ROS_WARN_THROTTLE(10.0, "[INS ESKF] reject height update: NIS=%.2f y=%.2f",
                               nis, y);
             return;
         }
@@ -621,20 +621,20 @@ private:
 
         odom_pub_.publish(msg);
 
-        // RPY 调试输出 (每 5 秒)
+        // RPY debug output (every 5 seconds when ROS debug logging is enabled)
         static ros::Time last_rpy_print;
         if ((stamp - last_rpy_print).toSec() > 5.0)
         {
             last_rpy_print = stamp;
             Eigen::Vector3d rpy = quatToRPY(q_);
-            ROS_INFO("[INS ESKF] t=%.1f  RPY=(%.1f, %.1f, %.1f) deg  "
-                     "pz=%.2f  vb=(%.2f,%.2f)  ba=(%.3f,%.3f,%.3f)  bg=(%.4f,%.4f,%.4f)",
-                     stamp.toSec(), rpy.x(), rpy.y(), rpy.z(),
-                     p_.z(),
-                     (q_.toRotationMatrix().transpose() * v_).x(),
-                     (q_.toRotationMatrix().transpose() * v_).y(),
-                     ba_.x(), ba_.y(), ba_.z(),
-                     bg_.x(), bg_.y(), bg_.z());
+            ROS_DEBUG("[INS ESKF] t=%.1f  RPY=(%.1f, %.1f, %.1f) deg  "
+                      "pz=%.2f  vb=(%.2f,%.2f)  ba=(%.3f,%.3f,%.3f)  bg=(%.4f,%.4f,%.4f)",
+                      stamp.toSec(), rpy.x(), rpy.y(), rpy.z(),
+                      p_.z(),
+                      (q_.toRotationMatrix().transpose() * v_).x(),
+                      (q_.toRotationMatrix().transpose() * v_).y(),
+                      ba_.x(), ba_.y(), ba_.z(),
+                      bg_.x(), bg_.y(), bg_.z());
         }
     }
 

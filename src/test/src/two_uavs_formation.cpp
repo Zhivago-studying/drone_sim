@@ -145,8 +145,8 @@ public:
     while (ros::ok() && (!model_received_ || !statesConnected() || !localPosesReceived()))
     {
       ros::spinOnce();
-      ROS_INFO_THROTTLE(2.0, "[formation2] model_received=%d connected=%d local_pose=%d",
-                        model_received_, statesConnected(), localPosesReceived());
+      ROS_DEBUG_THROTTLE(2.0, "[formation2] model_received=%d connected=%d local_pose=%d",
+                         model_received_, statesConnected(), localPosesReceived());
       rate.sleep();
     }
 
@@ -293,8 +293,8 @@ private:
       publishCurrentPoseSetpoints();
       if (mode_clients_[i].call(srv) && srv.response.mode_sent)
       {
-        ROS_INFO("[formation2] %s OFFBOARD accepted attempt %d",
-                 kModelNames[i].c_str(), attempt);
+        ROS_DEBUG("[formation2] %s OFFBOARD accepted attempt %d",
+                  kModelNames[i].c_str(), attempt);
         streamFor(0.3);
         return true;
       }
@@ -314,7 +314,7 @@ private:
       publishCurrentPoseSetpoints();
       if (arm_clients_[i].call(srv) && srv.response.success)
       {
-        ROS_INFO("[formation2] %s armed attempt %d", kModelNames[i].c_str(), attempt);
+        ROS_DEBUG("[formation2] %s armed attempt %d", kModelNames[i].c_str(), attempt);
         streamFor(0.3);
         return true;
       }
@@ -378,7 +378,7 @@ private:
       if (states_[i].mode != "OFFBOARD")
       {
         if (requestOffboardOnce(i))
-          ROS_INFO("[formation2] %s OFFBOARD re-request accepted", kModelNames[i].c_str());
+          ROS_DEBUG("[formation2] %s OFFBOARD re-request accepted", kModelNames[i].c_str());
         else
           ROS_WARN("[formation2] %s OFFBOARD re-request failed", kModelNames[i].c_str());
       }
@@ -386,7 +386,7 @@ private:
       if (!states_[i].armed)
       {
         if (requestArmOnce(i))
-          ROS_INFO("[formation2] %s arm re-request accepted", kModelNames[i].c_str());
+          ROS_DEBUG("[formation2] %s arm re-request accepted", kModelNames[i].c_str());
         else
           ROS_WARN("[formation2] %s arm re-request failed", kModelNames[i].c_str());
       }
@@ -546,7 +546,7 @@ private:
                            ? 0.0
                            : (ros::Time::now() - takeoff_altitude_ready_since_).toSec();
 
-    ROS_INFO_THROTTLE(1.0,
+    ROS_DEBUG_THROTTLE(2.0,
                       "[formation2] TAKEOFF t=%.1f z=[%.2f %.2f] stable=%.1f",
                       elapsed, positions_[0].z, positions_[1].z, stable_time);
 
@@ -587,7 +587,7 @@ private:
   {
     double elapsed = stageElapsed();
     publishLocalHomePoseSetpoints();
-    ROS_INFO_THROTTLE(1.0, "[formation2] HOVER t=%.1f/3.0", elapsed);
+    ROS_DEBUG_THROTTLE(2.0, "[formation2] HOVER t=%.1f/3.0", elapsed);
     if (elapsed >= 3.0)
       enterStage(Stage::EXPAND_SHRINK);
   }
@@ -606,7 +606,7 @@ private:
     }
 
     publishVelocityToTargets(targets);
-    ROS_INFO_THROTTLE(1.0, "[formation2] EXPAND_SHRINK t=%.1f/10.0", elapsed);
+    ROS_DEBUG_THROTTLE(2.0, "[formation2] EXPAND_SHRINK t=%.1f/10.0", elapsed);
 
     if (elapsed >= 10.0 && allAtTargets(home_, 0.6) &&
         allAtAltitude(kFlightZ, kStageAltitudeTolerance))
@@ -629,7 +629,7 @@ private:
       const double angle = kRotateAngle * (1.0 - clamp((elapsed - 5.0) / 5.0, 0.0, 1.0));
       publishVelocityToTargets(rotateTargets(angle));
     }
-    ROS_INFO_THROTTLE(1.0, "[formation2] ROTATE t=%.1f/10.0", elapsed);
+    ROS_DEBUG_THROTTLE(2.0, "[formation2] ROTATE t=%.1f/10.0", elapsed);
 
     if (elapsed >= 10.0 && allAtTargets(rotate_start_positions_, 0.6) &&
         allAtAltitude(kFlightZ, kStageAltitudeTolerance))
@@ -651,7 +651,7 @@ private:
                                    landing_target_z_, home_yaws_[i]));
     }
 
-    ROS_INFO_THROTTLE(1.0,
+    ROS_DEBUG_THROTTLE(2.0,
                       "[formation2] LAND t=%.1f z=[%.2f %.2f]",
                       elapsed, positions_[0].z, positions_[1].z);
 
@@ -704,7 +704,7 @@ private:
       {
         if (arm_clients_[i].call(srv) && srv.response.success)
         {
-          ROS_INFO("[formation2] %s disarmed", kModelNames[i].c_str());
+          ROS_DEBUG("[formation2] %s disarmed", kModelNames[i].c_str());
           break;
         }
         ros::Duration(0.3).sleep();

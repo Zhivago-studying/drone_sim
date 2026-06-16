@@ -199,7 +199,7 @@ public:
       /* ========== Stage 1 – 起飞 ========== */
       case 1:
       {
-        ROS_INFO_THROTTLE(2.0,
+        ROS_DEBUG_THROTTLE(2.0,
           "[CTRL] STAGE1-TAKEOFF  t=%.1f  z=[%.1f,%.1f,%.1f,%.1f]",
           t, pos_[0].z, pos_[1].z, pos_[2].z, pos_[3].z);
 
@@ -223,7 +223,7 @@ public:
       /* ========== Stage 2 – 原地自旋 3圈 / 30s ========== */
       case 2:
       {
-        ROS_INFO_THROTTLE(2.0,
+        ROS_DEBUG_THROTTLE(2.0,
           "[CTRL] STAGE2-YAW  t=%.1f  rev=%.1f", t, t * YAW_RATE / (2*M_PI));
 
         // 速度控制：线速度 0，偏航角速度 0.6 rad/s
@@ -243,7 +243,7 @@ public:
       /* ========== Stage 3 – 正方形追逐编队 第一轮 ========== */
       case 3:
       {
-        ROS_INFO_THROTTLE(2.0,
+        ROS_DEBUG_THROTTLE(2.0,
           "[CTRL] STAGE3-FORM1  t=%.1f  chase", t);
 
         // 25s 追逐 + 2s 悬停
@@ -276,7 +276,7 @@ public:
         for (int i = 0; i < UAV_N; ++i) ctr = vadd(ctr, pos_[i]);
         ctr = vmul(ctr, 1.0 / UAV_N);
 
-        ROS_INFO_THROTTLE(2.0,
+        ROS_DEBUG_THROTTLE(2.0,
           "[CTRL] STAGE4-EXPAND  t=%.1f  ctr=(%.1f,%.1f)", t, ctr.x, ctr.y);
 
         // 5s 扩展 + 2s 悬停
@@ -302,7 +302,7 @@ public:
       /* ========== Stage 5 – 正方形追逐编队 第二轮 ========== */
       case 5:
       {
-        ROS_INFO_THROTTLE(2.0,
+        ROS_DEBUG_THROTTLE(2.0,
           "[CTRL] STAGE5-FORM2  t=%.1f  chase", t);
 
         if (t < 25.0) {
@@ -327,7 +327,7 @@ public:
       /* ========== Stage 6 – 降落 ========== */
       case 6:
       {
-        ROS_INFO_THROTTLE(2.0,
+        ROS_DEBUG_THROTTLE(2.0,
           "[CTRL] STAGE6-LAND  t=%.1f  z=[%.1f,%.1f,%.1f,%.1f]",
           t, pos_[0].z, pos_[1].z, pos_[2].z, pos_[3].z);
 
@@ -416,7 +416,7 @@ private:
     setInt ("COM_RC_OVERRIDE", 1);
     setInt ("COM_ARM_WO_GPS",  1);    // 允许无 GPS 解锁
     setInt ("NAV_RCL_ACT",     0);
-    ROS_INFO("  %s: params configured", UAV_NAME[i].c_str());
+    ROS_DEBUG("  %s: params configured", UAV_NAME[i].c_str());
   }
 
   /* ============================== OFFBOARD / ARM ============================== */
@@ -426,7 +426,7 @@ private:
     srv.request.custom_mode = "OFFBOARD";
     for (int n = 0; n < 5 && ros::ok(); ++n) {
       if (mode_cli_[i].call(srv) && srv.response.mode_sent) {
-        ROS_INFO("  %s: OFFBOARD OK (attempt %d)", UAV_NAME[i].c_str(), n+1);
+        ROS_DEBUG("  %s: OFFBOARD OK (attempt %d)", UAV_NAME[i].c_str(), n+1);
         return;
       }
       ros::Duration(0.3).sleep();
@@ -440,7 +440,7 @@ private:
     srv.request.value = true;
     for (int n = 0; n < 5 && ros::ok(); ++n) {
       if (arm_cli_[i].call(srv) && srv.response.success) {
-        ROS_INFO("  %s: ARM OK (attempt %d)", UAV_NAME[i].c_str(), n+1);
+        ROS_DEBUG("  %s: ARM OK (attempt %d)", UAV_NAME[i].c_str(), n+1);
         return;
       }
       ros::Duration(0.3).sleep();
@@ -454,7 +454,7 @@ private:
     srv.request.value = false;
     for (int n = 0; n < 5 && ros::ok(); ++n) {
       if (arm_cli_[i].call(srv) && srv.response.success) {
-        ROS_INFO("  %s: DISARM OK", UAV_NAME[i].c_str());
+        ROS_DEBUG("  %s: DISARM OK", UAV_NAME[i].c_str());
         return;
       }
       ros::Duration(0.3).sleep();
