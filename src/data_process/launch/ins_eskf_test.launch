@@ -13,5 +13,9 @@
   <node pkg="data_process" type="ins_eskf_test" name="ins_eskf_test" output="screen">
     <rosparam param="drone_names">["iris_0", "iris_1", "iris_2", "iris_3"]</rosparam>
     <param name="csv_dir" value="$(find data_process)/logs" />
+    <param name="reference_name" value="iris_0" />
+    <param name="initial_spacing" value="2.0" />
+    <param name="max_ekf_align_dt" value="0.12" />
+    <param name="max_model_align_dt" value="0.03" />
   </node>
 </launch>

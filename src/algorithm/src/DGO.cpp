@@ -1,11 +1,19 @@
 #include <ros/ros.h>
+#include <ros/package.h>
 #include <sensors/ComMsg.h>
 #include <data_process/CameraAngleMatch.h>
+#include <gazebo_msgs/ModelStates.h>
 #include <nav_msgs/Odometry.h>
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <deque>
+#include <fstream>
+#include <iomanip>
 #include <limits>
+#include <string>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <data_process/UwbProcessed.h>
 #include <Eigen/Dense>
 #include <geometry_msgs/Point.h>
@@ -39,6 +47,8 @@ public:
         dist_xy_error_.resize(uav_num_);
         dist_xy_error_valid_.resize(uav_num_, false);
         angle_err_.resize(uav_num_);
+        gt_positions_.resize(uav_num_);
+        has_gt_.resize(uav_num_, false);
         if (uav_num_ > static_cast<int>(uavs_.size()) || uav_id_ < 0 || uav_id_ >= uav_num_)
         {
             ROS_FATAL("[DGO] invalid uav_id=%d uav_num=%d, supported uav_num<=%zu",
@@ -81,12 +91,25 @@ public:
         std::string camera_topic = uavs_[uav_id_] + "/camera_angle_match";
         camera_sub_ = nh_.subscribe(camera_topic,10,&DGO::cameraCallback,this);
 
+        model_sub_ = nh_.subscribe("/gazebo/model_states", 10, &DGO::modelStatesCallback, this);
+
         dgo_pub_ = nh_.advertise<nav_msgs::Odometry>("dgo_estimate", 10);
+        initResidualCsv();
+        initCommDebugCsv();
 
         ROS_INFO("[DGO] ns=%s uav_id=%d uav_num=%d initial_spacing=%.2f max_sensor_age=%.2f",
                  ros::this_node::getNamespace().c_str(), uav_id_, uav_num_,
                  initial_spacing_, max_sensor_age_);
     }
+
+    ~DGO()
+    {
+        if (residual_csv_.is_open())
+            residual_csv_.close();
+        if (comm_debug_csv_.is_open())
+            comm_debug_csv_.close();
+    }
+
     void comCallback(const sensors::ComMsg::ConstPtr &msg, int uav_index)
     {
         com_positions_[uav_index] = msg->position;
@@ -262,6 +285,24 @@ public:
         }
     }
 
+    void modelStatesCallback(const gazebo_msgs::ModelStates::ConstPtr &msg)
+    {
+        for (int i = 0; i < uav_num_; ++i)
+        {
+            const std::string model_name = uavs_[i].substr(1);
+            auto it = std::find(msg->name.begin(), msg->name.end(), model_name);
+            if (it == msg->name.end())
+                continue;
+
+            const size_t idx = std::distance(msg->name.begin(), it);
+            if (idx >= msg->pose.size())
+                continue;
+
+            gt_positions_[i] = msg->pose[idx].position;
+            has_gt_[i] = true;
+        }
+    }
+
     void dgoTimerCallback(const ros::TimerEvent& event)
     {
         if(isReadyForDGO())
@@ -298,6 +339,8 @@ public:
         {
             CostBreakdown before_cb = computeCostBreakdown();
             double before_cost = before_cb.total();
+            writeResidualDebugCsv("pre", before_cb.ins);
+            writeCommDebugCsv();
 
             int niter = solver.minimize(functor, x, final_cost);
 
@@ -307,6 +350,7 @@ public:
             commitInsDelta();
 
             CostBreakdown after_cb = computeCostBreakdown();
+            writeResidualDebugCsv("post", after_cb.ins);
             publishDgoEstimate();
 
             ROS_INFO_THROTTLE(5.0,
@@ -352,6 +396,7 @@ private:
     ros::Subscriber ins_sub_;
     ros::Subscriber uwb_sub_;
     ros::Subscriber camera_sub_;
+    ros::Subscriber model_sub_;
     ros::Publisher dgo_pub_;
 
     std::vector<std::string> uavs_ = {"/iris_0","/iris_1","/iris_2","/iris_3"};
@@ -363,6 +408,17 @@ private:
     std::vector<bool> has_com_;
     std::vector<uint32_t> last_seq_;
     std::vector<ros::Time> data_timestamps_;   // 各无人机数据更新时间戳
+
+    // Gazebo GT 缓存, 用于 DGO residual 调试输出
+    std::vector<geometry_msgs::Point> gt_positions_;
+    std::vector<bool> has_gt_;
+
+    // residual debug CSV
+    std::string csv_dir_;
+    std::ofstream residual_csv_;
+
+    // communication vs GT debug CSV
+    std::ofstream comm_debug_csv_;
 
     // UWB 缓存
     std::deque<std::pair<ros::Time, data_process::UwbProcessed>> uwb_history_;
@@ -411,6 +467,316 @@ private:
     std::vector<bool> dist_xy_error_valid_;
     ros::Time sync_ref_time_;
     bool use_camera_in_cost_ = false;
+
+    struct CostBreakdown
+    {
+        double angle = 0.0;
+        double dist  = 0.0;
+        double xy    = 0.0;
+        double ins   = 0.0;
+        double total() const { return angle + dist + xy + ins; }
+    };
+
+    std::string defaultCsvDir() const
+    {
+        const std::string test_pkg = ros::package::getPath("test");
+        if (!test_pkg.empty())
+            return test_pkg + "/logs";
+        return "/tmp";
+    }
+
+    bool ensureDirectory(const std::string &dir) const
+    {
+        struct stat st;
+        if (stat(dir.c_str(), &st) == 0)
+            return S_ISDIR(st.st_mode);
+
+        if (mkdir(dir.c_str(), 0755) == 0)
+            return true;
+
+        return errno == EEXIST;
+    }
+
+    void initResidualCsv()
+    {
+        pnh_.param<std::string>("csv_dir", csv_dir_, defaultCsvDir());
+        if (!ensureDirectory(csv_dir_))
+        {
+            ROS_WARN("[iris_%d] cannot create residual debug csv dir: %s",
+                     uav_id_, csv_dir_.c_str());
+            return;
+        }
+
+        const std::string self_name = uavs_[uav_id_].substr(1);
+        const std::string path = csv_dir_ + "/" + self_name + "_dgo_residual_debug.csv";
+        residual_csv_.open(path.c_str(), std::ios::out | std::ios::trunc);
+        if (!residual_csv_.is_open())
+        {
+            ROS_WARN("[iris_%d] cannot open residual debug csv: %s",
+                     uav_id_, path.c_str());
+            return;
+        }
+
+        residual_csv_ << "stamp,phase,self_id,target_id,"
+                      << "uwb_dt,camera_dt,com_dt,"
+                      << "rel_gt_x,rel_gt_y,rel_gt_z,"
+                      << "rel_pred_x,rel_pred_y,rel_pred_z,"
+                      << "uwb_meas,uwb_pred,uwb_residual,"
+                      << "alpha_meas,alpha_pred,alpha_residual,"
+                      << "theta_meas,theta_pred,theta_residual,"
+                      << "xy_residual_x,xy_residual_y,"
+                      << "cost_uwb,cost_angle,cost_xy,cost_ins\n";
+        residual_csv_ << std::fixed << std::setprecision(9);
+        ROS_INFO("[iris_%d] residual debug CSV: %s", uav_id_, path.c_str());
+    }
+
+    void initCommDebugCsv()
+    {
+        if (csv_dir_.empty())
+            return;
+
+        const std::string self_name = uavs_[uav_id_].substr(1);
+        const std::string path = csv_dir_ + "/" + self_name + "_comm_debug.csv";
+        comm_debug_csv_.open(path.c_str(), std::ios::out | std::ios::trunc);
+        if (!comm_debug_csv_.is_open())
+        {
+            ROS_WARN("[iris_%d] cannot open comm debug csv: %s", uav_id_, path.c_str());
+            return;
+        }
+
+        comm_debug_csv_ << "stamp,self_id,target_id,"
+                        << "com_global_x,com_global_y,com_global_z,"
+                        << "gt_x,gt_y,gt_z,"
+                        << "com_error_x,com_error_y,com_error_z,"
+                        << "com_error_norm,"
+                        << "com_stamp_dt\n";
+        comm_debug_csv_ << std::fixed << std::setprecision(9);
+        ROS_INFO("[iris_%d] comm debug CSV: %s", uav_id_, path.c_str());
+    }
+
+    void writeCommDebugCsv()
+    {
+        if (!comm_debug_csv_.is_open())
+            return;
+
+        const double stamp = sync_ref_time_.isZero() ? ros::Time::now().toSec()
+                                                     : sync_ref_time_.toSec();
+
+        for (int target_id = 0; target_id < uav_num_; ++target_id)
+        {
+            if (target_id == uav_id_)
+                continue;
+
+            const double com_dt = (!data_timestamps_[target_id].isZero() && !sync_ref_time_.isZero())
+                                      ? (data_timestamps_[target_id] - sync_ref_time_).toSec()
+                                      : nanValue();
+
+            double com_error_x = nanValue();
+            double com_error_y = nanValue();
+            double com_error_z = nanValue();
+            double com_error_norm = nanValue();
+
+            if (has_gt_[uav_id_] && has_gt_[target_id])
+            {
+                const Eigen::Vector3d target_global(
+                    initial_offsets_[target_id].x() + Pc[target_id].x,
+                    initial_offsets_[target_id].y() + Pc[target_id].y,
+                    initial_offsets_[target_id].z() + Pc[target_id].z);
+                com_error_x = target_global.x() - gt_positions_[target_id].x;
+                com_error_y = target_global.y() - gt_positions_[target_id].y;
+                com_error_z = target_global.z() - gt_positions_[target_id].z;
+                com_error_norm = std::sqrt(com_error_x * com_error_x +
+                                          com_error_y * com_error_y +
+                                          com_error_z * com_error_z);
+            }
+
+            const Eigen::Vector3d target_global(
+                initial_offsets_[target_id].x() + Pc[target_id].x,
+                initial_offsets_[target_id].y() + Pc[target_id].y,
+                initial_offsets_[target_id].z() + Pc[target_id].z);
+            comm_debug_csv_ << stamp << ','
+                            << uav_id_ << ','
+                            << target_id << ','
+                            << target_global.x() << ','
+                            << target_global.y() << ','
+                            << target_global.z() << ','
+                            << (has_gt_[target_id] ? gt_positions_[target_id].x : nanValue()) << ','
+                            << (has_gt_[target_id] ? gt_positions_[target_id].y : nanValue()) << ','
+                            << (has_gt_[target_id] ? gt_positions_[target_id].z : nanValue()) << ','
+                            << com_error_x << ','
+                            << com_error_y << ','
+                            << com_error_z << ','
+                            << com_error_norm << ','
+                            << com_dt << '\n';
+        }
+        comm_debug_csv_.flush();
+    }
+
+    static double nanValue()
+    {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    static double sqr(double v)
+    {
+        return v * v;
+    }
+
+    int findUwbIndexForTarget(int target_id) const
+    {
+        const size_t n = std::min(best_uwb_.target_ids.size(), best_uwb_.distances.size());
+        for (size_t i = 0; i < n; ++i)
+        {
+            if (best_uwb_.target_ids[i] == target_id)
+                return static_cast<int>(i);
+        }
+        return -1;
+    }
+
+    int findCameraIndexForTarget(int target_id) const
+    {
+        if (!use_camera_in_cost_)
+            return -1;
+
+        const size_t n = std::min({static_cast<size_t>(best_camera_.count),
+                                   best_camera_.id.size(),
+                                   best_camera_.alpha.size(),
+                                   best_camera_.theta.size()});
+        for (size_t i = 0; i < n; ++i)
+        {
+            if (best_camera_.id[i] == target_id)
+                return static_cast<int>(i);
+        }
+        return -1;
+    }
+
+    void writeResidualDebugCsv(const std::string &phase, double cost_ins)
+    {
+        if (!residual_csv_.is_open())
+            return;
+
+        const double stamp = sync_ref_time_.isZero() ? ros::Time::now().toSec()
+                                                     : sync_ref_time_.toSec();
+        const double uwb_dt = (!best_uwb_stamp_.isZero() && !sync_ref_time_.isZero())
+                                  ? (best_uwb_stamp_ - sync_ref_time_).toSec()
+                                  : nanValue();
+        const double camera_dt = (use_camera_in_cost_ && !best_camera_stamp_.isZero() && !sync_ref_time_.isZero())
+                                     ? (best_camera_stamp_ - sync_ref_time_).toSec()
+                                     : nanValue();
+        for (int target_id = 0; target_id < uav_num_; ++target_id)
+        {
+            if (target_id == uav_id_)
+                continue;
+
+            const double com_dt = (!data_timestamps_[target_id].isZero() && !sync_ref_time_.isZero())
+                                      ? (data_timestamps_[target_id] - sync_ref_time_).toSec()
+                                      : nanValue();
+
+            Eigen::Vector3d rel_pred = relativeToTarget(target_id);
+            double rel_gt_x = nanValue();
+            double rel_gt_y = nanValue();
+            double rel_gt_z = nanValue();
+            if (has_gt_[uav_id_] && has_gt_[target_id])
+            {
+                rel_gt_x = gt_positions_[target_id].x - gt_positions_[uav_id_].x;
+                rel_gt_y = gt_positions_[target_id].y - gt_positions_[uav_id_].y;
+                rel_gt_z = gt_positions_[target_id].z - gt_positions_[uav_id_].z;
+            }
+
+            const double rel_norm = rel_pred.norm();
+
+            double uwb_meas = nanValue();
+            double uwb_pred = rel_norm;
+            double uwb_residual = nanValue();
+            double cost_uwb = nanValue();
+            const int uwb_idx = findUwbIndexForTarget(target_id);
+            if (uwb_idx >= 0)
+            {
+                uwb_meas = best_uwb_.distances[uwb_idx];
+                uwb_residual = uwb_meas - uwb_pred;
+                cost_uwb = sqr(uwb_residual / UWB_STDDEV);
+            }
+
+            double alpha_meas = nanValue();
+            double alpha_pred = nanValue();
+            double alpha_residual = nanValue();
+            double theta_meas = nanValue();
+            double theta_pred = nanValue();
+            double theta_residual = nanValue();
+            double cost_angle = nanValue();
+            const int camera_idx = findCameraIndexForTarget(target_id);
+            if (camera_idx >= 0 && rel_norm > 1e-6)
+            {
+                alpha_meas = best_camera_.alpha[camera_idx];
+                theta_meas = best_camera_.theta[camera_idx];
+                alpha_pred = std::atan2(rel_pred.y(), rel_pred.x());
+                theta_pred = std::asin(std::max(-1.0, std::min(1.0, rel_pred.z() / rel_norm)));
+                alpha_residual = normalizeAngle(alpha_meas - alpha_pred);
+                theta_residual = theta_meas - theta_pred;
+                cost_angle = sqr(alpha_residual / ANGLE_ALPHA_STDDEV) +
+                             sqr(theta_residual / ANGLE_THETA_STDDEV);
+            }
+
+            double xy_residual_x = nanValue();
+            double xy_residual_y = nanValue();
+            double cost_xy = nanValue();
+            if (uwb_idx >= 0 && camera_idx >= 0)
+            {
+                const double ca = std::cos(alpha_meas);
+                const double sa = std::sin(alpha_meas);
+                const double ct = std::cos(theta_meas);
+                const double st = std::sin(theta_meas);
+                const double proj = uwb_meas * ct;
+
+                xy_residual_x = proj * ca - rel_pred.x();
+                xy_residual_y = proj * sa - rel_pred.y();
+
+                const double sigma_x2 = std::max(
+                    sqr(ct * ca * UWB_STDDEV) +
+                    sqr(-uwb_meas * ct * sa * ANGLE_ALPHA_STDDEV) +
+                    sqr(-uwb_meas * st * ca * ANGLE_THETA_STDDEV),
+                    0.05 * 0.05);
+                const double sigma_y2 = std::max(
+                    sqr(ct * sa * UWB_STDDEV) +
+                    sqr(uwb_meas * ct * ca * ANGLE_ALPHA_STDDEV) +
+                    sqr(-uwb_meas * st * sa * ANGLE_THETA_STDDEV),
+                    0.05 * 0.05);
+
+                cost_xy = xy_residual_x * xy_residual_x / sigma_x2 +
+                          xy_residual_y * xy_residual_y / sigma_y2;
+            }
+
+            residual_csv_ << stamp << ','
+                          << phase << ','
+                          << uav_id_ << ','
+                          << target_id << ','
+                          << uwb_dt << ','
+                          << camera_dt << ','
+                          << com_dt << ','
+                          << rel_gt_x << ','
+                          << rel_gt_y << ','
+                          << rel_gt_z << ','
+                          << rel_pred.x() << ','
+                          << rel_pred.y() << ','
+                          << rel_pred.z() << ','
+                          << uwb_meas << ','
+                          << uwb_pred << ','
+                          << uwb_residual << ','
+                          << alpha_meas << ','
+                          << alpha_pred << ','
+                          << alpha_residual << ','
+                          << theta_meas << ','
+                          << theta_pred << ','
+                          << theta_residual << ','
+                          << xy_residual_x << ','
+                          << xy_residual_y << ','
+                          << cost_uwb << ','
+                          << cost_angle << ','
+                          << cost_xy << ','
+                          << cost_ins << '\n';
+        }
+        residual_csv_.flush();
+    }
 
     bool isReadyForDGO()
     {
@@ -761,15 +1127,6 @@ private:
 
         return penalty;
     }  
-
-    struct CostBreakdown
-    {
-        double angle = 0.0;
-        double dist  = 0.0;
-        double xy    = 0.0;
-        double ins   = 0.0;
-        double total() const { return angle + dist + xy + ins; }
-    };
 
     CostBreakdown computeCostBreakdown()
     {

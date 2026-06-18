@@ -202,6 +202,11 @@ target_link_libraries(ekf_dgo_test
 
 catkin_install_python(PROGRAMS
   scripts/angle_show.py
+  scripts/uwb_plot.py
+  scripts/dgo_plot.py
+  scripts/ekf_plot.py
+  scripts/ekf_relative_plot.py
+  scripts/dgo_ekf_plot.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

@@ -9,8 +9,10 @@ add_compile_options(-std=c++11)
 ## is used, also find other catkin packages
 find_package(catkin REQUIRED COMPONENTS
   data_process
+  gazebo_msgs
   nav_msgs
   roscpp
+  roslib
   sensors
   std_msgs
 )
@@ -110,7 +112,7 @@ find_package(Eigen3 REQUIRED)
 catkin_package(
 #  INCLUDE_DIRS include
 #  LIBRARIES algorithm
-#  CATKIN_DEPENDS data_process roscpp sensors std_msgs
+  CATKIN_DEPENDS data_process gazebo_msgs nav_msgs roscpp roslib sensors std_msgs
 #  DEPENDS system_lib
 )
 

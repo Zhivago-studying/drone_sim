@@ -245,6 +245,14 @@ private:
                 ++over_threshold_count_;
             }
 
+            const bool valid_meas = std::isfinite(alpha_meas) && std::isfinite(theta_meas);
+            if (!valid_meas)
+            {
+                ROS_WARN_THROTTLE(10.0,
+                                  "[ANGLE ERROR] %s det_idx=%zu alpha=%.4f theta=%.4f NaN, skip",
+                                  self_name_.c_str(), det_idx, alpha_meas, theta_meas);
+            }
+
             csv_ << stamp << ','
                  << self_name_ << ','
                  << det_idx << ','
@@ -257,6 +265,9 @@ private:
                  << theta_err << ','
                  << error << ','
                  << (within_threshold ? 1 : 0) << '\n';
+
+            if (!valid_meas)
+                continue;
 
             sum_alpha_sq_ += alpha_err * alpha_err;
             sum_theta_sq_ += theta_err * theta_err;

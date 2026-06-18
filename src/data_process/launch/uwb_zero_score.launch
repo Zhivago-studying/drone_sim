@@ -1,14 +1,46 @@
 <launch>
   <group ns="iris_0">
-    <node pkg="data_process" type="uwb_zero_score" name="uwb_zero_score" output="screen" />
+    <node pkg="data_process" type="uwb_zero_score" name="uwb_zero_score" output="screen">
+      <param name="uav_num" value="4" />
+      <param name="window_size" value="5" />
+      <param name="z_score_threshold" value="3.0" />
+      <param name="min_stddev" value="0.08" />
+      <param name="warmup_stddev_threshold" value="0.02" />
+      <param name="max_consecutive_rejects" value="5" />
+      <param name="publish_rate" value="25.0" />
+    </node>
   </group>
   <group ns="iris_1">
-    <node pkg="data_process" type="uwb_zero_score" name="uwb_zero_score" output="screen" />
+    <node pkg="data_process" type="uwb_zero_score" name="uwb_zero_score" output="screen">
+      <param name="uav_num" value="4" />
+      <param name="window_size" value="5" />
+      <param name="z_score_threshold" value="3.0" />
+      <param name="min_stddev" value="0.08" />
+      <param name="warmup_stddev_threshold" value="0.02" />
+      <param name="max_consecutive_rejects" value="5" />
+      <param name="publish_rate" value="25.0" />
+    </node>
   </group>
   <group ns="iris_2">
-    <node pkg="data_process" type="uwb_zero_score" name="uwb_zero_score" output="screen" />
+    <node pkg="data_process" type="uwb_zero_score" name="uwb_zero_score" output="screen">
+      <param name="uav_num" value="4" />
+      <param name="window_size" value="5" />
+      <param name="z_score_threshold" value="3.0" />
+      <param name="min_stddev" value="0.08" />
+      <param name="warmup_stddev_threshold" value="0.02" />
+      <param name="max_consecutive_rejects" value="5" />
+      <param name="publish_rate" value="25.0" />
+    </node>
   </group>
   <group ns="iris_3">
-    <node pkg="data_process" type="uwb_zero_score" name="uwb_zero_score" output="screen" />
+    <node pkg="data_process" type="uwb_zero_score" name="uwb_zero_score" output="screen">
+      <param name="uav_num" value="4" />
+      <param name="window_size" value="5" />
+      <param name="z_score_threshold" value="3.0" />
+      <param name="min_stddev" value="0.08" />
+      <param name="warmup_stddev_threshold" value="0.02" />
+      <param name="max_consecutive_rejects" value="5" />
+      <param name="publish_rate" value="25.0" />
+    </node>
   </group>
 </launch>

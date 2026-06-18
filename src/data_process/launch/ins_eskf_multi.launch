@@ -8,6 +8,7 @@
       <param name="min_flow_quality" value="100" />
       <param name="publish_pos_cov_scale" value="5.0" />
       <param name="publish_vel_cov_scale" value="1.0" />
+      <param name="flow_csv_dir" value="$(find data_process)/logs" />
     </node>
   </group>
   <group ns="iris_1">
@@ -17,6 +18,7 @@
       <param name="min_flow_quality" value="100" />
       <param name="publish_pos_cov_scale" value="5.0" />
       <param name="publish_vel_cov_scale" value="1.0" />
+      <param name="flow_csv_dir" value="$(find data_process)/logs" />
     </node>
   </group>
   <group ns="iris_2">
@@ -26,6 +28,7 @@
       <param name="min_flow_quality" value="100" />
       <param name="publish_pos_cov_scale" value="5.0" />
       <param name="publish_vel_cov_scale" value="1.0" />
+      <param name="flow_csv_dir" value="$(find data_process)/logs" />
     </node>
   </group>
   <group ns="iris_3">
@@ -35,6 +38,7 @@
       <param name="min_flow_quality" value="100" />
       <param name="publish_pos_cov_scale" value="5.0" />
       <param name="publish_vel_cov_scale" value="1.0" />
+      <param name="flow_csv_dir" value="$(find data_process)/logs" />
     </node>
   </group>
 </launch>

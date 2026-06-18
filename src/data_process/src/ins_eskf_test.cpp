@@ -2,7 +2,7 @@
  * INS ESKF 评估节点
  *
  * 订阅:
- *   /<drone>/mavros/local_position/odom  — 地面真值 (SITL, 带 header.stamp)
+ *   /gazebo/model_states                 — Gazebo 真实位姿/速度
  *   /<drone>/ins_estimate                 — EKF 估计值 (nav_msgs/Odometry)
  *
  * 计算指标:
@@ -23,6 +23,7 @@
  */
 
 #include <ros/ros.h>
+#include <gazebo_msgs/ModelStates.h>
 #include <nav_msgs/Odometry.h>
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
@@ -33,8 +34,10 @@
 #include <cstdio>
 #include <csignal>
 #include <cerrno>
+#include <deque>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -54,36 +57,44 @@ public:
 
         // 输出 CSV 目录
         nh_.param("csv_dir", csv_dir_, std::string("."));
+        nh_.param("reference_name", reference_name_, std::string("iris_0"));
+        nh_.param("initial_spacing", initial_spacing_, 2.0);
+        nh_.param("max_ekf_align_dt", max_ekf_align_dt_, 0.12);
+        nh_.param("max_model_align_dt", max_model_align_dt_, 0.03);
         ensureOutputDir();
 
         // 初始化数据缓冲区
         gt_data_.resize(num_drones_);
         est_data_.resize(num_drones_);
+        relative_samples_.resize(num_drones_);
+        relative_error_sum_.assign(num_drones_, 0.0);
+        relative_callbacks_.assign(num_drones_, 0);
+        relative_reject_reference_.assign(num_drones_, 0);
+        relative_reject_model_.assign(num_drones_, 0);
 
-        // 订阅每架无人机的真值 (odom) 和估计值 (ins_estimate)
-        // 使用 /mavros/local_position/odom 作为真值:
-        //   优点: 有 header.stamp 与 INS 时间戳直接对齐
-        //   在 SITL 下 odom 数据来自 Gazebo 真值
+        // 订阅每架无人机的估计值。真值统一来自 /gazebo/model_states。
+        // 注意: /mavros/local_position/odom 是 PX4 EKF2 估计值，不是真值。
         for (int i = 0; i < num_drones_; i++)
         {
-            std::string gt_topic  = "/" + drone_names_[i] + "/mavros/local_position/odom";
             std::string est_topic = "/" + drone_names_[i] + "/ins_estimate";
 
-            gt_subs_.push_back(
-                nh_.subscribe<nav_msgs::Odometry>(gt_topic, 2000,
-                    boost::bind(&InsEkfTest::gtCallback, this, _1, i)));
             ins_subs_.push_back(
                 nh_.subscribe<nav_msgs::Odometry>(est_topic, 2000,
                     boost::bind(&InsEkfTest::insCallback, this, _1, i)));
         }
 
+        model_states_sub_ = nh_.subscribe<gazebo_msgs::ModelStates>(
+            "/gazebo/model_states", 2000,
+            &InsEkfTest::modelStatesCallback, this);
+
         // 定时输出进度信息 (每 10 秒)
         print_timer_ = nh_.createTimer(ros::Duration(10.0),
                                         &InsEkfTest::printTimerCallback, this);
 
-        ROS_INFO("[INS TEST] 评估节点已启动，监控 %d 架无人机", num_drones_);
+        ROS_INFO("[INS TEST] 评估节点已启动，监控 %d 架无人机, relative reference=%s, max_ekf_align_dt=%.3f, max_model_align_dt=%.3f",
+                 num_drones_, reference_name_.c_str(), max_ekf_align_dt_, max_model_align_dt_);
         for (const auto& name : drone_names_)
-            ROS_INFO("  无人机: %s  (真值=<odom>)", name.c_str());
+            ROS_INFO("  无人机: %s  (真值=/gazebo/model_states)", name.c_str());
     }
 
     ~InsEkfTest()
@@ -118,20 +129,49 @@ private:
         Eigen::Matrix3d est_pos_cov, est_vel_cov;
     };
 
+    struct ModelStateSample
+    {
+        ros::Time t;
+        std::vector<Eigen::Vector3d> pos;
+    };
+
+    struct RelativeErrorSample
+    {
+        double timestamp = 0.0;
+        double ekf_dt = 0.0;
+        double model_dt = 0.0;
+        Eigen::Vector3d rel_gt{0.0, 0.0, 0.0};
+        Eigen::Vector3d rel_est{0.0, 0.0, 0.0};
+        Eigen::Vector3d err{0.0, 0.0, 0.0};
+        double error_norm = 0.0;
+        double cumulative_rmse = 0.0;
+    };
+
     // =====================================================================
     //  成员变量
     // =====================================================================
 
     ros::NodeHandle nh_;
-    std::vector<ros::Subscriber> gt_subs_;
     std::vector<ros::Subscriber> ins_subs_;
+    ros::Subscriber model_states_sub_;
     ros::Timer print_timer_;
 
     int num_drones_;
     std::vector<std::string> drone_names_;
     std::string csv_dir_;
+    std::string reference_name_;
+    double initial_spacing_ = 2.0;
+    double max_ekf_align_dt_ = 0.12;
+    double max_model_align_dt_ = 0.03;
     std::vector<TimeSeries> gt_data_;
     std::vector<TimeSeries> est_data_;
+    std::deque<ModelStateSample> model_states_cache_;
+    std::vector<std::vector<RelativeErrorSample>> relative_samples_;
+    std::vector<double> relative_error_sum_;
+    std::vector<size_t> relative_callbacks_;
+    std::vector<size_t> relative_reject_reference_;
+    std::vector<size_t> relative_reject_model_;
+    static constexpr size_t kMaxModelCacheSize = 5000;
 
     void ensureOutputDir() const
     {
@@ -151,33 +191,6 @@ private:
         {
             ROS_WARN("[INS TEST] failed to create csv_dir: %s", csv_dir_.c_str());
         }
-    }
-
-    // =====================================================================
-    //  地面真值回调 (odom) —— 使用 header.stamp 避免时间偏差
-    // =====================================================================
-
-    void gtCallback(const nav_msgs::Odometry::ConstPtr& msg, int drone_id)
-    {
-        TimeSeries& gt = gt_data_[drone_id];
-        Eigen::Vector3d pos(msg->pose.pose.position.x,
-                            msg->pose.pose.position.y,
-                            msg->pose.pose.position.z);
-        if (!gt.has_pos_origin)
-        {
-            gt.pos_origin = pos;
-            gt.has_pos_origin = true;
-        }
-
-        gt.t.push_back(msg->header.stamp);  // ✓ SITL 仿真时间
-        gt.pos.push_back(pos - gt.pos_origin);
-        gt.vel.emplace_back(msg->twist.twist.linear.x,
-                            msg->twist.twist.linear.y,
-                            msg->twist.twist.linear.z);
-        gt.quat.emplace_back(msg->pose.pose.orientation.w,
-                             msg->pose.pose.orientation.x,
-                             msg->pose.pose.orientation.y,
-                             msg->pose.pose.orientation.z);
     }
 
     // =====================================================================
@@ -211,6 +224,62 @@ private:
         }
         est.pos_cov.push_back(P_pos);
         est.vel_cov.push_back(P_vel);
+
+        processRelativeSample(drone_id, msg->header.stamp, est.pos.back());
+    }
+
+    void modelStatesCallback(const gazebo_msgs::ModelStates::ConstPtr& msg)
+    {
+        ModelStateSample sample;
+        sample.t = ros::Time::now();
+        sample.pos.resize(num_drones_, Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN()));
+
+        bool has_any = false;
+        for (int d = 0; d < num_drones_; ++d)
+        {
+            const int idx = findModelIndex(msg, drone_names_[d]);
+            if (idx < 0)
+                continue;
+
+            const Eigen::Vector3d pos(msg->pose[idx].position.x,
+                                      msg->pose[idx].position.y,
+                                      msg->pose[idx].position.z);
+            sample.pos[d] = pos;
+            has_any = true;
+
+            TimeSeries& gt = gt_data_[d];
+            if (!gt.has_pos_origin)
+            {
+                gt.pos_origin = pos;
+                gt.has_pos_origin = true;
+            }
+
+            gt.t.push_back(sample.t);
+            gt.pos.push_back(pos - gt.pos_origin);
+
+            if (static_cast<size_t>(idx) < msg->twist.size())
+            {
+                gt.vel.emplace_back(msg->twist[idx].linear.x,
+                                    msg->twist[idx].linear.y,
+                                    msg->twist[idx].linear.z);
+            }
+            else
+            {
+                gt.vel.emplace_back(Eigen::Vector3d::Zero());
+            }
+
+            gt.quat.emplace_back(msg->pose[idx].orientation.w,
+                                 msg->pose[idx].orientation.x,
+                                 msg->pose[idx].orientation.y,
+                                 msg->pose[idx].orientation.z);
+        }
+
+        if (!has_any)
+            return;
+
+        model_states_cache_.push_back(sample);
+        while (model_states_cache_.size() > kMaxModelCacheSize)
+            model_states_cache_.pop_front();
     }
 
     // =====================================================================
@@ -262,6 +331,166 @@ private:
             }
         }
         return aligned;
+    }
+
+    int findDroneIndex(const std::string& name) const
+    {
+        for (int i = 0; i < num_drones_; ++i)
+        {
+            if (drone_names_[i] == name)
+                return i;
+        }
+        return -1;
+    }
+
+    int findModelIndex(const gazebo_msgs::ModelStates::ConstPtr& msg,
+                       const std::string& name) const
+    {
+        for (size_t i = 0; i < msg->name.size(); ++i)
+        {
+            if (msg->name[i] == name)
+                return static_cast<int>(i);
+        }
+        return -1;
+    }
+
+    int parseUavIndex(const std::string& name) const
+    {
+        const std::string prefix = "iris_";
+        const size_t pos = name.find(prefix);
+        if (pos == std::string::npos)
+            return 0;
+
+        try
+        {
+            return std::stoi(name.substr(pos + prefix.size()));
+        }
+        catch (...)
+        {
+            return 0;
+        }
+    }
+
+    Eigen::Vector3d initialOffset(const std::string& name) const
+    {
+        const int idx = parseUavIndex(name);
+        return Eigen::Vector3d(((idx % 2) != (idx / 2)) ? initial_spacing_ : 0.0,
+                               (idx / 2) * initial_spacing_,
+                               0.0);
+    }
+
+    bool selectNearestEst(const TimeSeries& series,
+                          const ros::Time& ref_stamp,
+                          double max_dt,
+                          Eigen::Vector3d& out_pos,
+                          double& nearest_dt) const
+    {
+        if (ref_stamp.isZero() || series.t.empty())
+        {
+            nearest_dt = -1.0;
+            return false;
+        }
+
+        double best_dt = std::numeric_limits<double>::max();
+        size_t best_idx = 0;
+        for (size_t i = 0; i < series.t.size(); ++i)
+        {
+            const double dt = std::fabs((series.t[i] - ref_stamp).toSec());
+            if (dt < best_dt)
+            {
+                best_dt = dt;
+                best_idx = i;
+            }
+        }
+
+        nearest_dt = best_dt;
+        if (best_dt > max_dt)
+            return false;
+
+        out_pos = series.pos[best_idx];
+        return true;
+    }
+
+    bool selectNearestModelState(const ros::Time& ref_stamp,
+                                 ModelStateSample& out,
+                                 double& nearest_dt) const
+    {
+        if (ref_stamp.isZero() || model_states_cache_.empty())
+        {
+            nearest_dt = -1.0;
+            return false;
+        }
+
+        double best_dt = std::numeric_limits<double>::max();
+        size_t best_idx = 0;
+        for (size_t i = 0; i < model_states_cache_.size(); ++i)
+        {
+            const double dt = std::fabs((model_states_cache_[i].t - ref_stamp).toSec());
+            if (dt < best_dt)
+            {
+                best_dt = dt;
+                best_idx = i;
+            }
+        }
+
+        nearest_dt = best_dt;
+        if (best_dt > max_model_align_dt_)
+            return false;
+
+        out = model_states_cache_[best_idx];
+        return true;
+    }
+
+    void processRelativeSample(int self_idx,
+                               const ros::Time& stamp,
+                               const Eigen::Vector3d& self_est_pos)
+    {
+        const int reference_idx = findDroneIndex(reference_name_);
+        if (reference_idx < 0 || self_idx == reference_idx)
+            return;
+
+        if (self_idx < 0 || self_idx >= num_drones_)
+            return;
+
+        ++relative_callbacks_[self_idx];
+
+        const TimeSeries& ref_est = est_data_[reference_idx];
+        Eigen::Vector3d ref_est_pos;
+        double ekf_dt = -1.0;
+        if (!selectNearestEst(ref_est, stamp, max_ekf_align_dt_, ref_est_pos, ekf_dt))
+        {
+            ++relative_reject_reference_[self_idx];
+            return;
+        }
+
+        ModelStateSample model;
+        double model_dt = -1.0;
+        if (!selectNearestModelState(stamp, model, model_dt) ||
+            model.pos.size() <= static_cast<size_t>(std::max(self_idx, reference_idx)) ||
+            !model.pos[self_idx].allFinite() ||
+            !model.pos[reference_idx].allFinite())
+        {
+            ++relative_reject_model_[self_idx];
+            return;
+        }
+
+        const Eigen::Vector3d self_offset = initialOffset(drone_names_[self_idx]);
+        const Eigen::Vector3d ref_offset = initialOffset(drone_names_[reference_idx]);
+
+        RelativeErrorSample sample;
+        sample.timestamp = stamp.toSec();
+        sample.ekf_dt = ekf_dt;
+        sample.model_dt = model_dt;
+        sample.rel_gt = model.pos[self_idx] - model.pos[reference_idx];
+        sample.rel_est = (self_offset + self_est_pos) - (ref_offset + ref_est_pos);
+        sample.err = sample.rel_gt - sample.rel_est;
+        sample.error_norm = sample.err.norm();
+
+        relative_error_sum_[self_idx] += sample.err.squaredNorm();
+        sample.cumulative_rmse =
+            std::sqrt(relative_error_sum_[self_idx] /
+                      static_cast<double>(relative_samples_[self_idx].size() + 1));
+        relative_samples_[self_idx].push_back(sample);
     }
 
     // =====================================================================
@@ -346,7 +575,7 @@ private:
         for (const auto& s : data)
         {
             // 归一化四元数，防止数值误差导致 cos_angle 越界
-            // ins_estimate 与 MAVROS GT 均为 body -> ENU.
+            // ins_estimate 与 Gazebo model_states GT 均按 body -> world/ENU 比较.
             Eigen::Quaterniond qe = s.est_quat.normalized();
             Eigen::Quaterniond qg = s.gt_quat.normalized();
 
@@ -458,11 +687,55 @@ private:
         fprintf(stdout, "\n=============== INS 评估总结 ===============\n");
         for (int d = 0; d < num_drones_; d++)
         {
-            auto aligned = alignData(est_data_[d], gt_data_[d]);
+            auto aligned = alignData(est_data_[d], gt_data_[d], max_model_align_dt_);
             printMetricsFinal(drone_names_[d], aligned);
         }
+        printRelativeMetricsFinal();
         fprintf(stdout, "============================================\n");
         fflush(stdout);
+    }
+
+    void printRelativeMetricsFinal() const
+    {
+        const int reference_idx = findDroneIndex(reference_name_);
+        if (reference_idx < 0)
+        {
+            fprintf(stdout, "\n[INS TEST] relative EKF: reference %s not found\n",
+                    reference_name_.c_str());
+            return;
+        }
+
+        fprintf(stdout, "\n=============== EKF 相对 %s 评估 ===============\n",
+                reference_name_.c_str());
+        for (int d = 0; d < num_drones_; ++d)
+        {
+            if (d == reference_idx)
+                continue;
+
+            const auto& samples = relative_samples_[d];
+            if (samples.empty())
+            {
+                fprintf(stdout,
+                        "  %s relative to %s: no valid samples "
+                        "(callbacks=%zu, reject_reference=%zu, reject_model=%zu)\n",
+                        drone_names_[d].c_str(), reference_name_.c_str(),
+                        relative_callbacks_[d],
+                        relative_reject_reference_[d],
+                        relative_reject_model_[d]);
+                continue;
+            }
+
+            const double rmse = std::sqrt(relative_error_sum_[d] /
+                                          static_cast<double>(samples.size()));
+
+            fprintf(stdout, "  %s relative to %s\n",
+                    drone_names_[d].c_str(), reference_name_.c_str());
+            fprintf(stdout, "    samples=%zu, RMSE=%.4f m, callbacks=%zu, reject_reference=%zu, reject_model=%zu\n",
+                    samples.size(), rmse,
+                    relative_callbacks_[d],
+                    relative_reject_reference_[d],
+                    relative_reject_model_[d]);
+        }
     }
 
     void printTimerCallback(const ros::TimerEvent&)
@@ -565,12 +838,71 @@ private:
         ROS_DEBUG("[INS TEST] 速度误差已保存: %s (%zu 采样)", vel_file.c_str(), sorted.size());
     }
 
+    void writeRelativeCSV(const std::string& self_name,
+                          const std::string& reference_name,
+                          const std::vector<RelativeErrorSample>& samples) const
+    {
+        if (samples.empty())
+            return;
+
+        std::vector<RelativeErrorSample> sorted = samples;
+        std::sort(sorted.begin(), sorted.end(),
+                  [](const RelativeErrorSample& a, const RelativeErrorSample& b) {
+                      return a.timestamp < b.timestamp;
+                  });
+
+        const std::string path = csv_dir_ + "/" + self_name + "_relative_to_" +
+                                 reference_name + "_ekf_error.csv";
+        std::ofstream f(path);
+        if (!f.is_open())
+        {
+            ROS_WARN("[INS TEST] cannot write relative EKF error CSV: %s", path.c_str());
+            return;
+        }
+
+        f << std::fixed << std::setprecision(9);
+        f << "timestamp,ekf_dt,model_dt,"
+          << "x_gt,y_gt,z_gt,x_est,y_est,z_est,"
+          << "err_x,err_y,err_z,error_norm_m,cumulative_rmse_m\n";
+
+        double last_t = -1.0;
+        for (const auto& s : sorted)
+        {
+            if (s.timestamp == last_t)
+                continue;
+            last_t = s.timestamp;
+
+            f << s.timestamp << ","
+              << s.ekf_dt << "," << s.model_dt << ","
+              << s.rel_gt.x() << "," << s.rel_gt.y() << "," << s.rel_gt.z() << ","
+              << s.rel_est.x() << "," << s.rel_est.y() << "," << s.rel_est.z() << ","
+              << s.err.x() << "," << s.err.y() << "," << s.err.z() << ","
+              << s.error_norm << "," << s.cumulative_rmse << "\n";
+        }
+        f.close();
+
+        ROS_INFO("[INS TEST] saved relative EKF error CSV: %s (%zu samples)",
+                 path.c_str(), sorted.size());
+    }
+
     void writeAllCSV() const
     {
         for (int d = 0; d < num_drones_; d++)
         {
-            auto aligned = alignData(est_data_[d], gt_data_[d]);
+            auto aligned = alignData(est_data_[d], gt_data_[d], max_model_align_dt_);
             writeCSV(drone_names_[d], aligned);
+        }
+
+        const int reference_idx = findDroneIndex(reference_name_);
+        if (reference_idx < 0)
+            return;
+
+        for (int d = 0; d < num_drones_; ++d)
+        {
+            if (d == reference_idx)
+                continue;
+
+            writeRelativeCSV(drone_names_[d], reference_name_, relative_samples_[d]);
         }
     }
 };

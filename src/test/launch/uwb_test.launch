@@ -5,6 +5,6 @@
   <!-- UWB Zero-Score 异常值剔除 + 均值滤波 (4 架无人机) -->
   <include file="$(find data_process)/launch/uwb_zero_score.launch" />
 
-  <!-- 编队飞行控制器 -->
-  <node pkg="test" type="two_uavs_formation" name="two_uavs_formation" output="screen" />
+  <!-- 四机编队飞行控制器 -->
+  <node pkg="sensors" type="xtdrone_four_uav_formation" name="four_uavs_formation" output="screen" />
 </launch>

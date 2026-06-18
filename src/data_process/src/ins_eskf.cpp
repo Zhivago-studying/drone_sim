@@ -18,12 +18,9 @@
  *   MAVROS sensor_msgs/Imu 默认已经是 ROS base_link/FLU 约定.
  *   若接入的是 PX4 原生 FRD 数据，可通过 imu_frame=frd 或 imu_frame=auto 转换.
  *
- * 光流恢复 (mockup 用 FRD, 此处推导为 FLU 公式):
- *   mockup FRD: flow_x = w_x_frd - vy_frd/h
- *               flow_y = w_y_frd + vx_frd/h
- *   FRD→FLU: w_x_frd=w_x_flu, w_y_frd=-w_y_flu, vx_frd=vx_flu, vy_frd=-vy_flu
- *   代入解得:  vx_flu = h*(flow_y + w_y_flu)
- *              vy_flu = h*(flow_x - w_x_flu)
+ * 光流恢复 (MAVROS OpticalFlowRad, body FLU):
+ *   vx_flu = h*(flow_x - w_x_flu)
+ *   vy_flu = h*(flow_y + w_y_flu)
  */
 
 #include <ros/ros.h>
@@ -33,9 +30,14 @@
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
 #include <algorithm>
+#include <cerrno>
 #include <cctype>
 #include <cmath>
+#include <limits>
 #include <string>
+#include <fstream>
+#include <iomanip>
+#include <sys/stat.h>
 
 // =============================================================================
 //  辅助函数
@@ -88,6 +90,10 @@ public:
         nh_.param("max_innovation_sigma", max_innovation_sigma_, 6.0);
         nh_.param("publish_pos_cov_scale", publish_pos_cov_scale_, 5.0);
         nh_.param("publish_vel_cov_scale", publish_vel_cov_scale_, 1.0);
+        nh_.param("flow_csv_dir", flow_csv_dir_, std::string(""));
+
+        // 光流诊断 CSV
+        initFlowCsv();
 
         // --- IMU 噪声参数 (Gazebo SITL) ---
         sigma_acc_  = 0.05;
@@ -134,6 +140,12 @@ public:
         odom_pub_ = nh_.advertise<nav_msgs::Odometry>(ns_ + "/ins_estimate", 10);
     }
 
+    ~InsEkf()
+    {
+        if (flow_csv_.is_open())
+            flow_csv_.close();
+    }
+
 private:
     // =====================================================================
     //  Odom 初始化回调 — 获取初始姿态
@@ -164,6 +176,20 @@ private:
                      p0_.x(), p0_.y(), p0_.z(), v_.x(), v_.y(), v_.z(),
                      q_.w(), q_.x(), q_.y(), q_.z(), rpy.x(), rpy.y(), rpy.z());
         }
+
+        // 持续缓存 GT 用于光流诊断 CSV
+        gt_stamp_ = msg->header.stamp;
+        gt_pos_ = Eigen::Vector3d(msg->pose.pose.position.x,
+                                  msg->pose.pose.position.y,
+                                  msg->pose.pose.position.z);
+        gt_vel_ = Eigen::Vector3d(msg->twist.twist.linear.x,
+                                  msg->twist.twist.linear.y,
+                                  msg->twist.twist.linear.z);
+        gt_quat_ = Eigen::Quaterniond(msg->pose.pose.orientation.w,
+                                      msg->pose.pose.orientation.x,
+                                      msg->pose.pose.orientation.y,
+                                      msg->pose.pose.orientation.z);
+        has_gt_ = true;
     }
 
     bool resolveImuFrame(const Eigen::Vector3d &acc_msg,
@@ -332,11 +358,40 @@ private:
             gyro_y = -gyro_y;
         }
 
-        // 从光流恢复机体 FLU 速度 (推导见文件头注释):
-        //   vx_flu = h*(flow_y + omega_y_flu)
-        //   vy_flu = h*(flow_x - omega_x_flu)
-        double vx_body = msg->distance * (flow_y + gyro_y);
-        double vy_body = msg->distance * (flow_x - gyro_x);
+        // 从光流恢复机体 FLU 速度 (推导见文件头注释)。
+        double vx_body = msg->distance * (flow_x - gyro_x);
+        double vy_body = msg->distance * (flow_y + gyro_y);
+
+        // --- 光流诊断: EKF 预测 body 速度 ---
+        Eigen::Matrix3d R_body2world = q_.toRotationMatrix();
+        Eigen::Vector3d est_v_body = R_body2world.transpose() * v_;
+        double est_vx_body = est_v_body.x();
+        double est_vy_body = est_v_body.y();
+
+        // --- 光流诊断: GT body 速度 (最近帧对齐) ---
+        double flow_gt_dt = std::numeric_limits<double>::quiet_NaN();
+        double gt_vx_body = std::numeric_limits<double>::quiet_NaN();
+        double gt_vy_body = std::numeric_limits<double>::quiet_NaN();
+        if (has_gt_ && !gt_stamp_.isZero())
+        {
+            flow_gt_dt = (msg->header.stamp - gt_stamp_).toSec();
+            Eigen::Vector3d gt_v_body = gt_quat_.toRotationMatrix().transpose() * gt_vel_;
+            gt_vx_body = gt_v_body.x();
+            gt_vy_body = gt_v_body.y();
+        }
+
+        // --- 光流诊断: IMU 状态时间差 ---
+        double flow_imu_dt = has_imu_init_ && !last_imu_time_.isZero()
+                                 ? (msg->header.stamp - last_imu_time_).toSec()
+                                 : std::numeric_limits<double>::quiet_NaN();
+
+        // --- 写入光流诊断 CSV ---
+        writeFlowCsv(msg->header.stamp,
+                     flow_imu_dt, flow_gt_dt,
+                     flow_x, flow_y, gyro_x, gyro_y,
+                     vx_body, vy_body,
+                     gt_vx_body, gt_vy_body,
+                     est_vx_body, est_vy_body);
 
         // ToF 高度观测 (减去初始基准)
         double pz_meas = height_ref_z_ + msg->distance - height0_;
@@ -582,6 +637,75 @@ private:
     }
 
     // =====================================================================
+    //  光流诊断 CSV
+    // =====================================================================
+
+    void initFlowCsv()
+    {
+        if (flow_csv_dir_.empty())
+            return;
+
+        struct stat st;
+        if (stat(flow_csv_dir_.c_str(), &st) != 0)
+        {
+            if (mkdir(flow_csv_dir_.c_str(), 0755) != 0 && errno != EEXIST)
+            {
+                ROS_WARN("[INS ESKF] cannot create flow_csv_dir: %s", flow_csv_dir_.c_str());
+                return;
+            }
+        }
+
+        std::string drone_name = ns_;
+        if (!drone_name.empty() && drone_name[0] == '/')
+            drone_name = drone_name.substr(1);
+
+        std::string path = flow_csv_dir_ + "/" + drone_name + "_flow_diag.csv";
+        flow_csv_.open(path.c_str(), std::ios::out | std::ios::trunc);
+        if (!flow_csv_.is_open())
+        {
+            ROS_WARN("[INS ESKF] cannot open flow diagnostic CSV: %s", path.c_str());
+            return;
+        }
+
+        flow_csv_ << std::fixed << std::setprecision(9);
+        flow_csv_ << "stamp,"
+                  << "flow_imu_dt,flow_gt_dt,"
+                  << "flow_x,flow_y,"
+                  << "gyro_x,gyro_y,"
+                  << "vx_body_meas,vy_body_meas,"
+                  << "gt_vx_body,gt_vy_body,"
+                  << "est_vx_body,est_vy_body,"
+                  << "meas_minus_gt_vx,meas_minus_gt_vy,"
+                  << "meas_minus_est_vx,meas_minus_est_vy\n";
+        ROS_INFO("[INS ESKF] flow diagnostic CSV: %s", path.c_str());
+    }
+
+    void writeFlowCsv(const ros::Time &stamp,
+                      double flow_imu_dt, double flow_gt_dt,
+                      double flow_x, double flow_y,
+                      double gyro_x, double gyro_y,
+                      double vx_body, double vy_body,
+                      double gt_vx_body, double gt_vy_body,
+                      double est_vx_body, double est_vy_body)
+    {
+        if (!flow_csv_.is_open())
+            return;
+
+        flow_csv_ << stamp.toSec() << ','
+                  << flow_imu_dt << ',' << flow_gt_dt << ','
+                  << flow_x << ',' << flow_y << ','
+                  << gyro_x << ',' << gyro_y << ','
+                  << vx_body << ',' << vy_body << ','
+                  << gt_vx_body << ',' << gt_vy_body << ','
+                  << est_vx_body << ',' << est_vy_body << ','
+                  << (vx_body - gt_vx_body) << ','
+                  << (vy_body - gt_vy_body) << ','
+                  << (vx_body - est_vx_body) << ','
+                  << (vy_body - est_vy_body) << '\n';
+        flow_csv_.flush();
+    }
+
+    // =====================================================================
     //  发布 nav_msgs/Odometry
     // =====================================================================
 
@@ -652,6 +776,17 @@ private:
 
     // 重力
     Eigen::Vector3d g_;
+
+    // --- 光流诊断 CSV ---
+    std::string flow_csv_dir_;
+    std::ofstream flow_csv_;
+
+    // --- GT 缓存 (来自 /mavros/local_position/odom) ---
+    bool      has_gt_ = false;
+    ros::Time gt_stamp_;
+    Eigen::Vector3d    gt_pos_{0, 0, 0};
+    Eigen::Vector3d    gt_vel_{0, 0, 0};
+    Eigen::Quaterniond gt_quat_{1, 0, 0, 0};
 
     // --- 名义状态 (16维) ---
     Eigen::Vector3d    p_{0, 0, 0};

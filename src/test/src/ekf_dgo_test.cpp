@@ -23,8 +23,9 @@ public:
     {
         pnh_.param("self_name", self_name_, inferSelfName());
         pnh_.param("max_align_dt", max_align_dt_, 0.08);
-        pnh_.param("max_dgo_align_dt", max_dgo_align_dt_, max_align_dt_);
+        pnh_.param("max_dgo_align_dt", max_dgo_align_dt_, 0.12);
         pnh_.param("max_model_align_dt", max_model_align_dt_, 0.03);
+        pnh_.param("initial_spacing", initial_spacing_, 2.0);
         pnh_.param("csv_dir", csv_dir_, std::string("/home/scott/swarm_localization/src/test/logs"));
         reference_name_ = "iris_0";
         ensureOutputDir();
@@ -101,8 +102,9 @@ private:
     std::string reference_name_;
     std::string csv_dir_;
     double max_align_dt_ = 0.08;
-    double max_dgo_align_dt_ = 0.08;
+    double max_dgo_align_dt_ = 0.12;
     double max_model_align_dt_ = 0.03;
+    double initial_spacing_ = 2.0;
 
     struct DgoSample
     {
@@ -195,12 +197,14 @@ private:
         const double z_gt = model_pose_data_.self_pose.position.z -
                             model_pose_data_.reference_pose.position.z;
 
-        const double x_est = self_dgo_data_.pose.pose.position.x -
-                             reference_dgo_data_.pose.pose.position.x;
-        const double y_est = self_dgo_data_.pose.pose.position.y -
-                             reference_dgo_data_.pose.pose.position.y;
-        const double z_est = self_dgo_data_.pose.pose.position.z -
-                             reference_dgo_data_.pose.pose.position.z;
+        const geometry_msgs::Point self_offset = initialOffset(self_name_);
+        const geometry_msgs::Point reference_offset = initialOffset(reference_name_);
+        const double x_est = (self_offset.x + self_dgo_data_.pose.pose.position.x) -
+                             (reference_offset.x + reference_dgo_data_.pose.pose.position.x);
+        const double y_est = (self_offset.y + self_dgo_data_.pose.pose.position.y) -
+                             (reference_offset.y + reference_dgo_data_.pose.pose.position.y);
+        const double z_est = (self_offset.z + self_dgo_data_.pose.pose.position.z) -
+                             (reference_offset.z + reference_dgo_data_.pose.pose.position.z);
 
         const double err_x = x_gt - x_est;
         const double err_y = y_gt - y_est;
@@ -264,6 +268,33 @@ private:
                 return static_cast<int>(i);
         }
         return -1;
+    }
+
+    int parseUavIndex(const std::string& name) const
+    {
+        const std::string prefix = "iris_";
+        const size_t pos = name.find(prefix);
+        if (pos == std::string::npos)
+            return 0;
+
+        try
+        {
+            return std::stoi(name.substr(pos + prefix.size()));
+        }
+        catch (...)
+        {
+            return 0;
+        }
+    }
+
+    geometry_msgs::Point initialOffset(const std::string& name) const
+    {
+        const int idx = parseUavIndex(name);
+        geometry_msgs::Point p;
+        p.x = ((idx % 2) != (idx / 2)) ? initial_spacing_ : 0.0;
+        p.y = (idx / 2) * initial_spacing_;
+        p.z = 0.0;
+        return p;
     }
 
     bool selectNearestDgo(const std::deque<DgoSample>& cache,

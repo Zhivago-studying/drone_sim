@@ -5,7 +5,7 @@
 
   <arg name="csv_dir" default="$(find test)/logs" />
   <arg name="max_align_dt" default="0.08" />
-  <arg name="max_dgo_align_dt" default="$(arg max_align_dt)" />
+  <arg name="max_dgo_align_dt" default="0.12" />
   <arg name="max_model_align_dt" default="0.03" />
 
   <include file="$(find sensors)/launch/uwb.launch" />
@@ -31,6 +31,7 @@
       <param name="uav_num" value="4" />
       <param name="initial_spacing" value="2.0" />
       <param name="max_sensor_age" value="0.5" />
+      <param name="csv_dir" value="$(arg csv_dir)" />
     </node>
   </group>
 
@@ -54,6 +55,7 @@
       <param name="uav_num" value="4" />
       <param name="initial_spacing" value="2.0" />
       <param name="max_sensor_age" value="0.5" />
+      <param name="csv_dir" value="$(arg csv_dir)" />
     </node>
   </group>
 
@@ -77,6 +79,7 @@
       <param name="uav_num" value="4" />
       <param name="initial_spacing" value="2.0" />
       <param name="max_sensor_age" value="0.5" />
+      <param name="csv_dir" value="$(arg csv_dir)" />
     </node>
   </group>
 
@@ -100,6 +103,7 @@
       <param name="uav_num" value="4" />
       <param name="initial_spacing" value="2.0" />
       <param name="max_sensor_age" value="0.5" />
+      <param name="csv_dir" value="$(arg csv_dir)" />
     </node>
   </group>
 

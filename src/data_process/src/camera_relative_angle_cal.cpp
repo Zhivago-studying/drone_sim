@@ -71,8 +71,7 @@ public:
         if (!has_cam_info_ || fx_ <= 1e-6f || fy_ <= 1e-6f)
         {
             ROS_WARN_THROTTLE(10.0,
-                              "[camera_relative_angle_cal] no valid camera_info yet; publish NaN angles");
-            publishInvalidAngles(msg, n_det);
+                              "[camera_relative_angle_cal] no valid camera_info yet; skip frame");
             return;
         }
 
@@ -91,9 +90,8 @@ public:
         }
         catch (tf::TransformException &ex)
         {
-            ROS_WARN_THROTTLE(10.0, "TF lookup %s -> %s failed: %s",
+            ROS_WARN_THROTTLE(10.0, "[camera_relative_angle_cal] TF lookup %s -> %s failed: %s; skip frame",
                               camera_frame_.c_str(), world_frame_.c_str(), ex.what());
-            publishInvalidAngles(msg, n_det);
             return;
         }
 

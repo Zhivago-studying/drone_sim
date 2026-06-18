@@ -16,7 +16,8 @@
  * 发布:
  *   /iris_X/uwb  (sensors/UwbRange)
  *     - target_ids[]:   uint8 数组，目标无人机编号
- *     - distances[]:    float64 数组，对应距离 (米)，含 N(0, 0.08) 噪声
+ *     - distances[]:    float64 数组，对应距离 (米)，含高斯噪声
+ *     - gt_distances[]: float64 数组，对应 Gazebo 真值距离 (米)，仅用于仿真评估
  *     - 每帧发布本机到其他所有无人机的测距结果
  *
  * =========================== 关键参数 ===========================
@@ -36,18 +37,28 @@
 #include <sensors/UwbRange.h>
 #include <random>
 #include <cmath>
+#include <algorithm>
 #include <vector>
 #include <string>
 
 class UWB
 {
 public:
-    UWB() : gen_(rd_()), noise_dist_(0.0, 0.08)
+    UWB() : gen_(rd_())
     {
         // 从命名空间获取无人机ID，如 /iris_0 -> 0
         std::string ns = ros::this_node::getNamespace();
         iris_id_ = ns.back() - '0';
-        ROS_INFO("[UWB] ns=%s id=%d started", ns.c_str(), iris_id_);
+
+        ros::NodeHandle pnh("~");
+        pnh.param("uav_num", uav_num_, 4);
+        pnh.param("rate", rate_hz_, 25.0);
+        pnh.param("noise_stddev", noise_stddev_, 0.08);
+        pnh.param("min_distance", min_distance_, 0.0);
+        noise_dist_ = std::normal_distribution<double>(0.0, noise_stddev_);
+
+        ROS_INFO("[UWB] ns=%s id=%d rate=%.1fHz noise_stddev=%.3f",
+                 ns.c_str(), iris_id_, rate_hz_, noise_stddev_);
 
         // UWB话题发布者，话题名为 /iris_X/uwb
         std::string uwb_topic = ns + "/uwb";
@@ -57,12 +68,18 @@ public:
         gt_sub_ = nh_.subscribe("/gazebo/model_states", 10, &UWB::gtCallback, this);
 
         // 初始化位置缓存
-        drones_pos_.resize(4, {0.0, 0.0, 0.0});
+        drones_.clear();
+        drones_pos_.clear();
+        for (int i = 0; i < uav_num_; ++i)
+        {
+            drones_.push_back("iris_" + std::to_string(i));
+            drones_pos_.push_back({0.0, 0.0, 0.0});
+        }
     }
 
     void spin()
     {
-        ros::Rate rate(25.0);
+        ros::Rate rate(rate_hz_);
         while (ros::ok())
         {
             ros::spinOnce();
@@ -71,12 +88,15 @@ public:
             sensors::UwbRange msg;
             msg.header.stamp = ros::Time::now();
             msg.header.frame_id = "uwb_link";
-            for (int i = 0; i < 4; i++)
+            for (int i = 0; i < uav_num_; i++)
             {
                 if (i != iris_id_)
                 {
+                    const double gt_distance = calcGroundTruthDistance(iris_id_, i);
+                    const double noisy_distance = std::max(gt_distance + noise_dist_(gen_), min_distance_);
                     msg.target_ids.push_back(i);
-                    msg.distances.push_back(calcDistance(iris_id_, i));
+                    msg.distances.push_back(noisy_distance);
+                    msg.gt_distances.push_back(gt_distance);
                 }
             }
             uwb_pub_.publish(msg);
@@ -89,7 +109,7 @@ private:
     void gtCallback(const gazebo_msgs::ModelStates::ConstPtr& msg)
     {
         // 查找每架无人机的位置并缓存
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < uav_num_; i++)
         {
             for (size_t j = 0; j < msg->name.size(); j++)
             {
@@ -104,14 +124,12 @@ private:
         }
     }
 
-    double calcDistance(int i, int j)
+    double calcGroundTruthDistance(int i, int j) const
     {
         double dx = drones_pos_[i][0] - drones_pos_[j][0];
         double dy = drones_pos_[i][1] - drones_pos_[j][1];
         double dz = drones_pos_[i][2] - drones_pos_[j][2];
-        double d = std::sqrt(dx*dx + dy*dy + dz*dz);
-        d += noise_dist_(gen_);
-        return std::max(d, 0.0);
+        return std::sqrt(dx*dx + dy*dy + dz*dz);
     }
 
     ros::NodeHandle nh_;
@@ -119,8 +137,12 @@ private:
     ros::Publisher uwb_pub_;
 
     int iris_id_;
+    int uav_num_ = 4;
+    double rate_hz_ = 25.0;
+    double noise_stddev_ = 0.08;
+    double min_distance_ = 0.0;
     std::vector<std::vector<double>> drones_pos_;
-    const std::vector<std::string> drones_{"iris_0", "iris_1", "iris_2", "iris_3"};
+    std::vector<std::string> drones_;
 
     std::random_device rd_;
     std::mt19937 gen_;
