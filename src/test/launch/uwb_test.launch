@@ -1,10 +1,18 @@
 <launch>
-  <!-- UWB 测距模拟 (4 架无人机) -->
+  <arg name="run_id" default="" />
+
+  <arg name="uwb_csv_dir" value=""
+       unless="$(eval arg('run_id') != '')" />
+  <arg if="$(eval arg('run_id') != '')"
+       name="log_base"
+       value="$(eval env('HOME') + '/swarm_localization/logs/run_' + str(arg('run_id')))" />
+  <arg if="$(eval arg('run_id') != '')"
+       name="uwb_csv_dir"
+       value="$(arg log_base)/uwb_zero_score" />
+
   <include file="$(find sensors)/launch/uwb.launch" />
-
-  <!-- UWB Zero-Score 异常值剔除 + 均值滤波 (4 架无人机) -->
-  <include file="$(find data_process)/launch/uwb_zero_score.launch" />
-
-  <!-- 四机编队飞行控制器 -->
+  <include file="$(find data_process)/launch/uwb_zero_score.launch">
+    <arg name="csv_dir" value="$(arg uwb_csv_dir)" />
+  </include>
   <node pkg="sensors" type="xtdrone_four_uav_formation" name="four_uavs_formation" output="screen" />
 </launch>

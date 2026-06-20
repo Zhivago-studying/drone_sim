@@ -9,6 +9,7 @@
   <!-- iris_0 -->
   <group ns="iris_0">
     <node pkg="data_process" type="ins_eskf" name="ins_eskf" output="screen">
+      <rosparam command="load" file="$(find data_process)/config/ins_eskf_noise.yaml" />
       <param name="disable_attitude_update" value="true" />
       <param name="imu_frame" value="auto" />
       <param name="min_flow_quality" value="100" />
@@ -26,6 +27,7 @@
   <!-- iris_1 -->
   <group ns="iris_1">
     <node pkg="data_process" type="ins_eskf" name="ins_eskf" output="screen">
+      <rosparam command="load" file="$(find data_process)/config/ins_eskf_noise.yaml" />
       <param name="disable_attitude_update" value="true" />
       <param name="imu_frame" value="auto" />
       <param name="min_flow_quality" value="100" />
@@ -43,6 +45,7 @@
   <!-- iris_2 -->
   <group ns="iris_2">
     <node pkg="data_process" type="ins_eskf" name="ins_eskf" output="screen">
+      <rosparam command="load" file="$(find data_process)/config/ins_eskf_noise.yaml" />
       <param name="disable_attitude_update" value="true" />
       <param name="imu_frame" value="auto" />
       <param name="min_flow_quality" value="100" />
@@ -60,6 +63,7 @@
   <!-- iris_3 -->
   <group ns="iris_3">
     <node pkg="data_process" type="ins_eskf" name="ins_eskf" output="screen">
+      <rosparam command="load" file="$(find data_process)/config/ins_eskf_noise.yaml" />
       <param name="disable_attitude_update" value="true" />
       <param name="imu_frame" value="auto" />
       <param name="min_flow_quality" value="100" />

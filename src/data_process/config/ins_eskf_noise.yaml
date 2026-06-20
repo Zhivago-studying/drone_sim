@@ -1,0 +1,56 @@
+# Continuous-time IMU parameters. Keep these synchronized with
+# iris_uwb_flow_tof_frontcam.sdf.
+sigma_acc: 6.867e-4    # accelerometerNoiseDensity [m/s^2/sqrt(Hz)]
+sigma_gyro: 4.8869e-5  # gyroscopeNoiseDensity [rad/s/sqrt(Hz)]
+sigma_ba: 0.006        # accelerometerRandomWalk [m/s^2/s/sqrt(Hz)]
+sigma_bg: 3.8785e-5    # gyroscopeRandomWalk [rad/s^2/sqrt(Hz)]
+tau_ba: 300.0          # accelerometerBiasCorrelationTime [s]
+tau_bg: 1000.0         # gyroscopeBiasCorrelationTime [s]
+
+# Artificial optical-flow velocity error:
+# sigma_v^2 = (flow_relative_noise_std * |V_raw|)^2 + flow_base_noise_std^2
+# V_meas = V_raw + N(0, sigma_v^2)
+flow_relative_noise_std: 0.1
+flow_base_noise_std: 0.02
+
+# Artificial ToF range error: d_meas = d_raw + N(0, tof_noise_std^2)
+tof_noise_std: 0.05
+
+# Attitude update stabilization. PX4 odom supplies the initial attitude, so
+# its uncertainty should be expressed in degrees rather than the old 1 rad.
+initial_attitude_std_deg: 3.0
+
+# Body-frame planar velocity does not observe global yaw. After yaw projection,
+# its direct tilt sensitivity is proportional to body vertical velocity, so
+# horizontal speed alone must not enable attitude correction.
+attitude_update_min_vertical_speed: 0.20
+attitude_update_max_innovation: 0.15
+attitude_update_max_correction_deg: 0.15
+disable_yaw_bias_update: true
+
+# The SDF gyro-bias process has a steady-state sigma below 0.001 rad/s.
+# Larger values allow weak flow observability to create false tilt drift.
+initial_gyro_bias_std: 0.001
+
+# Robust update guards. Isolated large innovations are rejected. If prediction
+# remains outside the gate, a bounded velocity-only correction restores lock
+# without changing attitude or IMU biases.
+max_velocity_innovation: 0.75
+velocity_recovery_reject_count: 5
+max_recovery_velocity_correction: 0.10
+max_position_correction: 0.25
+max_velocity_correction: 0.40
+max_accel_bias_correction: 0.02
+max_gyro_bias_correction: 0.0002
+max_accel_bias_norm: 0.25
+max_gyro_bias_norm: 0.003
+
+# Published covariance inflation for unmodelled flow correlation and controller
+# transients. This does not alter the internal Kalman update; it calibrates the
+# reported covariance used by NEES and downstream consumers.
+publish_pos_cov_scale: 15.0
+publish_vel_cov_scale: 3.0
+
+# Non-negative values make artificial flow/ToF noise reproducible. Each UAV
+# receives an independent namespace-derived sequence.
+measurement_noise_seed: 1

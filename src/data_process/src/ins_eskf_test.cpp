@@ -37,6 +37,7 @@
 #include <deque>
 #include <fstream>
 #include <iomanip>
+#include <boost/filesystem.hpp>
 #include <limits>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -178,16 +179,9 @@ private:
         if (csv_dir_.empty() || csv_dir_ == ".")
             return;
 
-        struct stat st;
-        if (stat(csv_dir_.c_str(), &st) == 0)
-        {
-            if (S_ISDIR(st.st_mode))
-                return;
-            ROS_WARN("[INS TEST] csv_dir exists but is not a directory: %s", csv_dir_.c_str());
-            return;
-        }
-
-        if (mkdir(csv_dir_.c_str(), 0755) != 0 && errno != EEXIST)
+        boost::system::error_code ec;
+        boost::filesystem::create_directories(csv_dir_, ec);
+        if (ec)
         {
             ROS_WARN("[INS TEST] failed to create csv_dir: %s", csv_dir_.c_str());
         }

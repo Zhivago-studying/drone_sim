@@ -1,4 +1,10 @@
 <launch>
+  <!--
+    如果 csv_dir 非空, 传递给每个 uwb_zero_score 节点,
+    否则使用代码内默认 (test/logs/uwb_test)
+  -->
+  <arg name="csv_dir" default="" />
+
   <group ns="iris_0">
     <node pkg="data_process" type="uwb_zero_score" name="uwb_zero_score" output="screen">
       <param name="uav_num" value="4" />
@@ -8,6 +14,7 @@
       <param name="warmup_stddev_threshold" value="0.02" />
       <param name="max_consecutive_rejects" value="5" />
       <param name="publish_rate" value="25.0" />
+      <param name="csv_dir" value="$(arg csv_dir)" />
     </node>
   </group>
   <group ns="iris_1">
@@ -19,6 +26,7 @@
       <param name="warmup_stddev_threshold" value="0.02" />
       <param name="max_consecutive_rejects" value="5" />
       <param name="publish_rate" value="25.0" />
+      <param name="csv_dir" value="$(arg csv_dir)" />
     </node>
   </group>
   <group ns="iris_2">
@@ -30,6 +38,7 @@
       <param name="warmup_stddev_threshold" value="0.02" />
       <param name="max_consecutive_rejects" value="5" />
       <param name="publish_rate" value="25.0" />
+      <param name="csv_dir" value="$(arg csv_dir)" />
     </node>
   </group>
   <group ns="iris_3">
@@ -41,6 +50,7 @@
       <param name="warmup_stddev_threshold" value="0.02" />
       <param name="max_consecutive_rejects" value="5" />
       <param name="publish_rate" value="25.0" />
+      <param name="csv_dir" value="$(arg csv_dir)" />
     </node>
   </group>
 </launch>

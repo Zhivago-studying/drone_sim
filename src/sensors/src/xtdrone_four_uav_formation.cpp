@@ -57,12 +57,17 @@
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/TwistStamped.h>
 #include <mavros_msgs/CommandBool.h>
+#include <mavros_msgs/CommandLong.h>
+#include <mavros_msgs/ParamSet.h>
 #include <mavros_msgs/SetMode.h>
 #include <mavros_msgs/State.h>
+#include <std_msgs/UInt8.h>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
+#include <mutex>
 #include <string>
 
 struct Vec3
@@ -155,18 +160,30 @@ public:
     : nh_(),
       private_nh_("~"),
       model_received_(false),
+      cached_pose_active_(false),
+      cached_twist_active_(false),
       stage_(Stage::WAIT_FOR_GAZEBO),
       landing_target_z_(kFlightZ),
+      landing_start_z_(kFlightZ),
+      landing_descent_rate_(0.45),
+      force_disarm_delay_(2.0),
       takeoff_target_z_(kFlightZ),
       takeoff_altitude_ready_since_(0.0),
-      last_ready_retry_(0.0)
+      last_ready_retry_(0.0),
+      last_disarm_request_(0.0)
   {
     local_pose_received_.fill(false);
     local_yaws_.fill(0.0);
     home_yaws_.fill(0.0);
+    for (int i = 0; i < kUavCount; ++i)
+    {
+      armed_flags_[i].store(false);
+    }
 
     gazebo_sub_ = nh_.subscribe("/gazebo/model_states", 10,
                                 &XtdroneFormationController::gazeboCb, this);
+    stage_pub_ = nh_.advertise<std_msgs::UInt8>("/formation/stage", 1, true);
+    publishStage();
 
     for (int i = 0; i < kUavCount; ++i)
     {
@@ -183,23 +200,37 @@ public:
         boost::bind(&XtdroneFormationController::localPoseCb, this, _1, i));
       arm_clients_[i] = nh_.serviceClient<mavros_msgs::CommandBool>(
         mavros_ns + "/cmd/arming");
+      command_clients_[i] = nh_.serviceClient<mavros_msgs::CommandLong>(
+        mavros_ns + "/cmd/command");
       mode_clients_[i] = nh_.serviceClient<mavros_msgs::SetMode>(
         mavros_ns + "/set_mode");
+      param_clients_[i] = nh_.serviceClient<mavros_msgs::ParamSet>(
+        mavros_ns + "/param/set");
     }
 
     private_nh_.param("takeoff_timeout", takeoff_timeout_, 12.0);
     private_nh_.param("landing_timeout", landing_timeout_, 20.0);
     private_nh_.param("takeoff_climb_rate", takeoff_climb_rate_, 0.45);
+    private_nh_.param("landing_descent_rate", landing_descent_rate_, 0.45);
+    private_nh_.param("force_disarm_delay", force_disarm_delay_, 2.0);
+
+    // Service calls and DGO/vision load can delay the mission loop. Keep the
+    // last commanded setpoint on an independent callback thread so PX4 never
+    // sees an OFFBOARD stream gap longer than COM_OF_LOSS_T.
+    setpoint_timer_ = nh_.createTimer(
+      ros::Duration(1.0 / 30.0),
+      &XtdroneFormationController::setpointTimerCb, this);
   }
 
   void spin()
   {
+    ros::AsyncSpinner spinner(2);
+    spinner.start();
     ros::Rate rate(kRateHz);
 
     ROS_INFO("[formation] waiting for /gazebo/model_states, MAVROS states, and local poses");
     while (ros::ok() && (!model_received_ || !statesConnected() || !localPosesReceived()))
     {
-      ros::spinOnce();
       ROS_DEBUG_THROTTLE(2.0, "[formation] model_received=%d connected=%d local_pose=%d",
                          model_received_, statesConnected(), localPosesReceived());
       rate.sleep();
@@ -219,21 +250,15 @@ public:
     ROS_INFO("[formation] home positions captured, gazebo center=(%.2f, %.2f); local position setpoints use each UAV local XY and initial yaw",
              center_.x, center_.y);
 
+    configurePx4Params();
     primeSetpoints(rate);
 
     ROS_INFO("[formation] requesting OFFBOARD mode and arming");
-    for (int i = 0; i < kUavCount && ros::ok(); ++i)
-    {
-      setMode(i);
-    }
-    streamFor(0.5);
-
-    for (int i = 0; i < kUavCount && ros::ok(); ++i)
-    {
-      arm(i);
-    }
-
-    waitForAllReady(rate, 8.0);
+    // 统一连续循环: 每帧并行发布 4 车 setpoint (保持 OFFBOARD 不掉线),
+    // 周期性发送 set_mode/arm 并验证 /mavros/state 真正达成,直到 allReady() 或超时。
+    // 取代原先串行 setMode×4 → streamFor → arm×4 → waitForAllReady 的阻塞链,
+    // 后者在逐车处理时会让其它车 setpoint 断流 > COM_OF_LOSS_T,触发 OFFBOARD loss。
+    bringUpOffboard(rate, 10.0);
     if (!allReady())
     {
       ROS_WARN("[formation] not all vehicles report armed OFFBOARD yet; takeoff will keep retrying");
@@ -244,8 +269,6 @@ public:
 
     while (ros::ok())
     {
-      ros::spinOnce();
-
       switch (stage_)
       {
         case Stage::TAKEOFF:
@@ -267,9 +290,13 @@ public:
           runLand();
           break;
         case Stage::DONE:
-          disarmAll();
-          ROS_INFO("[formation] mission complete, landed and disarm requested");
-          return;
+          runDisarm();
+          if (allDisarmed())
+          {
+            ROS_INFO("[formation] mission complete, all UAVs landed and disarmed");
+            return;
+          }
+          break;
         case Stage::WAIT_FOR_GAZEBO:
           break;
       }
@@ -322,6 +349,7 @@ private:
   void stateCb(const mavros_msgs::State::ConstPtr& msg, int i)
   {
     states_[i] = *msg;
+    armed_flags_[i].store(msg->armed);
   }
 
   void localPoseCb(const geometry_msgs::PoseStamped::ConstPtr& msg, int i)
@@ -363,50 +391,6 @@ private:
     return twist;
   }
 
-  bool setMode(int i)
-  {
-    mavros_msgs::SetMode srv;
-    srv.request.custom_mode = "OFFBOARD";
-
-    for (int attempt = 1; attempt <= 5 && ros::ok(); ++attempt)
-    {
-      publishCurrentPoseSetpoints();
-      if (mode_clients_[i].call(srv) && srv.response.mode_sent)
-      {
-        ROS_DEBUG("[formation] %s OFFBOARD request accepted on attempt %d",
-                  kModelNames[i].c_str(), attempt);
-        streamFor(0.3);
-        return true;
-      }
-      ROS_WARN("[formation] %s OFFBOARD request failed on attempt %d",
-               kModelNames[i].c_str(), attempt);
-      streamFor(0.3);
-    }
-    return false;
-  }
-
-  bool arm(int i)
-  {
-    mavros_msgs::CommandBool srv;
-    srv.request.value = true;
-
-    for (int attempt = 1; attempt <= 5 && ros::ok(); ++attempt)
-    {
-      publishCurrentPoseSetpoints();
-      if (arm_clients_[i].call(srv) && srv.response.success)
-      {
-        ROS_DEBUG("[formation] %s armed on attempt %d",
-                  kModelNames[i].c_str(), attempt);
-        streamFor(0.3);
-        return true;
-      }
-      ROS_WARN("[formation] %s arm failed on attempt %d",
-               kModelNames[i].c_str(), attempt);
-      streamFor(0.3);
-    }
-    return false;
-  }
-
   bool requestOffboardOnce(int i)
   {
     mavros_msgs::SetMode srv;
@@ -421,6 +405,50 @@ private:
     return arm_clients_[i].call(srv) && srv.response.success;
   }
 
+  void configurePx4Params()
+  {
+    ROS_INFO("[formation] configuring PX4 OFFBOARD/failsafe parameters");
+    for (int i = 0; i < kUavCount; ++i)
+    {
+      setPx4RealParam(i, "COM_OF_LOSS_T", 5.0);
+      setPx4IntParam(i, "COM_OBL_RC_ACT", 0);
+      setPx4IntParam(i, "COM_RCL_EXCEPT", 4);
+      setPx4IntParam(i, "COM_RC_IN_MODE", 1);
+      setPx4IntParam(i, "COM_ARM_WO_GPS", 1);
+      setPx4IntParam(i, "NAV_RCL_ACT", 0);
+    }
+  }
+
+  bool setPx4IntParam(int i, const std::string& name, int value)
+  {
+    mavros_msgs::ParamSet srv;
+    srv.request.param_id = name;
+    srv.request.value.integer = value;
+    srv.request.value.real = 0.0;
+    if (param_clients_[i].call(srv) && srv.response.success)
+    {
+      return true;
+    }
+    ROS_WARN("[formation] %s failed to set PX4 param %s=%d",
+             kModelNames[i].c_str(), name.c_str(), value);
+    return false;
+  }
+
+  bool setPx4RealParam(int i, const std::string& name, double value)
+  {
+    mavros_msgs::ParamSet srv;
+    srv.request.param_id = name;
+    srv.request.value.integer = 0;
+    srv.request.value.real = value;
+    if (param_clients_[i].call(srv) && srv.response.success)
+    {
+      return true;
+    }
+    ROS_WARN("[formation] %s failed to set PX4 param %s=%.2f",
+             kModelNames[i].c_str(), name.c_str(), value);
+    return false;
+  }
+
   void waitForAllReady(ros::Rate& rate, double timeout)
   {
     const ros::Time start = ros::Time::now();
@@ -428,7 +456,6 @@ private:
 
     while (ros::ok() && !allReady() && (ros::Time::now() - start).toSec() < timeout)
     {
-      ros::spinOnce();
       publishCurrentPoseSetpoints();
 
       if ((ros::Time::now() - last_retry).toSec() > 1.0)
@@ -440,6 +467,47 @@ private:
             requestOffboardOnce(i);
           }
           if (states_[i].connected && !states_[i].armed)
+          {
+            requestArmOnce(i);
+          }
+        }
+        last_retry = ros::Time::now();
+        logVehicleStates();
+      }
+
+      rate.sleep();
+    }
+  }
+
+  // 起飞前统一连续循环: 每帧并行发布 4 车 setpoint, 周期性推进 set_mode/arm 并验证 state。
+  // 关键: setpoint 流始终连续 (20Hz), 不会因逐车服务调用而断流, 避免 PX4 offboard loss。
+  void bringUpOffboard(ros::Rate& rate, double timeout)
+  {
+    const ros::Time start = ros::Time::now();
+    ros::Time last_retry = ros::Time(0);
+
+    while (ros::ok() && !allReady() && (ros::Time::now() - start).toSec() < timeout)
+    {
+      // 每帧并行发布 4 车当前 setpoint, 保证 OFFBOARD 模式 setpoint 间隔 < COM_OF_LOSS_T
+      publishCurrentPoseSetpoints();
+
+      // 周期性 (0.5s) 发送 set_mode/arm, 非阻塞, 发完即返回
+      if ((ros::Time::now() - last_retry).toSec() > 0.5)
+      {
+        for (int i = 0; i < kUavCount; ++i)
+        {
+          if (!states_[i].connected)
+          {
+            continue;
+          }
+          // Strict two-phase handshake: the set_mode service response only
+          // means that PX4 accepted the request. Do not arm until a later
+          // /mavros/state callback confirms that OFFBOARD is actually active.
+          if (states_[i].mode != "OFFBOARD")
+          {
+            requestOffboardOnce(i);
+          }
+          else if (!states_[i].armed)
           {
             requestArmOnce(i);
           }
@@ -482,7 +550,10 @@ private:
         }
       }
 
-      if (!states_[i].armed)
+      // As above, never send ARM while PX4 still reports AUTO.RTL/POSCTL or
+      // another transitional mode. PX4 rejects that request with
+      // "Mode not suitable for takeoff" and may re-enter failsafe.
+      if (states_[i].mode == "OFFBOARD" && !states_[i].armed)
       {
         if (requestArmOnce(i))
         {
@@ -552,7 +623,6 @@ private:
     const ros::Time start = ros::Time::now();
     while (ros::ok() && (ros::Time::now() - start).toSec() < 2.0)
     {
-      ros::spinOnce();
       publishCurrentPoseSetpoints();
       rate.sleep();
     }
@@ -564,7 +634,6 @@ private:
     const ros::Time start = ros::Time::now();
     while (ros::ok() && (ros::Time::now() - start).toSec() < seconds)
     {
-      ros::spinOnce();
       publishCurrentPoseSetpoints();
       rate.sleep();
     }
@@ -572,28 +641,34 @@ private:
 
   void publishCurrentPoseSetpoints()
   {
+    std::array<geometry_msgs::PoseStamped, kUavCount> setpoints;
     for (int i = 0; i < kUavCount; ++i)
     {
-      pose_pubs_[i].publish(toPose(local_positions_[i].x, local_positions_[i].y,
-                                   local_positions_[i].z, local_yaws_[i]));
+      setpoints[i] = toPose(local_positions_[i].x, local_positions_[i].y,
+                            local_positions_[i].z, local_yaws_[i]);
     }
+    publishPoseSetpoints(setpoints);
   }
 
   void publishLocalHomePoseSetpoints()
   {
+    std::array<geometry_msgs::PoseStamped, kUavCount> setpoints;
     for (int i = 0; i < kUavCount; ++i)
     {
-      pose_pubs_[i].publish(toPose(local_home_[i].x, local_home_[i].y,
-                                   local_home_[i].z, home_yaws_[i]));
+      setpoints[i] = toPose(local_home_[i].x, local_home_[i].y,
+                            local_home_[i].z, home_yaws_[i]);
     }
+    publishPoseSetpoints(setpoints);
   }
 
   void publishLocalPoseTargets(const std::array<Vec3, kUavCount>& targets)
   {
+    std::array<geometry_msgs::PoseStamped, kUavCount> setpoints;
     for (int i = 0; i < kUavCount; ++i)
     {
-      pose_pubs_[i].publish(toPose(targets[i].x, targets[i].y, targets[i].z, home_yaws_[i]));
+      setpoints[i] = toPose(targets[i].x, targets[i].y, targets[i].z, home_yaws_[i]);
     }
+    publishPoseSetpoints(setpoints);
   }
 
   void publishWorldTargetsAsLocalPoseSetpoints(const std::array<Vec3, kUavCount>& world_targets)
@@ -610,6 +685,7 @@ private:
 
   void publishVelocityToTargets(const std::array<Vec3, kUavCount>& targets)
   {
+    std::array<geometry_msgs::TwistStamped, kUavCount> setpoints;
     for (int i = 0; i < kUavCount; ++i)
     {
       const Vec3 err = opSub(targets[i], positions_[i]);
@@ -621,15 +697,78 @@ private:
       }
 
       const double vz = clamp((kFlightZ - positions_[i].z) * 0.6, -0.4, 0.4);
-      twist_pubs_[i].publish(toTwist(v.x, v.y, vz));
+      setpoints[i] = toTwist(v.x, v.y, vz);
     }
+    publishTwistSetpoints(setpoints);
   }
 
   void publishZeroVelocity()
   {
+    std::array<geometry_msgs::TwistStamped, kUavCount> setpoints;
     for (int i = 0; i < kUavCount; ++i)
     {
-      twist_pubs_[i].publish(toTwist(0.0, 0.0, 0.0));
+      setpoints[i] = toTwist(0.0, 0.0, 0.0);
+    }
+    publishTwistSetpoints(setpoints);
+  }
+
+  void publishPoseSetpoints(
+      const std::array<geometry_msgs::PoseStamped, kUavCount>& setpoints)
+  {
+    {
+      std::lock_guard<std::mutex> lock(setpoint_mutex_);
+      cached_pose_setpoints_ = setpoints;
+      cached_pose_active_ = true;
+      cached_twist_active_ = false;
+    }
+    for (int i = 0; i < kUavCount; ++i)
+    {
+      pose_pubs_[i].publish(setpoints[i]);
+    }
+  }
+
+  void publishTwistSetpoints(
+      const std::array<geometry_msgs::TwistStamped, kUavCount>& setpoints)
+  {
+    {
+      std::lock_guard<std::mutex> lock(setpoint_mutex_);
+      cached_twist_setpoints_ = setpoints;
+      cached_pose_active_ = false;
+      cached_twist_active_ = true;
+    }
+    for (int i = 0; i < kUavCount; ++i)
+    {
+      twist_pubs_[i].publish(setpoints[i]);
+    }
+  }
+
+  void setpointTimerCb(const ros::TimerEvent&)
+  {
+    std::array<geometry_msgs::PoseStamped, kUavCount> pose_setpoints;
+    std::array<geometry_msgs::TwistStamped, kUavCount> twist_setpoints;
+    bool publish_pose = false;
+    bool publish_twist = false;
+    {
+      std::lock_guard<std::mutex> lock(setpoint_mutex_);
+      publish_pose = cached_pose_active_;
+      publish_twist = cached_twist_active_;
+      pose_setpoints = cached_pose_setpoints_;
+      twist_setpoints = cached_twist_setpoints_;
+    }
+
+    const ros::Time stamp = ros::Time::now();
+    for (int i = 0; i < kUavCount; ++i)
+    {
+      if (publish_pose)
+      {
+        pose_setpoints[i].header.stamp = stamp;
+        pose_pubs_[i].publish(pose_setpoints[i]);
+      }
+      else if (publish_twist)
+      {
+        twist_setpoints[i].header.stamp = stamp;
+        twist_pubs_[i].publish(twist_setpoints[i]);
+      }
     }
   }
 
@@ -637,6 +776,7 @@ private:
   {
     stage_ = next;
     stage_start_ = ros::Time::now();
+    publishStage();
 
     switch (stage_)
     {
@@ -665,12 +805,29 @@ private:
         ROS_INFO("[formation] Stage 4 Chase/Restore: cyclic position swap and return");
         break;
       case Stage::LAND:
-        landing_target_z_ = kFlightZ;
-        ROS_INFO("[formation] Landing: descending gradually");
+        landing_start_z_ = local_positions_[0].z;
+        for (int i = 1; i < kUavCount; ++i)
+        {
+          landing_start_z_ = std::max(landing_start_z_, local_positions_[i].z);
+        }
+        landing_target_z_ = landing_start_z_;
+        ROS_INFO("[formation] Landing: descend from %.2f m at %.2f m/s",
+                 landing_start_z_, landing_descent_rate_);
+        break;
+      case Stage::DONE:
+        last_disarm_request_ = ros::Time(0);
+        ROS_INFO("[formation] ground altitude reached; holding landing setpoints until all UAVs disarm");
         break;
       default:
         break;
     }
+  }
+
+  void publishStage()
+  {
+    std_msgs::UInt8 msg;
+    msg.data = static_cast<uint8_t>(stage_);
+    stage_pub_.publish(msg);
   }
 
   void runTakeoff()
@@ -831,14 +988,17 @@ private:
   void runLand()
   {
     const double elapsed = stageElapsed();
-    const double dt = 1.0 / kRateHz;
-    landing_target_z_ = std::max(0.0, landing_target_z_ - 0.35 * dt);
+    landing_target_z_ =
+      std::max(0.0, landing_start_z_ - landing_descent_rate_ * elapsed);
 
+    std::array<Vec3, kUavCount> targets = local_home_;
     for (int i = 0; i < kUavCount; ++i)
     {
-      pose_pubs_[i].publish(toPose(local_home_[i].x, local_home_[i].y,
-                                   landing_target_z_, home_yaws_[i]));
+      targets[i].z = landing_target_z_;
     }
+    // 通过统一缓存接口发布，明确关闭上一阶段的 twist setpoint。
+    // 否则30Hz缓存定时器会继续发布旧速度命令，与LAND位置命令冲突。
+    publishLocalPoseTargets(targets);
 
     ROS_DEBUG_THROTTLE(2.0,
                       "[formation] LAND t=%.1f target_z=%.2f z=[%.2f %.2f %.2f %.2f]",
@@ -855,6 +1015,46 @@ private:
       }
       enterStage(Stage::DONE);
     }
+  }
+
+  void runDisarm()
+  {
+    std::array<Vec3, kUavCount> targets = local_home_;
+    for (int i = 0; i < kUavCount; ++i)
+    {
+      targets[i].z = 0.0;
+    }
+    // Keep the OFFBOARD pose stream alive while PX4's landed detector settles.
+    // Exiting immediately after the first disarm request can trigger
+    // COM_OF_LOSS_T and make failsafe, rather than this controller, finish
+    // the landing.
+    publishLocalPoseTargets(targets);
+
+    if (allDisarmed())
+    {
+      return;
+    }
+
+    const ros::Time now = ros::Time::now();
+    const double request_period = stageElapsed() < force_disarm_delay_ ? 0.5 : 1.0;
+    if (last_disarm_request_.isZero() ||
+        (now - last_disarm_request_).toSec() >= request_period)
+    {
+      if (stageElapsed() < force_disarm_delay_)
+      {
+        requestDisarmOnce();
+      }
+      else if (allLanded())
+      {
+        requestForceDisarmOnce();
+      }
+      last_disarm_request_ = now;
+    }
+
+    ROS_INFO_THROTTLE(2.0,
+                      "[formation] waiting for PX4 landed detection/disarm, armed=[%d %d %d %d]",
+                      armed_flags_[0].load(), armed_flags_[1].load(),
+                      armed_flags_[2].load(), armed_flags_[3].load());
   }
 
   bool allAtAltitude(double z, double tolerance) const
@@ -892,6 +1092,71 @@ private:
       }
     }
     return true;
+  }
+
+  bool allDisarmed() const
+  {
+    for (int i = 0; i < kUavCount; ++i)
+    {
+      if (armed_flags_[i].load())
+      {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void requestDisarmOnce()
+  {
+    for (int i = 0; i < kUavCount; ++i)
+    {
+      if (!armed_flags_[i].load())
+      {
+        continue;
+      }
+
+      mavros_msgs::CommandBool srv;
+      srv.request.value = false;
+      if (!arm_clients_[i].call(srv))
+      {
+        ROS_WARN_THROTTLE(2.0, "[formation] %s disarm service call failed",
+                          kModelNames[i].c_str());
+      }
+    }
+  }
+
+  void requestForceDisarmOnce()
+  {
+    for (int i = 0; i < kUavCount; ++i)
+    {
+      if (!armed_flags_[i].load())
+      {
+        continue;
+      }
+
+      mavros_msgs::CommandLong srv;
+      srv.request.broadcast = false;
+      srv.request.command = 400;  // MAV_CMD_COMPONENT_ARM_DISARM
+      srv.request.confirmation = 0;
+      srv.request.param1 = 0.0;
+      srv.request.param2 = 21196.0;  // PX4 force-disarm magic value
+      srv.request.param3 = 0.0;
+      srv.request.param4 = 0.0;
+      srv.request.param5 = 0.0;
+      srv.request.param6 = 0.0;
+      srv.request.param7 = 0.0;
+
+      if (!command_clients_[i].call(srv) || !srv.response.success)
+      {
+        ROS_WARN_THROTTLE(2.0, "[formation] %s force-disarm command failed",
+                          kModelNames[i].c_str());
+      }
+      else
+      {
+        ROS_WARN("[formation] %s force-disarm accepted after %.1f s on ground",
+                 kModelNames[i].c_str(), stageElapsed());
+      }
+    }
   }
 
   void disarmAll()
@@ -988,12 +1253,16 @@ private:
   ros::NodeHandle nh_;
   ros::NodeHandle private_nh_;
   ros::Subscriber gazebo_sub_;
+  ros::Publisher stage_pub_;
   std::array<ros::Subscriber, kUavCount> state_subs_;
   std::array<ros::Subscriber, kUavCount> local_pose_subs_;
   std::array<ros::Publisher, kUavCount> pose_pubs_;
   std::array<ros::Publisher, kUavCount> twist_pubs_;
   std::array<ros::ServiceClient, kUavCount> arm_clients_;
+  std::array<ros::ServiceClient, kUavCount> command_clients_;
   std::array<ros::ServiceClient, kUavCount> mode_clients_;
+  std::array<ros::ServiceClient, kUavCount> param_clients_;
+  ros::Timer setpoint_timer_;
 
   std::array<Vec3, kUavCount> positions_;
   std::array<Vec3, kUavCount> local_positions_;
@@ -1004,17 +1273,27 @@ private:
   std::array<Vec3, kUavCount> chase_start_positions_;
   std::array<Vec3, kUavCount> chase_swap_targets_;
   std::array<mavros_msgs::State, kUavCount> states_;
+  std::array<std::atomic<bool>, kUavCount> armed_flags_;
   std::array<double, kUavCount> local_yaws_;
   std::array<double, kUavCount> home_yaws_;
   std::array<bool, kUavCount> local_pose_received_;
+  std::array<geometry_msgs::PoseStamped, kUavCount> cached_pose_setpoints_;
+  std::array<geometry_msgs::TwistStamped, kUavCount> cached_twist_setpoints_;
+  std::mutex setpoint_mutex_;
 
   bool model_received_;
+  bool cached_pose_active_;
+  bool cached_twist_active_;
   Stage stage_;
   ros::Time stage_start_;
   ros::Time takeoff_altitude_ready_since_;
   ros::Time last_ready_retry_;
+  ros::Time last_disarm_request_;
   Vec3 center_;
   double landing_target_z_;
+  double landing_start_z_;
+  double landing_descent_rate_;
+  double force_disarm_delay_;
   double takeoff_target_z_;
   double takeoff_start_z_;
   double takeoff_climb_rate_;

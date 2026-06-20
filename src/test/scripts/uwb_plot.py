@@ -11,6 +11,7 @@ raw vs processed and reports raw-filtered difference, not true measurement error
 """
 
 import argparse
+import glob
 import os
 from typing import Iterable, Optional, Tuple
 
@@ -20,10 +21,28 @@ import pandas as pd
 
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-DEFAULT_LOG_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "logs", "uwb_test"))
-DEFAULT_OUT_DIR = os.path.join(DEFAULT_LOG_DIR, "figures")
+OLD_DEFAULT_LOG_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "logs", "uwb_test"))
+RUN_LOG_BASE = os.path.expanduser("~/swarm_localization/logs")
 DEFAULT_DRONES = ["iris_0", "iris_1", "iris_2", "iris_3"]
 COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
+
+
+def resolve_log_dir(run_id, category, old_default):
+    if not run_id or run_id == "auto":
+        run_dirs = sorted(
+            glob.glob(os.path.join(RUN_LOG_BASE, "run_*")),
+            key=lambda d: int(os.path.basename(d).split("_")[1]))
+        if run_dirs:
+            path = os.path.join(run_dirs[-1], category)
+            if os.path.isdir(path):
+                return path
+        return old_default
+    rid = str(run_id).replace("run_", "")
+    path = os.path.join(RUN_LOG_BASE, f"run_{rid}", category)
+    if os.path.isdir(path):
+        return path
+    print(f"  Warning: {path} not found, falling back to {old_default}")
+    return old_default
 
 
 def load_data(log_dir: str, drone_name: str) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
@@ -251,14 +270,22 @@ def save_figure(fig: plt.Figure, out_dir: str, filename: str, show: bool) -> Non
 def main() -> None:
     parser = argparse.ArgumentParser(description="Plot UWB raw, processed, and Gazebo truth curves.")
     parser.add_argument("--drone", type=str, default=None, help="Drone name, e.g. iris_0. Omit for all.")
-    parser.add_argument("--log-dir", type=str, default=DEFAULT_LOG_DIR, help="Directory containing UWB CSV logs.")
+    parser.add_argument("--run-id", type=str, default="auto",
+                        help="Run ID (number or 'run_N'; 'auto'=latest; empty=old defaults)")
+    parser.add_argument("--log-dir", type=str, default=None, help="Override log directory")
     parser.add_argument("--out-dir", type=str, default=None, help="Output directory for figures.")
     parser.add_argument("--no-show", action="store_true", help="Save figures only, do not display windows.")
     parser.add_argument("--summary-only", action="store_true", help="Print statistics without generating figures.")
     args = parser.parse_args()
 
-    log_dir = os.path.abspath(args.log_dir)
-    out_dir = os.path.abspath(args.out_dir) if args.out_dir else os.path.join(log_dir, "figures")
+    log_dir = os.path.abspath(args.log_dir) if args.log_dir else \
+              resolve_log_dir(args.run_id, "uwb_zero_score", OLD_DEFAULT_LOG_DIR)
+    _tag = args.run_id if args.run_id and args.run_id != "auto" \
+           else os.path.basename(os.path.dirname(log_dir))
+    run_tag = f"run_{_tag}" if _tag.isdigit() else _tag
+    fig_base = os.path.join(os.path.expanduser("~/swarm_localization/logs/figures"), run_tag)
+    out_dir = os.path.abspath(args.out_dir) if args.out_dir else \
+              os.path.join(fig_base, "uwb_plot")
     drones = [args.drone] if args.drone else DEFAULT_DRONES
 
     for drone in drones:

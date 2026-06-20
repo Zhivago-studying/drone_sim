@@ -3,6 +3,23 @@
   <arg name="max_align_dt" default="0.08" />
   <arg name="max_dgo_align_dt" default="0.12" />
   <arg name="max_model_align_dt" default="0.03" />
+  <arg name="oracle_mode" default="false" />
+  <arg name="max_communication_age" default="0.5" />
+  <arg name="max_communication_skew" default="0.2" />
+  <arg name="max_gt_age" default="0.1" />
+  <arg name="max_extrapolation_dt" default="0.2" />
+  <arg name="ins_prior_stddev_xy" default="0.25" />
+  <arg name="ins_prior_stddev_z" default="0.10" />
+  <arg name="max_dgo_correction_xy" default="0.20" />
+  <arg name="max_dgo_correction_z" default="0.12" />
+  <arg name="max_dgo_step_xy" default="0.30" />
+  <arg name="max_dgo_step_z" default="0.20" />
+  <arg name="max_dgo_ins_disagreement" default="0.75" />
+  <arg name="max_position_correction_rate" default="0.8" />
+  <arg name="max_prediction_speed" default="2.0" />
+  <arg name="landing_descent_rate" default="0.45" />
+  <arg name="force_disarm_delay" default="2.0" />
+  <arg name="run_id" default="" />
 
   <!-- Alias launch: the full mission launch owns the evaluator node. -->
   <include file="$(find algorithm)/launch/dgo_full_mission.launch">
@@ -10,5 +27,22 @@
     <arg name="max_align_dt" value="$(arg max_align_dt)" />
     <arg name="max_dgo_align_dt" value="$(arg max_dgo_align_dt)" />
     <arg name="max_model_align_dt" value="$(arg max_model_align_dt)" />
+    <arg name="oracle_mode" value="$(arg oracle_mode)" />
+    <arg name="max_communication_age" value="$(arg max_communication_age)" />
+    <arg name="max_communication_skew" value="$(arg max_communication_skew)" />
+    <arg name="max_gt_age" value="$(arg max_gt_age)" />
+    <arg name="max_extrapolation_dt" value="$(arg max_extrapolation_dt)" />
+    <arg name="ins_prior_stddev_xy" value="$(arg ins_prior_stddev_xy)" />
+    <arg name="ins_prior_stddev_z" value="$(arg ins_prior_stddev_z)" />
+    <arg name="max_dgo_correction_xy" value="$(arg max_dgo_correction_xy)" />
+    <arg name="max_dgo_correction_z" value="$(arg max_dgo_correction_z)" />
+    <arg name="max_dgo_step_xy" value="$(arg max_dgo_step_xy)" />
+    <arg name="max_dgo_step_z" value="$(arg max_dgo_step_z)" />
+    <arg name="max_dgo_ins_disagreement" value="$(arg max_dgo_ins_disagreement)" />
+    <arg name="max_position_correction_rate" value="$(arg max_position_correction_rate)" />
+    <arg name="max_prediction_speed" value="$(arg max_prediction_speed)" />
+    <arg name="landing_descent_rate" value="$(arg landing_descent_rate)" />
+    <arg name="force_disarm_delay" value="$(arg force_disarm_delay)" />
+    <arg name="run_id" value="$(arg run_id)" />
   </include>
 </launch>

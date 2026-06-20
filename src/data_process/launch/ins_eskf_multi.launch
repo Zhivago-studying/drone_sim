@@ -1,44 +1,50 @@
 <launch>
-  <!-- 隔离实验: disable_attitude_update=true 则 EKF 不修正姿态, -->
-  <!-- 仅靠 IMU 积分传播, 用于定位误差来源           -->
+  <!-- 完整 ESKF: 光流速度残差同时修正速度、姿态和 IMU bias。 -->
+  <!-- 当 run_id 非空时被覆盖为 logs/run_X/ins_eskf -->
+  <arg name="flow_csv_dir" default="$(find data_process)/logs" />
+
   <group ns="iris_0">
     <node pkg="data_process" type="ins_eskf" name="ins_eskf" output="screen">
-      <param name="disable_attitude_update" value="true" />
+      <rosparam command="load" file="$(find data_process)/config/ins_eskf_noise.yaml" />
+      <param name="disable_attitude_update" value="false" />
       <param name="imu_frame" value="auto" />
       <param name="min_flow_quality" value="100" />
-      <param name="publish_pos_cov_scale" value="5.0" />
-      <param name="publish_vel_cov_scale" value="1.0" />
-      <param name="flow_csv_dir" value="$(find data_process)/logs" />
+      <param name="publish_pos_cov_scale" value="15.0" />
+      <param name="publish_vel_cov_scale" value="3.0" />
+      <param name="flow_csv_dir" value="$(arg flow_csv_dir)" />
     </node>
   </group>
   <group ns="iris_1">
     <node pkg="data_process" type="ins_eskf" name="ins_eskf" output="screen">
-      <param name="disable_attitude_update" value="true" />
+      <rosparam command="load" file="$(find data_process)/config/ins_eskf_noise.yaml" />
+      <param name="disable_attitude_update" value="false" />
       <param name="imu_frame" value="auto" />
       <param name="min_flow_quality" value="100" />
-      <param name="publish_pos_cov_scale" value="5.0" />
-      <param name="publish_vel_cov_scale" value="1.0" />
-      <param name="flow_csv_dir" value="$(find data_process)/logs" />
+      <param name="publish_pos_cov_scale" value="15.0" />
+      <param name="publish_vel_cov_scale" value="3.0" />
+      <param name="flow_csv_dir" value="$(arg flow_csv_dir)" />
     </node>
   </group>
   <group ns="iris_2">
     <node pkg="data_process" type="ins_eskf" name="ins_eskf" output="screen">
-      <param name="disable_attitude_update" value="true" />
+      <rosparam command="load" file="$(find data_process)/config/ins_eskf_noise.yaml" />
+      <param name="disable_attitude_update" value="false" />
       <param name="imu_frame" value="auto" />
       <param name="min_flow_quality" value="100" />
-      <param name="publish_pos_cov_scale" value="5.0" />
-      <param name="publish_vel_cov_scale" value="1.0" />
-      <param name="flow_csv_dir" value="$(find data_process)/logs" />
+      <param name="publish_pos_cov_scale" value="15.0" />
+      <param name="publish_vel_cov_scale" value="3.0" />
+      <param name="flow_csv_dir" value="$(arg flow_csv_dir)" />
     </node>
   </group>
   <group ns="iris_3">
     <node pkg="data_process" type="ins_eskf" name="ins_eskf" output="screen">
-      <param name="disable_attitude_update" value="true" />
+      <rosparam command="load" file="$(find data_process)/config/ins_eskf_noise.yaml" />
+      <param name="disable_attitude_update" value="false" />
       <param name="imu_frame" value="auto" />
       <param name="min_flow_quality" value="100" />
-      <param name="publish_pos_cov_scale" value="5.0" />
-      <param name="publish_vel_cov_scale" value="1.0" />
-      <param name="flow_csv_dir" value="$(find data_process)/logs" />
+      <param name="publish_pos_cov_scale" value="15.0" />
+      <param name="publish_vel_cov_scale" value="3.0" />
+      <param name="flow_csv_dir" value="$(arg flow_csv_dir)" />
     </node>
   </group>
 </launch>

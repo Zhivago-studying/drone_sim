@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <sstream>
 #include <limits>
+#include <boost/filesystem.hpp>
 #include <vector>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -39,6 +40,7 @@ public:
         pnh.param("max_consecutive_rejects", max_consecutive_rejects_, 5);
         pnh.param("publish_rate", publish_rate_hz_, 25.0);
         pnh.param("warmup_stddev_threshold", warmup_stddev_threshold_, 0.02);
+        pnh.param("csv_dir", csv_dir_, std::string(""));
         dq_.resize(uav_num_);
         reject_count_.assign(uav_num_, 0);
         warmup_checked_.assign(uav_num_, false);
@@ -266,21 +268,23 @@ public:
 private:
     void initCsvLog()
     {
-        std::string pkg_path;
-        if (!ros::package::getPath("test").empty())
-            pkg_path = ros::package::getPath("test");
-        else
-            pkg_path = "/home/scott/swarm_localization/src/test";
-        csv_dir_ = pkg_path + "/logs/uwb_test";
-
-        struct stat st;
-        if (stat(csv_dir_.c_str(), &st) != 0)
+        // csv_dir_ 已由构造函数从 ROS 参数读取; 为空时回退到 test/logs/uwb_test
+        if (csv_dir_.empty())
         {
-            if (mkdir(csv_dir_.c_str(), 0755) != 0)
-            {
-                ROS_WARN("[%s][UWB zero_score] cannot create csv_dir: %s", ns_.c_str(), csv_dir_.c_str());
-                return;
-            }
+            std::string pkg_path;
+            if (!ros::package::getPath("test").empty())
+                pkg_path = ros::package::getPath("test");
+            else
+                pkg_path = "/home/scott/swarm_localization/src/test";
+            csv_dir_ = pkg_path + "/logs/uwb_test";
+        }
+
+        boost::system::error_code ec;
+        boost::filesystem::create_directories(csv_dir_, ec);
+        if (ec)
+        {
+            ROS_WARN("[%s][UWB zero_score] cannot create csv_dir: %s", ns_.c_str(), csv_dir_.c_str());
+            return;
         }
 
         std::string raw_path = csv_dir_ + "/" + drone_name_ + "_uwb_raw.csv";

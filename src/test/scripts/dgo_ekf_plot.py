@@ -11,6 +11,7 @@ Output:
 """
 
 import argparse
+import glob
 import os
 
 import matplotlib.pyplot as plt
@@ -20,12 +21,30 @@ import pandas as pd
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", ".."))
-DEFAULT_DGO_LOG_DIR = os.path.join(REPO_ROOT, "src", "test", "logs")
-DEFAULT_EKF_LOG_DIR = os.path.join(REPO_ROOT, "src", "data_process", "logs")
-DEFAULT_OUT_DIR = os.path.join(DEFAULT_DGO_LOG_DIR, "dgo_ekf_figures")
+OLD_DGO_LOG_DIR = os.path.join(REPO_ROOT, "src", "test", "logs")
+OLD_EKF_LOG_DIR = os.path.join(REPO_ROOT, "src", "data_process", "logs")
+RUN_LOG_BASE = os.path.expanduser("~/swarm_localization/logs")
 
 REFERENCE = "iris_0"
 DRONES = ["iris_1", "iris_2", "iris_3"]
+
+
+def resolve_log_dir(run_id, category, old_default):
+    if not run_id or run_id == "auto":
+        run_dirs = sorted(
+            glob.glob(os.path.join(RUN_LOG_BASE, "run_*")),
+            key=lambda d: int(os.path.basename(d).split("_")[1]))
+        if run_dirs:
+            path = os.path.join(run_dirs[-1], category)
+            if os.path.isdir(path):
+                return path
+        return old_default
+    rid = str(run_id).replace("run_", "")
+    path = os.path.join(RUN_LOG_BASE, f"run_{rid}", category)
+    if os.path.isdir(path):
+        return path
+    print(f"  Warning: {path} not found, falling back to {old_default}")
+    return old_default
 
 
 def load_relative_csv(log_dir, drone, method):
@@ -162,19 +181,28 @@ def plot_mean_error(dgo_mean, ekf_mean, out_dir, show):
 def main():
     parser = argparse.ArgumentParser(
         description="Plot DGO/EKF mean relative position error to iris_0.")
-    parser.add_argument("--dgo-log-dir", default=DEFAULT_DGO_LOG_DIR,
-                        help="Directory containing DGO relative error CSVs.")
-    parser.add_argument("--ekf-log-dir", default=DEFAULT_EKF_LOG_DIR,
-                        help="Directory containing EKF relative error CSVs.")
-    parser.add_argument("--out-dir", default=DEFAULT_OUT_DIR,
+    parser.add_argument("--run-id", type=str, default="auto",
+                        help="Run ID (number or 'run_N'; 'auto'=latest; empty=old defaults)")
+    parser.add_argument("--dgo-log-dir", default=None,
+                        help="Override DGO relative error CSV directory")
+    parser.add_argument("--ekf-log-dir", default=None,
+                        help="Override EKF relative error CSV directory")
+    parser.add_argument("--out-dir", default=None,
                         help="Output directory for generated figures.")
     parser.add_argument("--no-show", action="store_true",
                         help="Save figures only, do not display windows.")
     args = parser.parse_args()
 
-    dgo_log_dir = os.path.abspath(args.dgo_log_dir)
-    ekf_log_dir = os.path.abspath(args.ekf_log_dir)
-    out_dir = os.path.abspath(args.out_dir)
+    dgo_log_dir = os.path.abspath(args.dgo_log_dir) if args.dgo_log_dir else \
+                  resolve_log_dir(args.run_id, "ekf_dgo_test", OLD_DGO_LOG_DIR)
+    ekf_log_dir = os.path.abspath(args.ekf_log_dir) if args.ekf_log_dir else \
+                  resolve_log_dir(args.run_id, "ins_eskf_test", OLD_EKF_LOG_DIR)
+    _tag = args.run_id if args.run_id and args.run_id != "auto" \
+           else os.path.basename(os.path.dirname(dgo_log_dir))
+    run_tag = f"run_{_tag}" if _tag.isdigit() else _tag
+    fig_base = os.path.join(os.path.expanduser("~/swarm_localization/logs/figures"), run_tag)
+    out_dir = os.path.abspath(args.out_dir) if args.out_dir else \
+              os.path.join(fig_base, "dgo_ekf_plot")
 
     print(f"Loading DGO relative CSVs from {dgo_log_dir}")
     dgo_dfs = load_method(dgo_log_dir, "dgo")

@@ -1,18 +1,34 @@
 <launch>
-  <!-- 1. 启动 4 架无人机的 ins_eskf 节点 -->
-  <include file="$(find data_process)/launch/ins_eskf_multi.launch" />
+  <arg name="run_id" default="" />
 
-  <!-- 2. 启动编队控制器 (7 阶段: 起飞→悬停→扩张收缩→平移→旋转→降落→完成) -->
+  <arg name="flow_csv_dir" default="$(find data_process)/logs"
+       unless="$(eval arg('run_id') != '')" />
+  <arg name="ekf_test_csv_dir" default="$(find data_process)/logs"
+       unless="$(eval arg('run_id') != '')" />
+
+  <arg if="$(eval arg('run_id') != '')"
+       name="log_base"
+       value="$(eval env('HOME') + '/swarm_localization/logs/run_' + str(arg('run_id')))" />
+  <arg if="$(eval arg('run_id') != '')"
+       name="flow_csv_dir"
+       value="$(arg log_base)/ins_eskf" />
+  <arg if="$(eval arg('run_id') != '')"
+       name="ekf_test_csv_dir"
+       value="$(arg log_base)/ins_eskf_test" />
+
+  <include file="$(find data_process)/launch/ins_eskf_multi.launch">
+    <arg name="flow_csv_dir" value="$(arg flow_csv_dir)" />
+  </include>
+
   <node pkg="sensors" type="xtdrone_four_uav_formation" name="xtdrone_formation" output="screen">
     <param name="takeoff_timeout" value="15.0" />
     <param name="takeoff_climb_rate" value="0.45" />
     <param name="landing_timeout" value="25.0" />
   </node>
 
-  <!-- 3. 启动评估节点 (Ctrl-C 时打印指标 + 输出 CSV 轨迹文件) -->
   <node pkg="data_process" type="ins_eskf_test" name="ins_eskf_test" output="screen">
     <rosparam param="drone_names">["iris_0", "iris_1", "iris_2", "iris_3"]</rosparam>
-    <param name="csv_dir" value="$(find data_process)/logs" />
+    <param name="csv_dir" value="$(arg ekf_test_csv_dir)" />
     <param name="reference_name" value="iris_0" />
     <param name="initial_spacing" value="2.0" />
     <param name="max_ekf_align_dt" value="0.12" />

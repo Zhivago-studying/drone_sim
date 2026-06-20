@@ -7,17 +7,68 @@
   <arg name="max_align_dt" default="0.08" />
   <arg name="max_dgo_align_dt" default="0.12" />
   <arg name="max_model_align_dt" default="0.03" />
+  <arg name="oracle_mode" default="false" />
+  <arg name="max_communication_age" default="0.5" />
+  <arg name="max_communication_skew" default="0.2" />
+  <arg name="max_gt_age" default="0.1" />
+  <arg name="max_extrapolation_dt" default="0.2" />
+  <arg name="ins_prior_stddev_xy" default="0.25" />
+  <arg name="ins_prior_stddev_z" default="0.10" />
+  <arg name="max_dgo_correction_xy" default="0.20" />
+  <arg name="max_dgo_correction_z" default="0.12" />
+  <arg name="max_dgo_step_xy" default="0.30" />
+  <arg name="max_dgo_step_z" default="0.20" />
+  <arg name="max_dgo_ins_disagreement" default="0.75" />
+  <arg name="max_position_correction_rate" default="0.8" />
+  <arg name="max_prediction_speed" default="2.0" />
+  <arg name="landing_descent_rate" default="0.45" />
+  <arg name="force_disarm_delay" default="2.0" />
+  <arg name="run_id" default="" />
+
+  <!--
+    run_id 机制: 当 run_id 非空时, 所有 CSV 输出重定向到
+    ~/swarm_localization/logs/run_{run_id}/{node_category}/
+    空值时使用原默认路径 (向后兼容)
+  -->
+  <arg if="$(eval arg('run_id') != '')"
+       name="log_base"
+       value="$(eval env('HOME') + '/swarm_localization/logs/run_' + str(arg('run_id')))" />
+
+  <arg name="dgo_csv_dir"       value="$(arg csv_dir)"
+       unless="$(eval arg('run_id') != '')" />
+  <arg name="dgo_csv_dir"       value="$(arg log_base)/dgo"
+       if="$(eval arg('run_id') != '')" />
+  <arg name="ekf_test_csv_dir"  value="$(arg csv_dir)"
+       unless="$(eval arg('run_id') != '')" />
+  <arg name="ekf_test_csv_dir"  value="$(arg log_base)/ekf_dgo_test"
+       if="$(eval arg('run_id') != '')" />
+  <arg name="uwb_csv_dir"       value=""
+       unless="$(eval arg('run_id') != '')" />
+  <arg name="uwb_csv_dir"       value="$(arg log_base)/uwb_zero_score"
+       if="$(eval arg('run_id') != '')" />
+  <arg name="ins_flow_csv_dir"  value=""
+       unless="$(eval arg('run_id') != '')" />
+  <arg name="ins_flow_csv_dir"  value="$(arg log_base)/ins_eskf"
+       if="$(eval arg('run_id') != '')" />
+  <arg name="ins_ekf_test_csv_dir"  value="$(arg csv_dir)"
+       unless="$(eval arg('run_id') != '')" />
+  <arg name="ins_ekf_test_csv_dir"  value="$(arg log_base)/ins_eskf_test"
+       if="$(eval arg('run_id') != '')" />
 
   <include file="$(find sensors)/launch/uwb.launch" />
-  <include file="$(find data_process)/launch/uwb_zero_score.launch" />
+  <include file="$(find data_process)/launch/uwb_zero_score.launch">
+    <arg name="csv_dir" value="$(arg uwb_csv_dir)" />
+  </include>
 
   <group ns="iris_0">
     <node pkg="data_process" type="ins_eskf" name="ins_eskf" output="screen">
-      <param name="disable_attitude_update" value="true" />
+      <rosparam command="load" file="$(find data_process)/config/ins_eskf_noise.yaml" />
+      <param name="disable_attitude_update" value="false" />
       <param name="imu_frame" value="auto" />
       <param name="min_flow_quality" value="100" />
-      <param name="publish_pos_cov_scale" value="5.0" />
-      <param name="publish_vel_cov_scale" value="1.0" />
+      <param name="publish_pos_cov_scale" value="15.0" />
+      <param name="publish_vel_cov_scale" value="3.0" />
+      <param name="flow_csv_dir" value="$(arg ins_flow_csv_dir)" />
     </node>
     <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
     <node pkg="data_process" type="id_match" name="id_match" output="screen">
@@ -25,23 +76,41 @@
     </node>
     <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
     <node pkg="data_process" type="tf_bridge.py" name="tf_bridge" output="screen" />
-    <node pkg="sensors" type="communication" name="communication" output="screen" />
+    <node pkg="sensors" type="communication" name="communication" output="screen">
+      <param name="stabilize_position" value="true" />
+      <param name="max_dgo_ins_disagreement" value="$(arg max_dgo_ins_disagreement)" />
+      <param name="max_position_correction_rate" value="$(arg max_position_correction_rate)" />
+      <param name="max_prediction_speed" value="$(arg max_prediction_speed)" />
+    </node>
     <node pkg="algorithm" type="DGO" name="DGO" output="screen">
       <param name="uav_id" value="0" />
       <param name="uav_num" value="4" />
       <param name="initial_spacing" value="2.0" />
       <param name="max_sensor_age" value="0.5" />
-      <param name="csv_dir" value="$(arg csv_dir)" />
+      <param name="csv_dir" value="$(arg dgo_csv_dir)" />
+      <param name="oracle_mode" value="$(arg oracle_mode)" />
+      <param name="max_communication_age" value="$(arg max_communication_age)" />
+      <param name="max_communication_skew" value="$(arg max_communication_skew)" />
+      <param name="max_gt_age" value="$(arg max_gt_age)" />
+      <param name="max_extrapolation_dt" value="$(arg max_extrapolation_dt)" />
+      <param name="ins_prior_stddev_xy" value="$(arg ins_prior_stddev_xy)" />
+      <param name="ins_prior_stddev_z" value="$(arg ins_prior_stddev_z)" />
+      <param name="max_dgo_correction_xy" value="$(arg max_dgo_correction_xy)" />
+      <param name="max_dgo_correction_z" value="$(arg max_dgo_correction_z)" />
+      <param name="max_dgo_step_xy" value="$(arg max_dgo_step_xy)" />
+      <param name="max_dgo_step_z" value="$(arg max_dgo_step_z)" />
     </node>
   </group>
 
   <group ns="iris_1">
     <node pkg="data_process" type="ins_eskf" name="ins_eskf" output="screen">
-      <param name="disable_attitude_update" value="true" />
+      <rosparam command="load" file="$(find data_process)/config/ins_eskf_noise.yaml" />
+      <param name="disable_attitude_update" value="false" />
       <param name="imu_frame" value="auto" />
       <param name="min_flow_quality" value="100" />
-      <param name="publish_pos_cov_scale" value="5.0" />
-      <param name="publish_vel_cov_scale" value="1.0" />
+      <param name="publish_pos_cov_scale" value="15.0" />
+      <param name="publish_vel_cov_scale" value="3.0" />
+      <param name="flow_csv_dir" value="$(arg ins_flow_csv_dir)" />
     </node>
     <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
     <node pkg="data_process" type="id_match" name="id_match" output="screen">
@@ -49,23 +118,41 @@
     </node>
     <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
     <node pkg="data_process" type="tf_bridge.py" name="tf_bridge" output="screen" />
-    <node pkg="sensors" type="communication" name="communication" output="screen" />
+    <node pkg="sensors" type="communication" name="communication" output="screen">
+      <param name="stabilize_position" value="true" />
+      <param name="max_dgo_ins_disagreement" value="$(arg max_dgo_ins_disagreement)" />
+      <param name="max_position_correction_rate" value="$(arg max_position_correction_rate)" />
+      <param name="max_prediction_speed" value="$(arg max_prediction_speed)" />
+    </node>
     <node pkg="algorithm" type="DGO" name="DGO" output="screen">
       <param name="uav_id" value="1" />
       <param name="uav_num" value="4" />
       <param name="initial_spacing" value="2.0" />
       <param name="max_sensor_age" value="0.5" />
-      <param name="csv_dir" value="$(arg csv_dir)" />
+      <param name="csv_dir" value="$(arg dgo_csv_dir)" />
+      <param name="oracle_mode" value="$(arg oracle_mode)" />
+      <param name="max_communication_age" value="$(arg max_communication_age)" />
+      <param name="max_communication_skew" value="$(arg max_communication_skew)" />
+      <param name="max_gt_age" value="$(arg max_gt_age)" />
+      <param name="max_extrapolation_dt" value="$(arg max_extrapolation_dt)" />
+      <param name="ins_prior_stddev_xy" value="$(arg ins_prior_stddev_xy)" />
+      <param name="ins_prior_stddev_z" value="$(arg ins_prior_stddev_z)" />
+      <param name="max_dgo_correction_xy" value="$(arg max_dgo_correction_xy)" />
+      <param name="max_dgo_correction_z" value="$(arg max_dgo_correction_z)" />
+      <param name="max_dgo_step_xy" value="$(arg max_dgo_step_xy)" />
+      <param name="max_dgo_step_z" value="$(arg max_dgo_step_z)" />
     </node>
   </group>
 
   <group ns="iris_2">
     <node pkg="data_process" type="ins_eskf" name="ins_eskf" output="screen">
-      <param name="disable_attitude_update" value="true" />
+      <rosparam command="load" file="$(find data_process)/config/ins_eskf_noise.yaml" />
+      <param name="disable_attitude_update" value="false" />
       <param name="imu_frame" value="auto" />
       <param name="min_flow_quality" value="100" />
-      <param name="publish_pos_cov_scale" value="5.0" />
-      <param name="publish_vel_cov_scale" value="1.0" />
+      <param name="publish_pos_cov_scale" value="15.0" />
+      <param name="publish_vel_cov_scale" value="3.0" />
+      <param name="flow_csv_dir" value="$(arg ins_flow_csv_dir)" />
     </node>
     <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
     <node pkg="data_process" type="id_match" name="id_match" output="screen">
@@ -73,23 +160,41 @@
     </node>
     <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
     <node pkg="data_process" type="tf_bridge.py" name="tf_bridge" output="screen" />
-    <node pkg="sensors" type="communication" name="communication" output="screen" />
+    <node pkg="sensors" type="communication" name="communication" output="screen">
+      <param name="stabilize_position" value="true" />
+      <param name="max_dgo_ins_disagreement" value="$(arg max_dgo_ins_disagreement)" />
+      <param name="max_position_correction_rate" value="$(arg max_position_correction_rate)" />
+      <param name="max_prediction_speed" value="$(arg max_prediction_speed)" />
+    </node>
     <node pkg="algorithm" type="DGO" name="DGO" output="screen">
       <param name="uav_id" value="2" />
       <param name="uav_num" value="4" />
       <param name="initial_spacing" value="2.0" />
       <param name="max_sensor_age" value="0.5" />
-      <param name="csv_dir" value="$(arg csv_dir)" />
+      <param name="csv_dir" value="$(arg dgo_csv_dir)" />
+      <param name="oracle_mode" value="$(arg oracle_mode)" />
+      <param name="max_communication_age" value="$(arg max_communication_age)" />
+      <param name="max_communication_skew" value="$(arg max_communication_skew)" />
+      <param name="max_gt_age" value="$(arg max_gt_age)" />
+      <param name="max_extrapolation_dt" value="$(arg max_extrapolation_dt)" />
+      <param name="ins_prior_stddev_xy" value="$(arg ins_prior_stddev_xy)" />
+      <param name="ins_prior_stddev_z" value="$(arg ins_prior_stddev_z)" />
+      <param name="max_dgo_correction_xy" value="$(arg max_dgo_correction_xy)" />
+      <param name="max_dgo_correction_z" value="$(arg max_dgo_correction_z)" />
+      <param name="max_dgo_step_xy" value="$(arg max_dgo_step_xy)" />
+      <param name="max_dgo_step_z" value="$(arg max_dgo_step_z)" />
     </node>
   </group>
 
   <group ns="iris_3">
     <node pkg="data_process" type="ins_eskf" name="ins_eskf" output="screen">
-      <param name="disable_attitude_update" value="true" />
+      <rosparam command="load" file="$(find data_process)/config/ins_eskf_noise.yaml" />
+      <param name="disable_attitude_update" value="false" />
       <param name="imu_frame" value="auto" />
       <param name="min_flow_quality" value="100" />
-      <param name="publish_pos_cov_scale" value="5.0" />
-      <param name="publish_vel_cov_scale" value="1.0" />
+      <param name="publish_pos_cov_scale" value="15.0" />
+      <param name="publish_vel_cov_scale" value="3.0" />
+      <param name="flow_csv_dir" value="$(arg ins_flow_csv_dir)" />
     </node>
     <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
     <node pkg="data_process" type="id_match" name="id_match" output="screen">
@@ -97,13 +202,29 @@
     </node>
     <node pkg="sensors" type="image.py" name="image_saver" output="screen" />
     <node pkg="data_process" type="tf_bridge.py" name="tf_bridge" output="screen" />
-    <node pkg="sensors" type="communication" name="communication" output="screen" />
+    <node pkg="sensors" type="communication" name="communication" output="screen">
+      <param name="stabilize_position" value="true" />
+      <param name="max_dgo_ins_disagreement" value="$(arg max_dgo_ins_disagreement)" />
+      <param name="max_position_correction_rate" value="$(arg max_position_correction_rate)" />
+      <param name="max_prediction_speed" value="$(arg max_prediction_speed)" />
+    </node>
     <node pkg="algorithm" type="DGO" name="DGO" output="screen">
       <param name="uav_id" value="3" />
       <param name="uav_num" value="4" />
       <param name="initial_spacing" value="2.0" />
       <param name="max_sensor_age" value="0.5" />
-      <param name="csv_dir" value="$(arg csv_dir)" />
+      <param name="csv_dir" value="$(arg dgo_csv_dir)" />
+      <param name="oracle_mode" value="$(arg oracle_mode)" />
+      <param name="max_communication_age" value="$(arg max_communication_age)" />
+      <param name="max_communication_skew" value="$(arg max_communication_skew)" />
+      <param name="max_gt_age" value="$(arg max_gt_age)" />
+      <param name="max_extrapolation_dt" value="$(arg max_extrapolation_dt)" />
+      <param name="ins_prior_stddev_xy" value="$(arg ins_prior_stddev_xy)" />
+      <param name="ins_prior_stddev_z" value="$(arg ins_prior_stddev_z)" />
+      <param name="max_dgo_correction_xy" value="$(arg max_dgo_correction_xy)" />
+      <param name="max_dgo_correction_z" value="$(arg max_dgo_correction_z)" />
+      <param name="max_dgo_step_xy" value="$(arg max_dgo_step_xy)" />
+      <param name="max_dgo_step_z" value="$(arg max_dgo_step_z)" />
     </node>
   </group>
 
@@ -111,11 +232,23 @@
     <param name="takeoff_timeout" value="15.0" />
     <param name="takeoff_climb_rate" value="0.45" />
     <param name="landing_timeout" value="25.0" />
+    <param name="landing_descent_rate" value="$(arg landing_descent_rate)" />
+    <param name="force_disarm_delay" value="$(arg force_disarm_delay)" />
+  </node>
+
+  <!-- EKF 评估节点: 监控全部 4 机 ins_estimate, 析构时写入 gt/est/vel/relative_error CSV -->
+  <node pkg="data_process" type="ins_eskf_test" name="ins_eskf_test" output="screen">
+    <rosparam param="drone_names">["iris_0", "iris_1", "iris_2", "iris_3"]</rosparam>
+    <param name="csv_dir" value="$(arg ins_ekf_test_csv_dir)" />
+    <param name="reference_name" value="iris_0" />
+    <param name="initial_spacing" value="2.0" />
+    <param name="max_ekf_align_dt" value="0.12" />
+    <param name="max_model_align_dt" value="0.03" />
   </node>
 
   <group ns="iris_1">
     <node pkg="test" type="ekf_dgo_test" name="ekf_dgo_test" output="screen">
-      <param name="csv_dir" value="$(arg csv_dir)" />
+      <param name="csv_dir" value="$(arg ekf_test_csv_dir)" />
       <param name="max_align_dt" value="$(arg max_align_dt)" />
       <param name="max_dgo_align_dt" value="$(arg max_dgo_align_dt)" />
       <param name="max_model_align_dt" value="$(arg max_model_align_dt)" />
@@ -124,7 +257,7 @@
 
   <group ns="iris_2">
     <node pkg="test" type="ekf_dgo_test" name="ekf_dgo_test" output="screen">
-      <param name="csv_dir" value="$(arg csv_dir)" />
+      <param name="csv_dir" value="$(arg ekf_test_csv_dir)" />
       <param name="max_align_dt" value="$(arg max_align_dt)" />
       <param name="max_dgo_align_dt" value="$(arg max_dgo_align_dt)" />
       <param name="max_model_align_dt" value="$(arg max_model_align_dt)" />
@@ -133,7 +266,7 @@
 
   <group ns="iris_3">
     <node pkg="test" type="ekf_dgo_test" name="ekf_dgo_test" output="screen">
-      <param name="csv_dir" value="$(arg csv_dir)" />
+      <param name="csv_dir" value="$(arg ekf_test_csv_dir)" />
       <param name="max_align_dt" value="$(arg max_align_dt)" />
       <param name="max_dgo_align_dt" value="$(arg max_dgo_align_dt)" />
       <param name="max_model_align_dt" value="$(arg max_model_align_dt)" />

@@ -12,17 +12,36 @@ Generates:
 """
 
 import argparse
+import glob
 import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-DEFAULT_LOG_DIR = os.path.abspath(
+OLD_DEFAULT_LOG_DIR = os.path.abspath(
     os.path.join(SCRIPT_DIR, "..", "..", "data_process", "logs"))
-DEFAULT_OUT_DIR = os.path.join(DEFAULT_LOG_DIR, "ekf_relative_figures")
+RUN_LOG_BASE = os.path.expanduser("~/swarm_localization/logs")
 REFERENCE = "iris_0"
 DRONES = ["iris_1", "iris_2", "iris_3"]
+
+
+def resolve_log_dir(run_id, category, old_default):
+    if not run_id or run_id == "auto":
+        run_dirs = sorted(
+            glob.glob(os.path.join(RUN_LOG_BASE, "run_*")),
+            key=lambda d: int(os.path.basename(d).split("_")[1]))
+        if run_dirs:
+            path = os.path.join(run_dirs[-1], category)
+            if os.path.isdir(path):
+                return path
+        return old_default
+    rid = str(run_id).replace("run_", "")
+    path = os.path.join(RUN_LOG_BASE, f"run_{rid}", category)
+    if os.path.isdir(path):
+        return path
+    print(f"  Warning: {path} not found, falling back to {old_default}")
+    return old_default
 COLORS = {"iris_1": "#ff7f0e", "iris_2": "#2ca02c", "iris_3": "#d62728"}
 LABELS = {"iris_1": "iris_1 → iris_0",
           "iris_2": "iris_2 → iris_0",
@@ -299,16 +318,24 @@ def print_summary(drone_dfs):
 def main():
     parser = argparse.ArgumentParser(
         description="Plot EKF relative position error from ins_eskf_test.")
-    parser.add_argument("--log-dir", type=str, default=DEFAULT_LOG_DIR,
-                        help="Directory containing relative EKF error CSVs.")
+    parser.add_argument("--run-id", type=str, default="auto",
+                        help="Run ID (number or 'run_N'; 'auto'=latest; empty=old defaults)")
+    parser.add_argument("--log-dir", type=str, default=None,
+                        help="Override log directory")
     parser.add_argument("--out-dir", type=str, default=None,
                         help="Output directory for figures.")
     parser.add_argument("--no-show", action="store_true",
                         help="Save figures only, do not display windows.")
     args = parser.parse_args()
 
-    log_dir = os.path.abspath(args.log_dir)
-    out_dir = os.path.abspath(args.out_dir) if args.out_dir else DEFAULT_OUT_DIR
+    log_dir = os.path.abspath(args.log_dir) if args.log_dir else \
+              resolve_log_dir(args.run_id, "ins_eskf_test", OLD_DEFAULT_LOG_DIR)
+    _tag = args.run_id if args.run_id and args.run_id != "auto" \
+           else os.path.basename(os.path.dirname(log_dir))
+    run_tag = f"run_{_tag}" if _tag.isdigit() else _tag
+    fig_base = os.path.join(os.path.expanduser("~/swarm_localization/logs/figures"), run_tag)
+    out_dir = os.path.abspath(args.out_dir) if args.out_dir else \
+              os.path.join(fig_base, "ekf_relative_plot")
     os.makedirs(out_dir, exist_ok=True)
 
     print(f"Loading relative EKF error CSVs from {log_dir}")
