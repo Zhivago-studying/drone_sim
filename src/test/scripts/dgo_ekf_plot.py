@@ -26,8 +26,66 @@ OLD_EKF_LOG_DIR = os.path.join(REPO_ROOT, "src", "data_process", "logs")
 RUN_LOG_BASE = os.path.join(REPO_ROOT, "run_data")
 FIGURE_BASE = os.path.join(RUN_LOG_BASE, "figure")
 
+
 REFERENCE = "iris_0"
 DRONES = ["iris_1", "iris_2", "iris_3"]
+
+# 飞行窗口过滤
+STAGES_EXCLUDE = {0, 7}   # WAIT, DONE — 始终排除
+PRE_FLIGHT = -1           # DGO 启动之前的时间戳
+
+
+def load_stage_map(log_dir):
+    """从 DGO sync_diag 加载阶段映射.
+
+    返回 {stamp, stage} dict, 退化返回 None.
+    """
+    path = os.path.join(log_dir, "sensor_sync_logs",
+                        f"{REFERENCE}_dgo_sync_diag.csv")
+    if not os.path.exists(path):
+        return None
+
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return None
+
+    if "mission_stage" not in df.columns or len(df) < 2:
+        return None
+
+    ss = df[["stamp", "mission_stage"]].dropna().sort_values("stamp")
+    if ss.empty:
+        return None
+    return {"stamp": ss["stamp"].to_numpy(dtype=float),
+            "stage": ss["mission_stage"].to_numpy(dtype=int)}
+
+
+def forward_fill_stage(timestamps, stage_map):
+    """Forward-fill: 每个 timestamp → 最近前一个 stage. Pre-flight = -1."""
+    if stage_map is None:
+        return None
+    idx = np.searchsorted(stage_map["stamp"], timestamps, side="right") - 1
+    return np.where(idx >= 0, stage_map["stage"][idx], PRE_FLIGHT)
+
+
+def filter_flight_window(df, stage_map, time_col="timestamp"):
+    """过滤 DataFrame, 仅保留飞行窗口内的行."""
+    if stage_map is None:
+        return df
+    tt = df[time_col].to_numpy(dtype=float)
+    stages = forward_fill_stage(tt, stage_map)
+    if stages is None:
+        return df
+    mask = np.array([int(s) not in STAGES_EXCLUDE and int(s) != PRE_FLIGHT
+                     for s in stages])
+    kept = mask.sum()
+    if kept == len(df):
+        return df
+    if kept == 0:
+        print(f"    flight-window: 0 samples kept, returning empty df")
+        return df.iloc[:0].copy()
+    print(f"    flight-window: {kept}/{len(df)} samples kept")
+    return df[mask].copy()
 
 
 def resolve_log_dir(run_id, category, old_default):
@@ -65,11 +123,13 @@ def load_relative_csv(log_dir, drone, method):
     return df
 
 
-def load_method(log_dir, method):
+def load_method(log_dir, method, stage_map=None):
     result = {}
     for drone in DRONES:
         df = load_relative_csv(log_dir, drone, method)
         if df is not None:
+            if stage_map is not None:
+                df = filter_flight_window(df, stage_map, time_col="timestamp")
             result[drone] = df
             print(f"  {method.upper()} {drone}: {len(df)} samples")
     return result
@@ -281,15 +341,27 @@ def plot_mean_error(dgo_mean, ekf_mean, out_dir, show):
         plt.close(fig)
 
 
-def load_run(run_id):
+def load_run(run_id, flight_only=False):
     dgo_log_dir = resolve_log_dir(run_id, "ekf_dgo_test", OLD_DGO_LOG_DIR)
     ekf_log_dir = resolve_log_dir(run_id, "ins_eskf_test", OLD_EKF_LOG_DIR)
 
+    stage_map = None
+    if flight_only:
+        dgo_debug_dir = resolve_log_dir(run_id, "dgo", "")
+        if os.path.isdir(dgo_debug_dir):
+            stage_map = load_stage_map(dgo_debug_dir)
+            if stage_map is None:
+                print("  [Warning] sync_diag empty/unavailable, "
+                      "flight-only filter disabled")
+        else:
+            print("  [Warning] DGO debug dir not found, "
+                  "flight-only filter disabled")
+
     print(f"\n=== run_{run_id} ===")
     print(f"Loading DGO relative CSVs from {dgo_log_dir}")
-    dgo_dfs = load_method(dgo_log_dir, "dgo")
+    dgo_dfs = load_method(dgo_log_dir, "dgo", stage_map=stage_map)
     print(f"Loading EKF relative CSVs from {ekf_log_dir}")
-    ekf_dfs = load_method(ekf_log_dir, "ekf")
+    ekf_dfs = load_method(ekf_log_dir, "ekf", stage_map=stage_map)
 
     dgo_mean, ekf_mean = align_method_window(
         build_mean_error(dgo_dfs),
@@ -407,6 +479,12 @@ def main():
                         help="Output directory for generated figures.")
     parser.add_argument("--no-show", action="store_true",
                         help="Save figures only, do not display windows.")
+    parser.add_argument("--flight-only", dest="flight_only",
+                        action="store_true", default=True,
+                        help="[默认] 仅分析飞行窗口 (排除 WAIT/DONE 阶段)")
+    parser.add_argument("--no-flight-only", dest="flight_only",
+                        action="store_false",
+                        help="使用全部数据 (不排除 WAIT/DONE)")
     args = parser.parse_args()
 
     if (args.start_id is None) != (args.end_id is None):
@@ -427,7 +505,7 @@ def main():
                 print(f"\nSkip missing run directory: {run_dir}")
                 continue
             range_run_ids.append(run_id)
-            run_results.append((run_id, load_run(run_id)))
+            run_results.append((run_id, load_run(run_id, flight_only=args.flight_only)))
 
         if not run_results:
             print("No valid runs loaded. Exiting.")
@@ -462,7 +540,7 @@ def main():
 
         # 2) Individual per-run plots (side effect)
         for rid, _ in run_results:
-            dgo_m, ekf_m = load_run(rid)
+            dgo_m, ekf_m = load_run(rid, flight_only=args.flight_only)
             if dgo_m is None and ekf_m is None:
                 continue
             run_out = os.path.join(FIGURE_BASE, f"run_{rid}", "dgo_ekf_plot")
@@ -477,6 +555,20 @@ def main():
                   resolve_log_dir(selected_run_id, "ekf_dgo_test", OLD_DGO_LOG_DIR)
     ekf_log_dir = os.path.abspath(args.ekf_log_dir) if args.ekf_log_dir else \
                   resolve_log_dir(selected_run_id, "ins_eskf_test", OLD_EKF_LOG_DIR)
+
+    # Flight-only: 加载 stage_map
+    stage_map = None
+    if args.flight_only:
+        dgo_debug_dir = resolve_log_dir(selected_run_id, "dgo", "")
+        if os.path.isdir(dgo_debug_dir):
+            stage_map = load_stage_map(dgo_debug_dir)
+            if stage_map is None:
+                print("  [Warning] sync_diag empty/unavailable, "
+                      "flight-only filter disabled")
+        else:
+            print("  [Warning] DGO debug dir not found, "
+                  "flight-only filter disabled")
+
     _tag = selected_run_id if selected_run_id and selected_run_id != "auto" \
            else os.path.basename(os.path.dirname(dgo_log_dir))
     run_tag = f"run_{_tag}" if _tag.isdigit() else _tag
@@ -485,9 +577,9 @@ def main():
               os.path.join(fig_base, "dgo_ekf_plot")
 
     print(f"Loading DGO relative CSVs from {dgo_log_dir}")
-    dgo_dfs = load_method(dgo_log_dir, "dgo")
+    dgo_dfs = load_method(dgo_log_dir, "dgo", stage_map=stage_map)
     print(f"\nLoading EKF relative CSVs from {ekf_log_dir}")
-    ekf_dfs = load_method(ekf_log_dir, "ekf")
+    ekf_dfs = load_method(ekf_log_dir, "ekf", stage_map=stage_map)
 
     dgo_mean, ekf_mean = align_method_window(
         build_mean_error(dgo_dfs),

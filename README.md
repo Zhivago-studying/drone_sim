@@ -459,3 +459,97 @@ for j in N:
 
 ### run_21~run_25
 
+#### 1.问题
+run_21:
+1. com与gt误差在40s之后误差较大
+2. com_stamp_dt大多数超过50ms，邻机通信延迟较大
+run_22:
+1. com与gt误差在65s之后发散严重
+2. 部分无人机之间通信延迟散布较大，不稳定
+run_23:
+1. com与gt误差在80s之后散布严重
+run_24:
+1. 仿真时间达120s，过长
+2. com与gt误差在80s之后振荡严重，尤其是XY轴
+3. 通信延迟比较大，大量数据com_stamp_dt超过20ms
+run_25:
+1. com与gt误差在40s之后振荡较大，多个Z轴误差60s之后急剧增大
+
+### 2.我的想法
+首先最关键的是统一仿真时间，应该在起飞时开始，land时结束
+
+### 3.实行的改动
+目的：统一仿真时间基准线
+**核心思路**：不改 C++ 节点，在后处理脚本中通过 DGO `sync_diag.csv` 的 `mission_stage` 字段进行飞行窗口过滤（排除 stage 0=WAIT、stage 7=DONE），实现统一仿真时间基准。
+
+#### （1）新增脚本：`compare_runs.py` — 跨 run 飞行窗口对比
+
+```bash
+# 单 run 分析
+python3 src/test/scripts/compare_runs.py 21
+
+# 多 run 对比
+python3 src/test/scripts/compare_runs.py 19 20 21
+
+# 范围指定
+python3 src/test/scripts/compare_runs.py --run-id-range 3 14
+
+# 禁用飞行窗口过滤（使用全部数据）
+python3 src/test/scripts/compare_runs.py --no-flight-only 21
+```
+
+输出示例：
+```
+  run   dur(s)   DGO_RMSE   EKF_RMSE   DGO/EKF         verdict
+   19     45.2     0.1205     0.1667      0.72      DGO better
+   20     45.0     0.1130     0.2096      0.54      DGO better
+   21     45.0     0.5717     0.1176      4.86      EKF better
+```
+
+**核心逻辑**：
+- `load_stage_map()` — 读取 DGO `sync_diag.csv` 的 `(stamp, mission_stage)` 映射
+- `forward_fill_stage()` — 通过 `np.searchsorted` 将 EKF/DGO 数据时间戳对齐到最近的 stage 值，早于 DGO 起始的时间戳标记为 `-1`（pre-flight）
+- `STAGES_EXCLUDE = {0, 7}` — 语义固定的排除集合（WAIT、DONE），不依赖 auto-detect
+- **降级路径**：sync_diag 为空/仅 header 时打印 Warning，退化为无过滤模式
+
+#### （2）修改脚本：`dgo_ekf_plot.py` — 新增 `--flight-only` 参数
+
+新增参数：
+- `--flight-only`（默认开启）— 仅使用飞行窗口数据计算 DGO/EKF 误差图
+- `--no-flight-only` — 使用全部数据（兼容旧行为）
+
+```bash
+# 飞行窗口图（默认）
+python3 src/test/scripts/dgo_ekf_plot.py --single 21 --no-show --flight-only
+
+# 全时间轴图
+python3 src/test/scripts/dgo_ekf_plot.py --single 21 --no-show --no-flight-only
+```
+
+`load_method()` 增加可选的 `stage_map` 参数，在加载每份 CSV 后通过 `filter_flight_window()` 剔除 stage 7（DONE）后的数据。
+
+#### （3）修改脚本：`dgo_plot.py` — 阶段背景 overlay
+
+`add_stage_background()` 在每张子图的背景层绘制彩色垂直条，表示每个 `mission_stage` 的时段：
+
+| Stage | 颜色 | 含义 |
+|:-----:|:----:|:----|
+| 1 | 🟢 green | TAKEOFF |
+| 2 | 🟡 yellow | EXPAND |
+| 3 | 🔵 cyan | CONTRACT |
+| 4 | 🟠 orange | TRANSLATE |
+| 5 | 🩷 pink | ROTATE |
+| 6 | 🔴 red | LAND |
+| 7 | ⚪ gray | DONE |
+
+#### （4）关键技术决策
+
+| 决策 | 选择 | 理由 |
+|:---|:---|:---|
+| 排除集合 | `{0, 7}` 硬编码 | stage 语义固定（WAIT/DONE），set intersection 自动处理缺失的 stage 0 |
+| 时间对齐 | forward-fill (np.searchsorted) | EKF 100Hz 数据需对齐到 DGO ~10Hz 的 sync_diag |
+| Pre-DGO 数据 | 标记为 -1，统一排除 | 起飞前 EKF 初始收敛期约 8s（t=12.9→20.9s） |
+| 降级策略 | Warning + 退化 | 空/损坏的 sync_diag 不阻止分析 |
+| C++ 节点 | 不改 | 纯后处理，零风险
+
+

@@ -27,6 +27,10 @@ RUN_LOG_BASE = os.path.join(REPO_ROOT, "run_data")
 FIGURE_BASE = os.path.join(RUN_LOG_BASE, "figure")
 DEFAULT_DRONES = ["iris_0", "iris_1", "iris_2", "iris_3"]
 COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
+# 飞行阶段背景色
+STAGE_COLORS = ["#f0f0f0", "#e6e6e6", "#d9d9d9", "#cccccc",
+                "#bfbfbf", "#b3b3b3", "#a6a6a6", "#999999"]
+STAGES_EXCLUDE = {0, 7}
 
 
 def resolve_log_dir(run_id, category, old_default):
@@ -85,6 +89,52 @@ def load_sync_csv(log_dir, drone):
     return df
 
 
+def add_stage_background(ax, sync_df):
+    """在 Axes 上 overlay 飞行阶段背景色.
+
+    用灰度垂直条表示不同 mission_stage, 仅显示 row 数≥5 的 stage.
+    **必须在所有数据绘制完成后调用**, 以便正确获取 ylim.
+    """
+    if sync_df is None or sync_df.empty:
+        return
+    ss = sync_df.dropna(subset=["stamp", "mission_stage"]).sort_values("stamp")
+    if len(ss) < 2:
+        return
+
+    # 数据已绘制完, ylim 能反映真实数据范围
+    ylim = ax.get_ylim()
+    # 每个 stage 的起始时间
+    stage_starts = ss.drop_duplicates(subset=["mission_stage"], keep="first")
+    prev_t = float(stage_starts["stamp"].iloc[0])
+    prev_s = int(stage_starts["mission_stage"].iloc[0])
+
+    for idx in range(1, len(stage_starts)):
+        curr_t = float(stage_starts["stamp"].iloc[idx])
+        curr_s = int(stage_starts["mission_stage"].iloc[idx])
+
+        # 颜色按阶段交替: 1=绿 2=黄 3=青 4=橙 5=粉 6=红 7=灰
+        colors = {1: "green", 2: "yellow", 3: "cyan", 4: "orange",
+                  5: "pink", 6: "red", 7: "gray"}
+        c = colors.get(prev_s, "gray")
+
+        ax.axvspan(prev_t, curr_t, alpha=0.10, color=c, zorder=0)
+        ax.text((prev_t + curr_t) / 2, ylim[1] * 0.97,
+                f"S{prev_s}", ha="center", va="top",
+                fontsize=5, color=c, alpha=0.7)
+
+        prev_t = curr_t
+        prev_s = curr_s
+
+    # 最后一段到最后时间
+    last_t = float(ss["stamp"].iloc[-1])
+    last_color = {1: "green", 2: "yellow", 3: "cyan", 4: "orange",
+                  5: "pink", 6: "red", 7: "gray"}.get(prev_s, "gray")
+    ax.axvspan(prev_t, last_t, alpha=0.10, color=last_color, zorder=0)
+    ax.text((prev_t + last_t) / 2, ylim[1] * 0.97,
+            f"S{prev_s}", ha="center", va="top",
+            fontsize=5, color=last_color, alpha=0.7)
+
+
 def print_camera_constraint_summary(drone, df):
     required = [
         "camera_msg_fresh",
@@ -121,7 +171,7 @@ def print_camera_constraint_summary(drone, df):
                 f"xy={int(group['camera_xy_constraints'].fillna(0).sum())}")
 
 
-def plot_rel_gt_vs_pred(drone, df, out_dir, show):
+def plot_rel_gt_vs_pred(drone, df, out_dir, show, sync_df=None):
     """rel_gt_x/y/z vs rel_pred_x/y/z, phase=post, per target"""
     post = df[df["phase"] == "post"]
     if post.empty:
@@ -147,6 +197,7 @@ def plot_rel_gt_vs_pred(drone, df, out_dir, show):
             ax.set_ylabel("m")
             ax.legend(fontsize=7)
             ax.grid(True, alpha=0.3)
+            add_stage_background(ax, sync_df)
 
     fig.tight_layout()
     path = os.path.join(out_dir, f"{drone}_rel_gt_vs_pred.png")
@@ -156,7 +207,7 @@ def plot_rel_gt_vs_pred(drone, df, out_dir, show):
         plt.close(fig)
 
 
-def plot_sensor_comparisons(drone, df, out_dir, show):
+def plot_sensor_comparisons(drone, df, out_dir, show, sync_df=None):
     """uwb_meas/pred, uwb_residual, cost_uwb, cost_angle, camera_dt, com_dt — per target"""
     targets = sorted(df["target_id"].dropna().unique())
     if not targets:
@@ -222,6 +273,7 @@ def plot_sensor_comparisons(drone, df, out_dir, show):
 
         for col in range(6):
             axes[row, col].set_xlabel("Time (s)")
+            add_stage_background(axes[row, col], sync_df)
 
     fig.tight_layout()
     path = os.path.join(out_dir, f"{drone}_sensor_debug.png")
@@ -231,7 +283,7 @@ def plot_sensor_comparisons(drone, df, out_dir, show):
         plt.close(fig)
 
 
-def plot_comm_debug(drone, df, out_dir, show):
+def plot_comm_debug(drone, df, out_dir, show, sync_df=None):
     if df is None or df.empty:
         print(f"  {drone}: no comm debug CSV, skip communication plot")
         return
@@ -276,6 +328,9 @@ def plot_comm_debug(drone, df, out_dir, show):
         ax.set_ylabel("s")
         ax.grid(True, alpha=0.3)
 
+        for col in range(5):
+            add_stage_background(axes[row, col], sync_df)
+
     fig.tight_layout()
     path = os.path.join(out_dir, f"{drone}_comm_debug.png")
     fig.savefig(path, dpi=150)
@@ -316,12 +371,12 @@ def main():
         df = load_csv(log_dir, drone)
         if df is None:
             continue
-        print(f"{drone}: {len(df)} rows")
-        plot_rel_gt_vs_pred(drone, df, out_dir, show)
-        plot_sensor_comparisons(drone, df, out_dir, show)
-        comm_df = load_comm_csv(log_dir, drone)
-        plot_comm_debug(drone, comm_df, out_dir, show)
         sync_df = load_sync_csv(log_dir, drone)
+        print(f"{drone}: {len(df)} rows")
+        plot_rel_gt_vs_pred(drone, df, out_dir, show, sync_df)
+        plot_sensor_comparisons(drone, df, out_dir, show, sync_df)
+        comm_df = load_comm_csv(log_dir, drone)
+        plot_comm_debug(drone, comm_df, out_dir, show, sync_df)
         print_camera_constraint_summary(drone, sync_df)
 
     if show:
