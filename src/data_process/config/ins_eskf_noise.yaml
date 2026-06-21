@@ -15,6 +15,9 @@ flow_base_noise_std: 0.02
 
 # Artificial ToF range error: d_meas = d_raw + N(0, tof_noise_std^2)
 tof_noise_std: 0.05
+# PX4Flow/Gazebo lower range limit. Initial readings below min + 0.03 m are
+# treated as saturated and must not become the persistent height datum.
+tof_min_range: 0.20
 
 # Attitude update stabilization. PX4 odom supplies the initial attitude, so
 # its uncertainty should be expressed in degrees rather than the old 1 rad.

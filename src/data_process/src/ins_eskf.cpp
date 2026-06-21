@@ -97,6 +97,7 @@ public:
         nh_.param("flow_relative_noise_std", flow_relative_noise_std_, 0.1);
         nh_.param("flow_base_noise_std", flow_base_noise_std_, 0.02);
         nh_.param("tof_noise_std", tof_noise_std_, 0.05);
+        nh_.param("tof_min_range", tof_min_range_, 0.20);
         nh_.param("initial_attitude_std_deg", initial_attitude_std_deg_, 3.0);
         // Keep the legacy parameter as a fallback for older launch files.
         nh_.param("attitude_update_min_speed",
@@ -125,9 +126,14 @@ public:
         nh_.param("disable_yaw_bias_update", disable_yaw_bias_update_, true);
         nh_.param("measurement_noise_seed", measurement_noise_seed_, 1);
         nh_.param("flow_csv_dir", flow_csv_dir_, std::string(""));
-        if (flow_relative_noise_std_ < 0.0 ||
+        if (min_flow_quality_ < 0 ||
+            max_innovation_sigma_ <= 0.0 ||
+            publish_pos_cov_scale_ <= 0.0 ||
+            publish_vel_cov_scale_ <= 0.0 ||
+            flow_relative_noise_std_ < 0.0 ||
             flow_base_noise_std_ < 0.0 ||
             tof_noise_std_ < 0.0 ||
+            tof_min_range_ < 0.0 ||
             initial_attitude_std_deg_ <= 0.0 ||
             attitude_update_min_vertical_speed_ < 0.0 ||
             attitude_update_max_innovation_ <= 0.0 ||
@@ -144,16 +150,22 @@ public:
             max_gyro_bias_norm_ <= 0.0)
         {
             ROS_FATAL("[INS ESKF] invalid measurement/update parameter: "
+                      "min_flow_quality=%d max_innovation_sigma=%.3f "
+                      "publish_cov_scale=(%.3f,%.3f) "
                       "flow_relative_noise_std=%.3f flow_base_noise_std=%.3f "
-                      "tof_noise_std=%.3f initial_attitude_std_deg=%.3f "
+                      "tof_noise_std=%.3f tof_min_range=%.3f "
+                      "initial_attitude_std_deg=%.3f "
                       "attitude_update_min_vertical_speed=%.3f "
                       "attitude_update_max_innovation=%.3f "
                       "attitude_update_max_correction_deg=%.3f "
                       "initial_gyro_bias_std=%.4f "
                       "max_velocity_innovation=%.3f "
                       "velocity_recovery_reject_count=%d",
+                      min_flow_quality_, max_innovation_sigma_,
+                      publish_pos_cov_scale_, publish_vel_cov_scale_,
                       flow_relative_noise_std_, flow_base_noise_std_,
-                      tof_noise_std_, initial_attitude_std_deg_,
+                      tof_noise_std_, tof_min_range_,
+                      initial_attitude_std_deg_,
                       attitude_update_min_vertical_speed_,
                       attitude_update_max_innovation_,
                       attitude_update_max_correction_deg_,
@@ -192,11 +204,16 @@ public:
         nh_.param("sigma_bg",   sigma_bg_,   3.8785e-5);
         nh_.param("tau_ba",     tau_ba_,     300.0);
         nh_.param("tau_bg",     tau_bg_,     1000.0);
-        if (tau_ba_ <= 0.0 || tau_bg_ <= 0.0)
+        if (sigma_acc_ < 0.0 || sigma_gyro_ < 0.0 ||
+            sigma_ba_ < 0.0 || sigma_bg_ < 0.0 ||
+            tau_ba_ <= 0.0 || tau_bg_ <= 0.0)
         {
-            ROS_FATAL("[INS ESKF] bias correlation times must be positive: "
-                      "tau_ba=%.3f tau_bg=%.3f", tau_ba_, tau_bg_);
-            throw std::runtime_error("invalid IMU bias correlation time");
+            ROS_FATAL("[INS ESKF] invalid IMU process parameter: "
+                      "sigma_acc=%.3g sigma_gyro=%.3g sigma_ba=%.3g "
+                      "sigma_bg=%.3g tau_ba=%.3f tau_bg=%.3f",
+                      sigma_acc_, sigma_gyro_, sigma_ba_, sigma_bg_,
+                      tau_ba_, tau_bg_);
+            throw std::runtime_error("invalid IMU process parameter");
         }
 
         // --- 观测噪声 (3×3) ---
@@ -231,7 +248,8 @@ public:
         ROS_INFO("[INS ESKF] ns=%s sigma_acc=%.2e sigma_gyro=%.2e "
                  "sigma_ba=%.2e tau_ba=%.1fs sigma_bg=%.2e tau_bg=%.1fs "
                  "flow_relative_noise_std=%.2f flow_base_noise_std=%.3fm/s "
-                 "tof_noise_std=%.3fm "
+                 "tof_noise_std=%.3fm tof_min_range=%.2fm "
+                 "publish_cov_scale=(%.1f,%.1f) "
                  "disable_att_update=%d disable_yaw_bias_update=%d "
                  "initial_attitude_std=%.2fdeg initial_bg_std=%.4frad/s "
                  "min_att_vertical_speed=%.2fm/s "
@@ -240,7 +258,9 @@ public:
                  "noise_seed=%d imu_frame=%s",
                  ns_.c_str(), sigma_acc_, sigma_gyro_,
                  sigma_ba_, tau_ba_, sigma_bg_, tau_bg_,
-                 flow_relative_noise_std_, flow_base_noise_std_, tof_noise_std_,
+                 flow_relative_noise_std_, flow_base_noise_std_,
+                 tof_noise_std_, tof_min_range_,
+                 publish_pos_cov_scale_, publish_vel_cov_scale_,
                  disable_att_, disable_yaw_bias_update_,
                  initial_attitude_std_deg_, initial_gyro_bias_std_,
                  attitude_update_min_vertical_speed_,
@@ -473,13 +493,26 @@ private:
 
         if (!height_initialized_)
         {
-            // Keep the artificial one-shot ToF noise out of the persistent datum.
-            height0_ = msg->distance;
             height_ref_z_ = p_.z();
+            // PX4Flow/Gazebo 在量程下限会持续输出约 0.20m。不能将该饱和值
+            // 作为起飞前高度零点，否则后续高度会带入固定偏置。
+            if (msg->distance < tof_min_range_ + 0.03)
+            {
+                height0_ = 0.0;
+                ROS_INFO("[INS ESKF] ToF saturated at %.3f m (min %.2f m), "
+                         "set height0=0 to avoid bias; ref_z=%.3f",
+                         msg->distance, tof_min_range_, height_ref_z_);
+            }
+            else
+            {
+                // Keep the artificial one-shot ToF noise out of the persistent datum.
+                height0_ = msg->distance;
+                ROS_DEBUG("[INS ESKF] height0 = %.3f m "
+                          "(initial injected noise %.3f ignored), "
+                          "height_ref_z = %.3f m",
+                          height0_, tof_noise, height_ref_z_);
+            }
             height_initialized_ = true;
-            ROS_DEBUG("[INS ESKF] height0 = %.3f m (initial injected noise %.3f ignored), "
-                      "height_ref_z = %.3f m",
-                      height0_, tof_noise, height_ref_z_);
             return;
         }
 
@@ -1236,6 +1269,7 @@ private:
     double flow_relative_noise_std_ = 0.1;
     double flow_base_noise_std_ = 0.02;
     double tof_noise_std_ = 0.05;
+    double tof_min_range_ = 0.20;
     double initial_attitude_std_deg_ = 3.0;
     double attitude_update_min_vertical_speed_ = 0.20;
     double attitude_update_max_innovation_ = 0.15;

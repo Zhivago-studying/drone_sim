@@ -5,7 +5,7 @@
        unless="$(eval arg('run_id') != '')" />
   <arg if="$(eval arg('run_id') != '')"
        name="log_base"
-       value="$(eval env('HOME') + '/swarm_localization/logs/run_' + str(arg('run_id')))" />
+       value="$(eval env('HOME') + '/swarm_localization/run_data/run_' + str(arg('run_id')))" />
   <arg if="$(eval arg('run_id') != '')"
        name="angle_csv_dir"
        value="$(arg log_base)/angle_error_cal" />

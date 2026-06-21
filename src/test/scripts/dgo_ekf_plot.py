@@ -23,7 +23,8 @@ SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", ".."))
 OLD_DGO_LOG_DIR = os.path.join(REPO_ROOT, "src", "test", "logs")
 OLD_EKF_LOG_DIR = os.path.join(REPO_ROOT, "src", "data_process", "logs")
-RUN_LOG_BASE = os.path.expanduser("~/swarm_localization/logs")
+RUN_LOG_BASE = os.path.join(REPO_ROOT, "run_data")
+FIGURE_BASE = os.path.join(RUN_LOG_BASE, "figure")
 
 REFERENCE = "iris_0"
 DRONES = ["iris_1", "iris_2", "iris_3"]
@@ -178,11 +179,73 @@ def plot_mean_error(dgo_mean, ekf_mean, out_dir, show):
         plt.close(fig)
 
 
+def load_run(run_id):
+    dgo_log_dir = resolve_log_dir(run_id, "ekf_dgo_test", OLD_DGO_LOG_DIR)
+    ekf_log_dir = resolve_log_dir(run_id, "ins_eskf_test", OLD_EKF_LOG_DIR)
+
+    print(f"\n=== run_{run_id} ===")
+    print(f"Loading DGO relative CSVs from {dgo_log_dir}")
+    dgo_dfs = load_method(dgo_log_dir, "dgo")
+    print(f"Loading EKF relative CSVs from {ekf_log_dir}")
+    ekf_dfs = load_method(ekf_log_dir, "ekf")
+
+    dgo_mean = build_mean_error(dgo_dfs)
+    ekf_mean = build_mean_error(ekf_dfs)
+    print_summary("DGO", dgo_mean)
+    print_summary("EKF", ekf_mean)
+    return dgo_mean, ekf_mean
+
+
+def aggregate_runs(run_results, method):
+    """Average several runs on a common elapsed-time axis."""
+    series = []
+    for run_id, result in run_results:
+        mean_data = result[0] if method == "dgo" else result[1]
+        if mean_data is None or len(mean_data["time"]) < 2:
+            continue
+        elapsed = mean_data["time"] - mean_data["time"][0]
+        series.append((run_id, elapsed, mean_data["mean"], mean_data["rms"]))
+
+    if not series:
+        return None
+
+    end_time = min(item[1][-1] for item in series)
+    if end_time <= 0.0:
+        return None
+
+    time_axis = np.unique(np.concatenate([
+        elapsed[elapsed <= end_time] for _, elapsed, _, _ in series
+    ]))
+    if len(time_axis) < 2:
+        return None
+
+    mean_values = np.vstack([
+        np.interp(time_axis, elapsed, mean_values)
+        for _, elapsed, mean_values, _ in series
+    ])
+    rms_values = np.vstack([
+        np.interp(time_axis, elapsed, rms_values)
+        for _, elapsed, _, rms_values in series
+    ])
+    return {
+        "time": time_axis,
+        "mean": mean_values.mean(axis=0),
+        "rms": rms_values.mean(axis=0),
+        "drones": [f"run_{run_id}" for run_id, _, _, _ in series],
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Plot DGO/EKF mean relative position error to iris_0.")
     parser.add_argument("--run-id", type=str, default="auto",
                         help="Run ID (number or 'run_N'; 'auto'=latest; empty=old defaults)")
+    parser.add_argument("--single", type=int, default=None,
+                        help="Plot one run ID; equivalent to --run-id N.")
+    parser.add_argument("--start-id", type=int, default=None,
+                        help="First run ID for multi-run averaging.")
+    parser.add_argument("--end-id", type=int, default=None,
+                        help="Last run ID for multi-run averaging (inclusive).")
     parser.add_argument("--dgo-log-dir", default=None,
                         help="Override DGO relative error CSV directory")
     parser.add_argument("--ekf-log-dir", default=None,
@@ -193,14 +256,49 @@ def main():
                         help="Save figures only, do not display windows.")
     args = parser.parse_args()
 
+    if (args.start_id is None) != (args.end_id is None):
+        parser.error("--start-id and --end-id must be specified together")
+    if args.start_id is not None and args.start_id > args.end_id:
+        parser.error("--start-id must be <= --end-id")
+    if args.single is not None and args.start_id is not None:
+        parser.error("--single cannot be combined with --start-id/--end-id")
+    if args.start_id is not None and (args.dgo_log_dir or args.ekf_log_dir):
+        parser.error("log directory overrides are only supported for a single run")
+
+    if args.start_id is not None:
+        run_results = []
+        for run_id in range(args.start_id, args.end_id + 1):
+            run_dir = os.path.join(RUN_LOG_BASE, f"run_{run_id}")
+            if not os.path.isdir(run_dir):
+                print(f"\nSkip missing run directory: {run_dir}")
+                continue
+            run_results.append((run_id, load_run(run_id)))
+
+        dgo_mean = aggregate_runs(run_results, "dgo")
+        ekf_mean = aggregate_runs(run_results, "ekf")
+        if dgo_mean is None and ekf_mean is None:
+            print("No valid runs loaded. Exiting.")
+            return
+
+        print_summary("DGO multi-run average", dgo_mean)
+        print_summary("EKF multi-run average", ekf_mean)
+        run_tag = f"runs_{args.start_id}_to_{args.end_id}"
+        out_dir = os.path.abspath(args.out_dir) if args.out_dir else os.path.join(
+            FIGURE_BASE, run_tag, "dgo_ekf_plot")
+        plot_mean_error(dgo_mean, ekf_mean, out_dir, show=not args.no_show)
+        if not args.no_show:
+            plt.show()
+        return
+
+    selected_run_id = str(args.single) if args.single is not None else args.run_id
     dgo_log_dir = os.path.abspath(args.dgo_log_dir) if args.dgo_log_dir else \
-                  resolve_log_dir(args.run_id, "ekf_dgo_test", OLD_DGO_LOG_DIR)
+                  resolve_log_dir(selected_run_id, "ekf_dgo_test", OLD_DGO_LOG_DIR)
     ekf_log_dir = os.path.abspath(args.ekf_log_dir) if args.ekf_log_dir else \
-                  resolve_log_dir(args.run_id, "ins_eskf_test", OLD_EKF_LOG_DIR)
-    _tag = args.run_id if args.run_id and args.run_id != "auto" \
+                  resolve_log_dir(selected_run_id, "ins_eskf_test", OLD_EKF_LOG_DIR)
+    _tag = selected_run_id if selected_run_id and selected_run_id != "auto" \
            else os.path.basename(os.path.dirname(dgo_log_dir))
     run_tag = f"run_{_tag}" if _tag.isdigit() else _tag
-    fig_base = os.path.join(os.path.expanduser("~/swarm_localization/logs/figures"), run_tag)
+    fig_base = os.path.join(FIGURE_BASE, run_tag)
     out_dir = os.path.abspath(args.out_dir) if args.out_dir else \
               os.path.join(fig_base, "dgo_ekf_plot")
 

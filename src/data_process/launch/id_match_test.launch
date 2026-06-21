@@ -16,8 +16,8 @@
       <param name="disable_attitude_update" value="true" />
       <param name="imu_frame" value="auto" />
       <param name="min_flow_quality" value="100" />
-      <param name="publish_pos_cov_scale" value="5.0" />
-      <param name="publish_vel_cov_scale" value="1.0" />
+      <param name="publish_pos_cov_scale" value="15.0" />
+      <param name="publish_vel_cov_scale" value="3.0" />
     </node>
     <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
     <node pkg="data_process" type="id_match" name="id_match" output="screen">
@@ -34,8 +34,8 @@
       <param name="disable_attitude_update" value="true" />
       <param name="imu_frame" value="auto" />
       <param name="min_flow_quality" value="100" />
-      <param name="publish_pos_cov_scale" value="5.0" />
-      <param name="publish_vel_cov_scale" value="1.0" />
+      <param name="publish_pos_cov_scale" value="15.0" />
+      <param name="publish_vel_cov_scale" value="3.0" />
     </node>
     <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
     <node pkg="data_process" type="id_match" name="id_match" output="screen">
@@ -52,8 +52,8 @@
       <param name="disable_attitude_update" value="true" />
       <param name="imu_frame" value="auto" />
       <param name="min_flow_quality" value="100" />
-      <param name="publish_pos_cov_scale" value="5.0" />
-      <param name="publish_vel_cov_scale" value="1.0" />
+      <param name="publish_pos_cov_scale" value="15.0" />
+      <param name="publish_vel_cov_scale" value="3.0" />
     </node>
     <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
     <node pkg="data_process" type="id_match" name="id_match" output="screen">
@@ -70,8 +70,8 @@
       <param name="disable_attitude_update" value="true" />
       <param name="imu_frame" value="auto" />
       <param name="min_flow_quality" value="100" />
-      <param name="publish_pos_cov_scale" value="5.0" />
-      <param name="publish_vel_cov_scale" value="1.0" />
+      <param name="publish_pos_cov_scale" value="15.0" />
+      <param name="publish_vel_cov_scale" value="3.0" />
     </node>
     <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
     <node pkg="data_process" type="id_match" name="id_match" output="screen">

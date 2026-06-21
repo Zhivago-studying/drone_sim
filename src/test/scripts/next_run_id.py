@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
 自动递增 run_id:
-  扫描 ~/swarm_localization/logs/run_* 目录,
+  扫描工作区 run_data/run_* 目录,
   取最大编号 +1 作为本次 run_id。
   无历史目录时返回 1。
 """
 import os, glob, re
 
-LOG_DIR = os.path.expanduser("~/swarm_localization/logs")
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", ".."))
+LOG_DIR = os.path.join(REPO_ROOT, "run_data")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 max_id = 0

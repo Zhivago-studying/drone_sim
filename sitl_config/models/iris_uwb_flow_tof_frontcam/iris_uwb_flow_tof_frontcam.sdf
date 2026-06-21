@@ -569,14 +569,14 @@
       <robotNamespace/>
       <linkName>/imu_link</linkName>
       <imuTopic>/imu</imuTopic>
-      <gyroscopeNoiseDensity>0.00018665</gyroscopeNoiseDensity>
+      <gyroscopeNoiseDensity>4.8869e-05</gyroscopeNoiseDensity>
       <gyroscopeRandomWalk>3.8785e-05</gyroscopeRandomWalk>
       <gyroscopeBiasCorrelationTime>1000.0</gyroscopeBiasCorrelationTime>
-      <gyroscopeTurnOnBiasSigma>0.0087</gyroscopeTurnOnBiasSigma>
-      <accelerometerNoiseDensity>0.00186</accelerometerNoiseDensity>
+      <gyroscopeTurnOnBiasSigma>9.69627e-06</gyroscopeTurnOnBiasSigma>
+      <accelerometerNoiseDensity>6.867e-04</accelerometerNoiseDensity>
       <accelerometerRandomWalk>0.006</accelerometerRandomWalk>
       <accelerometerBiasCorrelationTime>300.0</accelerometerBiasCorrelationTime>
-      <accelerometerTurnOnBiasSigma>0.196</accelerometerTurnOnBiasSigma>
+      <accelerometerTurnOnBiasSigma>9.81e-04</accelerometerTurnOnBiasSigma>
     </plugin>
 
 
@@ -650,6 +650,5 @@
   </model>
 </sdf>
 <!-- vim: set noet fenc=utf-8 ff=unix sts=0 sw=4 ts=4 : -->
-
 
 

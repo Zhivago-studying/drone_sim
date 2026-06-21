@@ -422,3 +422,46 @@ for j in N:
 - **theta 角度精度 ~4°**（俯仰角），精度低于 alpha 但可接受
 - 单目前视相机的盲区导致部分通道检测稀疏，4 机 swarm 的冗余观测可缓解
 - 修复后的 NaN 问题已根除，RMSE 统计不再被启动期垃圾数据污染
+
+
+
+
+## 六、数据记录
+
+所有实验数据保存于 `run_data/run_X/` 目录下,按节点类型分类(dgo/、ekf_dgo_test/、ins_eskf/、ins_eskf_test/、uwb_zero_score/)。
+
+### run_6 ~ run_8: 相机队列深度优化
+
+修改 `image.py`:
+
+- `subscriber.queue_size: 10 → 1` — 只保留最新帧,旧帧丢弃。原先 queue_size=10 时,若 YOLO CPU 推理慢于 10Hz,旧图像会排队约 1 秒,导致 `camera_age` p50≈1.0s。
+- 去掉 15Hz 发布节流,改为处理每一帧到达的图像。
+- `publisher.queue_size: 10 → 1`。
+
+效果:相机延迟从 ~1.0s 下降到单帧推理时间(~60ms),`camera_age` p50 从 1.0s 降至 <0.1s,相机约束使用率提升。
+
+### run_9 ~ run_11: ToF 高度观测计算改进
+
+修改 `ins_eskf.cpp`:
+
+1. **重写 ESKF 参数管理**:新增 `tof_noise_std`、`tof_min_range`、`flow_relative_noise_std`、`initial_attitude_std_deg` 等 17 项参数的显式读取与合法性校验,避免运行时使用无效参数。
+2. **ToF 饱和检测**:当 ToF 读数小于 `tof_min_range + 0.03m` 时判定为饱和,将高度初始值 `height0_` 置零而非使用不可靠的测距值,避免起飞时引入高度偏置。
+3. **随机种子优化**:每架无人机使用命名空间哈希异或 `measurement_noise_seed` 作为随机种子,保证可复现的同时各机噪声独立。
+4. **发布协方差缩放调整**:`publish_pos_cov_scale: 5.0 → 15.0`, `publish_vel_cov_scale: 1.0 → 3.0`,改善 DGO 对 INS 协方差的信任度。
+
+### 数据可用性
+
+| run | 修改内容 | dgo iter | 数据路径 |
+|-----|---------|----------|---------|
+| 3~5 | EKF 优化后基线 | ~700 | `run_data/run_3~5/` |
+| 6~8 | camera queue_size=1 | ~700 | `run_data/run_6~8/` |
+| 9~11 | ToF 高度观测改进 | ~700 | `run_data/run_9~11/` |
+
+绘图:
+
+```bash
+# 激活虚拟环境后
+source ~/swarm_localization/venv/bin/activate
+python3 src/test/scripts/dgo_plot.py --run-id 11 --no-show
+python3 src/test/scripts/dgo_ekf_plot.py --run-id 11 --no-show
+```

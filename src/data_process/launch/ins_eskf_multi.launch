@@ -1,6 +1,6 @@
 <launch>
   <!-- 完整 ESKF: 光流速度残差同时修正速度、姿态和 IMU bias。 -->
-  <!-- 当 run_id 非空时被覆盖为 logs/run_X/ins_eskf -->
+  <!-- 当 run_id 非空时被上层 launch 覆盖为 run_data/run_X/ins_eskf -->
   <arg name="flow_csv_dir" default="$(find data_process)/logs" />
 
   <group ns="iris_0">

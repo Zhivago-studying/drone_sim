@@ -27,12 +27,12 @@
 
   <!--
     run_id 机制: 当 run_id 非空时, 所有 CSV 输出重定向到
-    ~/swarm_localization/logs/run_{run_id}/{node_category}/
+    ~/swarm_localization/run_data/run_{run_id}/{node_category}/
     空值时使用原默认路径 (向后兼容)
   -->
   <arg if="$(eval arg('run_id') != '')"
        name="log_base"
-       value="$(eval env('HOME') + '/swarm_localization/logs/run_' + str(arg('run_id')))" />
+       value="$(eval env('HOME') + '/swarm_localization/run_data/run_' + str(arg('run_id')))" />
 
   <arg name="dgo_csv_dir"       value="$(arg csv_dir)"
        unless="$(eval arg('run_id') != '')" />

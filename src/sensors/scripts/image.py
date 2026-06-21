@@ -72,15 +72,17 @@ class DroneDetector:
         self.nms_threshold = rospy.get_param('~nms_threshold', 0.45)
         self.input_size = (320, 320)  # YOLO 模型输入
 
-        # ---- 发布器 (15Hz) ----
-        self.det_pub = rospy.Publisher('image_detection', ImageDetection, queue_size=10)
-        self.pub_interval = 1.0 / 15.0
-        self.last_pub_time = rospy.Time.now()
+        # ---- 发布器 ----
+        # 只保留最新检测结果，避免下游继续消费过期帧。
+        self.det_pub = rospy.Publisher(
+            'image_detection', ImageDetection, queue_size=1)
 
         # ---- 订阅原始图像 (10Hz camera) ----
+        # YOLO推理慢于相机频率时，queue_size=1会丢弃等待中的旧帧，
+        # 将延迟限制在单帧推理时间，而不是累积约1秒的历史图像。
         self.sub = rospy.Subscriber(
             'camera/image_raw', Image, self.callback,
-            queue_size=10, buff_size=2**24)
+            queue_size=1, buff_size=2**24)
 
         rospy.loginfo("[%s] Detector ready (conf=%.2f, nms=%.2f)",
                       ns, self.conf_threshold, self.nms_threshold)
@@ -147,10 +149,6 @@ class DroneDetector:
 
     # ------------------------------------------------------------------
     def callback(self, msg):
-        now = rospy.Time.now()
-        if (now - self.last_pub_time).to_sec() < self.pub_interval:
-            return
-
         try:
             # ROS Image → OpenCV BGR
             cv_img = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
@@ -168,8 +166,8 @@ class DroneDetector:
 
             # 发布检测结果
             det_msg = ImageDetection()
-            det_msg.header.stamp = msg.header.stamp
-            det_msg.header.frame_id = msg.header.frame_id
+            # 完整保留原图像的曝光时间、seq和frame_id。
+            det_msg.header = msg.header
             det_msg.count = len(dets)
             for cx, cy, bw, bh, conf in dets:
                 det_msg.x.append(cx)
@@ -179,7 +177,6 @@ class DroneDetector:
                 det_msg.confidence.append(conf)
 
             self.det_pub.publish(det_msg)
-            self.last_pub_time = now
 
         except Exception as e:
             rospy.logwarn_throttle(5.0, "Detection error: %s", e)

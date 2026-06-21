@@ -1,0 +1,322 @@
+# 阶段 4：单步 DGO 验证
+
+完成阶段 1～3 后，先不要上滑动窗口。直接跑当前单步 DGO。
+
+## 4.1 要观察的 ROS 话题
+
+```bash
+rostopic hz /iris_0/ins_estimate
+rostopic hz /iris_0/dgo_estimate
+rostopic hz /iris_0/communication
+rostopic hz /iris_0/uwb_processed
+rostopic hz /iris_0/camera_angle_match
+```
+
+重点确认：
+
+```text
+dgo_estimate ≈ 10 Hz
+communication ≈ 10 Hz
+uwb_processed ≈ 25 Hz
+camera_angle_match ≈ 10 Hz 或接近相机检测频率
+```
+
+## 4.2 要看的 CSV
+
+你已经在 `DGO.cpp` 里写了 residual debug CSV，包括 pre/post、UWB residual、angle residual、XY residual、cost_uwb、cost_angle、cost_xy、cost_ins。
+
+优先看这几个量：
+
+```text
+post cost_total 是否小于 pre cost_total
+uwb_residual 是否集中在 ±0.1~0.2 m
+alpha_residual 是否集中在 ±0.05 rad 以内
+theta_residual 是否集中在 ±0.05 rad 以内
+cost_xy 是否偶尔爆炸
+```
+
+如果出现 `post cost > pre cost`，说明 L-BFGS 或代价函数有问题。
+
+如果 `cost_angle` 爆炸，优先查：
+
+```text
+camera_angle_match 的 ID 是否错
+alpha/theta 是否和 DGO 坐标系一致
+tf_bridge 的 map → base_link → camera_link 是否稳定
+```
+
+如果 `cost_uwb` 爆炸，优先查：
+
+```text
+initial_offsets 是否和 Gazebo 初始位置一致
+communication 是否真的在广播 DGO 位置
+UWB target_id 是否和无人机编号一致
+```
+
+## 4.3 最小验收标准
+
+阶段 4 通过的标准：
+
+```text
+1. communication 日志显示 source=DGO
+2. DGO 每 0.1 s 左右发布一次
+3. post cost 大多数情况下小于 pre cost
+4. DGO RMSE 至少不差于 INS/EKF
+5. DGO 曲线没有明显单点大跳变
+```
+
+如果阶段 4 没通过，不要继续做滑动窗口。否则只会把问题复杂化。
+
+---
+
+# 阶段 5：解析梯度，作为性能优化项
+
+你当前 `cal_cost_grad()` 是中心差分。每次求梯度会调用 6 次 `cal_cost()`，3 维变量还能接受，但上滑窗后变量变成 `3W`，计算量会立刻变大。当前数值梯度代码在 `DGO.cpp` 里很清楚：`eps=1e-4`，每一维做 `fp - fm`。
+
+建议等阶段 4 通过后再做解析梯度。
+
+优先实现这几项：
+
+## 5.1 UWB 距离项梯度
+
+设：
+
+```text
+r = offset_ij + Pc_j - p_i
+dist = ||r||
+e = d_uwb - dist
+J = e² / σd²
+```
+
+因为优化变量是 `p_i`，所以：
+
+```text
+∂J/∂p_i = 2 e r / (dist σd²)
+```
+
+代码中要保护：
+
+```cpp
+if (dist < 1e-6) continue;
+```
+
+## 5.2 XY 相对位置项梯度
+
+你现在残差是：
+
+```text
+ex = d cos(theta) cos(alpha) - r.x
+ey = d cos(theta) sin(alpha) - r.y
+```
+
+因为：
+
+```text
+r.x = Pc_j.x - p_i.x + offset.x
+r.y = Pc_j.y - p_i.y + offset.y
+```
+
+所以：
+
+```text
+∂ex/∂p_i.x = +1
+∂ey/∂p_i.y = +1
+```
+
+因此：
+
+```text
+grad_x += 2 ex / σx²
+grad_y += 2 ey / σy²
+```
+
+## 5.3 INS 里程计项梯度
+
+```text
+e = Δp_INS - (p_i - prev_P_opt)
+J = ex²/σx² + ey²/σy² + ez²/σz²
+```
+
+所以：
+
+```text
+grad_x += -2 ex / σx²
+grad_y += -2 ey / σy²
+grad_z += -2 ez / σz²
+```
+
+## 5.4 角度项梯度
+
+角度项最容易写错，建议最后做。先只替换 UWB、XY、INS 三项，再用数值梯度对比解析梯度：
+
+```cpp
+double diff = (grad_analytic - grad_numeric).norm();
+```
+
+当差值稳定在很小范围后，再加入 alpha/theta 梯度。
+
+---
+
+# 阶段 6：滑动窗口优化
+
+只有当单步 DGO 已经正常、但仍有局部跳变时，才建议做 Eq.35 的滑动窗口。论文 Eq.35 确实是把一段历元内的 `Jd + Jθ + Jrp + Jo` 累加联合优化。
+
+## 6.1 新增窗口数据结构
+
+建议不要直接复用全局 `best_uwb_` / `best_camera_` / `Pc`，而是每个历元固定一份快照：
+
+```cpp
+struct EpochSnapshot
+{
+    ros::Time stamp;
+
+    data_process::UwbProcessed uwb;
+    bool has_uwb = false;
+
+    data_process::CameraAngleMatch camera;
+    bool has_camera = false;
+
+    std::vector<geometry_msgs::Point> peer_pos_compensated;
+    std::vector<geometry_msgs::Vector3> peer_vel;
+
+    geometry_msgs::Point ins_delta_from_prev;
+    bool has_ins_delta = false;
+
+    geometry_msgs::Point initial_guess;
+};
+```
+
+然后：
+
+```cpp
+std::deque<EpochSnapshot> window_;
+int window_size_ = 3;
+```
+
+先用 `W=3`，不要一开始用 5 或更大。
+
+## 6.2 窗口变量
+
+原来优化变量是：
+
+```cpp
+Eigen::VectorXd x(3);
+```
+
+滑窗后变成：
+
+```cpp
+Eigen::VectorXd x(3 * W);
+```
+
+第 `k` 个窗口状态：
+
+```cpp
+Eigen::Vector3d p = x.segment<3>(3 * k);
+```
+
+## 6.3 窗口代价
+
+总代价：
+
+```text
+J_window =
+Σ 每个历元的 UWB/camera/XY 约束
++ Σ 相邻历元之间的 INS 位移约束
++ 第一个状态 prior
+```
+
+注意第一个状态必须有 prior，否则窗口整体可能漂移：
+
+```text
+J_prior = ||p_0 - p_0_prior||² / σ_prior²
+```
+
+这里 `p_0_prior` 可以是上一次滑窗保留下来的最老状态估计。
+
+## 6.4 输出
+
+每次优化完只发布窗口最后一个状态：
+
+```cpp
+P_opt_ = x.segment<3>(3 * (W - 1));
+publishDgoEstimate();
+```
+
+不要把窗口内每个状态都发出去。
+
+---
+
+# 阶段 7：预留 DEKF 接口
+
+这个阶段不影响当前 DGO 修复，可以最后做。
+
+论文 Eq.36 定义了 DGO 输出的相对位置：
+
+```text
+pR_ij = pC_j - p_hat_i
+```
+
+你的代码里已经有 `relativeToTarget(target_id)`，它本质上就是当前 DGO 认为的 `target - self` 相对位置。可以新增一个 `RelativePositionArray` 消息，为后续 DEKF 做输入。
+
+建议消息内容：
+
+```text
+Header header
+uint8 self_id
+uint8[] target_ids
+geometry_msgs/Vector3[] relative_positions
+geometry_msgs/Vector3[] relative_velocities
+float64[] confidence
+```
+
+其中：
+
+```cpp
+relative_position = relativeToTarget(j);
+relative_velocity = com_velocities_[j] - latest_ins_msg_->twist.twist.linear;
+```
+
+先只发布，不接 DEKF。
+
+---
+
+# 最终建议的开发顺序
+
+你接下来最应该按这个顺序改：
+
+```text
+1. communication.cpp：
+   新增 dgo_estimate 订阅；
+   position 优先用 DGO；
+   velocity 继续用 INS；
+   DGO 不可用时 fallback 到 INS。
+
+2. DGO.cpp：
+   callback 只缓存数据；
+   isReadyForDGO() 内统一按 sync_ref_time_ 选择 UWB / camera / INS。
+
+3. DGO.cpp：
+   angle_err_ 增加 valid 标志；
+   cal_angle_error() 和 cal_dist_XY_error() 增加 finite 检查。
+
+4. DGO.cpp：
+   initial_offsets_ 改成从 Gazebo 初始位置锁定；
+   保留 hard-coded outdoor2 作为 fallback。
+
+5. 跑 outdoor2：
+   确认 communication source=DGO；
+   对比 INS/EKF/DGO RMSE；
+   分析 residual CSV。
+
+6. 单步 DGO 正常后：
+   再做解析梯度。
+
+7. 单步仍有跳变时：
+   再做 W=3 滑动窗口。
+
+8. 最后：
+   发布 RelativePositionArray，为 DEKF 做准备。
+```
+
+当前最不建议做的是：**直接上滑动窗口**。因为你现在最大的断点还是 `communication.cpp` 没有广播 DGO 优化结果。先把这个闭环打通，DGO 的效果才会真正进入分布式迭代。

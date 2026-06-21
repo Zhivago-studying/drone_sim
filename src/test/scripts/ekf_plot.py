@@ -16,9 +16,11 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", ".."))
 OLD_DEFAULT_LOG_DIR = os.path.abspath(
     os.path.join(SCRIPT_DIR, "..", "..", "data_process", "logs"))
-RUN_LOG_BASE = os.path.expanduser("~/swarm_localization/logs")
+RUN_LOG_BASE = os.path.join(REPO_ROOT, "run_data")
+FIGURE_BASE = os.path.join(RUN_LOG_BASE, "figure")
 DEFAULT_DRONES = ["iris_0", "iris_1", "iris_2", "iris_3"]
 COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
 
@@ -256,7 +258,7 @@ def main():
     _tag = args.run_id if args.run_id and args.run_id != "auto" \
            else os.path.basename(os.path.dirname(log_dir))
     run_tag = f"run_{_tag}" if _tag.isdigit() else _tag
-    fig_base = os.path.join(os.path.expanduser("~/swarm_localization/logs/figures"), run_tag)
+    fig_base = os.path.join(FIGURE_BASE, run_tag)
     out_dir = os.path.abspath(args.out_dir) if args.out_dir \
         else os.path.join(fig_base, "ekf_plot")
     os.makedirs(out_dir, exist_ok=True)

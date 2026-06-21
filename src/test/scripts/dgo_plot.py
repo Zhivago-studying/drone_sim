@@ -21,14 +21,16 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", ".."))
 OLD_DEFAULT_LOG_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "logs"))
-RUN_LOG_BASE = os.path.expanduser("~/swarm_localization/logs")
+RUN_LOG_BASE = os.path.join(REPO_ROOT, "run_data")
+FIGURE_BASE = os.path.join(RUN_LOG_BASE, "figure")
 DEFAULT_DRONES = ["iris_0", "iris_1", "iris_2", "iris_3"]
 COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
 
 
 def resolve_log_dir(run_id, category, old_default):
-    """If run_id given, look in ~/swarm_localization/logs/run_X/category/.
+    """If run_id given, look in run_data/run_X/category/.
     If 'auto', pick the latest run directory.  Falls back to old_default."""
     if not run_id or run_id == "auto":
         run_dirs = sorted(
@@ -288,6 +290,7 @@ def main():
     parser.add_argument("--run-id", type=str, default="auto",
                         help="Run ID (number or 'run_N'; 'auto'=latest; empty=old default path)")
     parser.add_argument("--log-dir", type=str, default=None, help="Override log directory")
+    parser.add_argument("--out-dir", type=str, default=None, help="Override figure output directory")
     parser.add_argument("--no-show", action="store_true", help="Save only, don't display")
     args = parser.parse_args()
 
@@ -300,8 +303,9 @@ def main():
     _tag = args.run_id if args.run_id and args.run_id != "auto" \
            else os.path.basename(os.path.dirname(log_dir))
     run_tag = f"run_{_tag}" if _tag.isdigit() else _tag
-    fig_base = os.path.join(os.path.expanduser("~/swarm_localization/logs/figures"), run_tag)
-    out_dir = os.path.join(fig_base, "dgo_plot")
+    fig_base = os.path.join(FIGURE_BASE, run_tag)
+    out_dir = os.path.abspath(args.out_dir) if args.out_dir else \
+              os.path.join(fig_base, "dgo_plot")
     os.makedirs(out_dir, exist_ok=True)
     print(f"DGO plots — data: {log_dir}  figures: {out_dir}")
 
