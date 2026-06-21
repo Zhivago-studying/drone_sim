@@ -157,15 +157,17 @@ def stats(values):
     }
 
 
-def print_summary(name, mean_data):
+def print_summary(name, mean_data, label=None):
     if mean_data is None:
         print(f"{name}: no valid data")
         return
 
     mean_stats = stats(mean_data["mean"])
     rms_stats = stats(mean_data["rms"])
-    print(f"\n{name} mean relative error summary")
-    print(f"  drones: {', '.join(mean_data['drones'])}")
+    tag = f" [{label}]" if label else ""
+    print(f"\n{name} relative error summary{tag}")
+    if "drones" in mean_data:
+        print(f"  runs: {', '.join(str(d) for d in mean_data['drones'])}")
     print(f"  time: {mean_data['time'][0]:.3f}s -> {mean_data['time'][-1]:.3f}s")
     print(f"  mean(norm): mean={mean_stats['mean']:.4f}m "
           f"rmse={mean_stats['rmse']:.4f}m p95={mean_stats['p95']:.4f}m "
@@ -189,6 +191,57 @@ def print_comparison(dgo_mean, ekf_mean):
     print(f"  EKF mean-relative RMSE: {ekf_rmse:.4f}m")
     print(f"  ratio DGO/EKF:          {ratio:.3f}")
     print(f"  result:                  {result} (required ratio < 1.0)")
+
+
+def plot_multi_run_error(dgo_var, ekf_var, out_dir, show, run_ids):
+    """Multi-run overlay: thin per-run lines + bold avg ± 1σ shaded band."""
+    fig, ax = plt.subplots(1, 1, figsize=(14, 5.5))
+    runs_str = f"run_{run_ids[0]}–run_{run_ids[-1]}"
+    ax.set_title(f"Mean Relative Position Error to iris_0 — {runs_str}",
+                 fontsize=13)
+
+    colors = {"dgo": "#d62728", "ekf": "#1f77b4"}
+    labels = {"dgo": "DGO", "ekf": "EKF"}
+
+    for method, var, color, label in [
+        ("dgo", dgo_var, colors["dgo"], labels["dgo"]),
+        ("ekf", ekf_var, colors["ekf"], labels["ekf"]),
+    ]:
+        if var is None:
+            continue
+
+        # Per-run thin lines
+        for i, (rid, curve) in enumerate(var["individual"]):
+            alpha = 0.25 + 0.15 * (i / max(len(var["individual"]) - 1, 1))
+            ax.plot(var["time"], curve, color=color,
+                    linewidth=0.6, alpha=alpha, zorder=1,
+                    label=f"{label} run_{rid}" if i == 0 else None)
+
+        # ±1σ shaded band
+        ax.fill_between(var["time"],
+                         var["mean"] - var["std"],
+                         var["mean"] + var["std"],
+                         color=color, alpha=0.12, zorder=2,
+                         label=f"{label} ±1σ" if method == "dgo" else None)
+
+        # Average bold line
+        rmse = np.sqrt(np.mean(var["mean"] ** 2))
+        ax.plot(var["time"], var["mean"], color=color,
+                linewidth=2.0, zorder=3,
+                label=f"{label} avg (RMSE={rmse:.3f}m, N={var['n_runs']} runs)")
+
+    ax.set_xlabel("Elapsed Time (s)")
+    ax.set_ylabel("Average Relative Position Error (m)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8, ncol=2)
+
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, "mean_relative_error_dgo_vs_ekf.png")
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    print(f"\nSaved {path}")
+    if not show:
+        plt.close(fig)
 
 
 def plot_mean_error(dgo_mean, ekf_mean, out_dir, show):
@@ -247,12 +300,61 @@ def load_run(run_id):
     return dgo_mean, ekf_mean
 
 
+def build_aggregate_variation(run_results, method):
+    """Return per-run aligned series + mean ± 1σ for multi-run plotting."""
+    series = []
+    for run_id, result in run_results:
+        mean_data = result[0] if method == "dgo" else result[1]
+        if mean_data is None or len(mean_data["time"]) < 2:
+            continue
+        duration = mean_data["time"][-1] - mean_data["time"][0]
+        if duration < 1.0 or len(mean_data["mean"]) < 10:
+            print(f"  Skip {method.upper()} run_{run_id}: "
+                  f"too short ({duration:.2f}s, {len(mean_data['mean'])} samples)")
+            continue
+        elapsed = mean_data["time"] - mean_data["time"][0]
+        series.append((run_id, elapsed, mean_data["mean"]))
+
+    if not series:
+        return None
+
+    end_time = min(item[1][-1] for item in series)
+    if end_time <= 0.0:
+        return None
+
+    time_axis = np.unique(np.concatenate([
+        elapsed[elapsed <= end_time] for _, elapsed, _ in series
+    ]))
+    if len(time_axis) < 2:
+        return None
+
+    values = np.vstack([
+        np.interp(time_axis, elapsed, means)
+        for _, elapsed, means in series
+    ])
+    return {
+        "time": time_axis,
+        "mean": values.mean(axis=0),
+        "std": values.std(axis=0),
+        "individual": [
+            (run_id, np.interp(time_axis, elapsed, means))
+            for run_id, elapsed, means in series
+        ],
+        "n_runs": len(series),
+    }
+
+
 def aggregate_runs(run_results, method):
     """Average several runs on a common elapsed-time axis."""
     series = []
     for run_id, result in run_results:
         mean_data = result[0] if method == "dgo" else result[1]
         if mean_data is None or len(mean_data["time"]) < 2:
+            continue
+        duration = mean_data["time"][-1] - mean_data["time"][0]
+        if duration < 1.0 or len(mean_data["mean"]) < 10:
+            print(f"  Skip {method.upper()} run_{run_id} in aggregate: "
+                  f"too short ({duration:.2f}s, {len(mean_data['mean'])} samples)")
             continue
         elapsed = mean_data["time"] - mean_data["time"][0]
         series.append((run_id, elapsed, mean_data["mean"], mean_data["rms"]))
@@ -318,26 +420,54 @@ def main():
 
     if args.start_id is not None:
         run_results = []
+        range_run_ids = []
         for run_id in range(args.start_id, args.end_id + 1):
             run_dir = os.path.join(RUN_LOG_BASE, f"run_{run_id}")
             if not os.path.isdir(run_dir):
                 print(f"\nSkip missing run directory: {run_dir}")
                 continue
+            range_run_ids.append(run_id)
             run_results.append((run_id, load_run(run_id)))
 
-        dgo_mean = aggregate_runs(run_results, "dgo")
-        ekf_mean = aggregate_runs(run_results, "ekf")
-        if dgo_mean is None and ekf_mean is None:
+        if not run_results:
             print("No valid runs loaded. Exiting.")
             return
 
-        print_summary("DGO multi-run average", dgo_mean)
-        print_summary("EKF multi-run average", ekf_mean)
+        # 1) Multi-run aggregate plot with variation bands
+        dgo_var = build_aggregate_variation(run_results, "dgo")
+        ekf_var = build_aggregate_variation(run_results, "ekf")
+        if dgo_var is None and ekf_var is None:
+            print("No alignable data for multi-run plot. Exiting.")
+            return
+
+        # Print individual run summaries
+        for rid, (dgo_m, ekf_m) in run_results:
+            print_summary("DGO", dgo_m, label=f"run_{rid}")
+            print_summary("EKF", ekf_m, label=f"run_{rid}")
+
+        # Print aggregated summary
+        dgo_mean = aggregate_runs(run_results, "dgo")
+        ekf_mean = aggregate_runs(run_results, "ekf")
+        print_summary("DGO", dgo_mean, label="aggregate")
+        print_summary("EKF", ekf_mean, label="aggregate")
         print_comparison(dgo_mean, ekf_mean)
+
         run_tag = f"runs_{args.start_id}_to_{args.end_id}"
         out_dir = os.path.abspath(args.out_dir) if args.out_dir else os.path.join(
             FIGURE_BASE, run_tag, "dgo_ekf_plot")
-        plot_mean_error(dgo_mean, ekf_mean, out_dir, show=not args.no_show)
+
+        # Multi-run variation plot
+        plot_multi_run_error(dgo_var, ekf_var, out_dir,
+                             show=not args.no_show, run_ids=range_run_ids)
+
+        # 2) Individual per-run plots (side effect)
+        for rid, _ in run_results:
+            dgo_m, ekf_m = load_run(rid)
+            if dgo_m is None and ekf_m is None:
+                continue
+            run_out = os.path.join(FIGURE_BASE, f"run_{rid}", "dgo_ekf_plot")
+            plot_mean_error(dgo_m, ekf_m, run_out, show=False)
+
         if not args.no_show:
             plt.show()
         return
