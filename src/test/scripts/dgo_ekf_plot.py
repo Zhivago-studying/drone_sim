@@ -114,6 +114,39 @@ def build_mean_error(drone_dfs):
     }
 
 
+def align_method_window(dgo_mean, ekf_mean):
+    """Resample DGO and EKF onto the same timestamps for a fair comparison."""
+    if dgo_mean is None or ekf_mean is None:
+        return dgo_mean, ekf_mean
+
+    t_start = max(dgo_mean["time"][0], ekf_mean["time"][0])
+    t_end = min(dgo_mean["time"][-1], ekf_mean["time"][-1])
+    if t_end <= t_start:
+        print("  Warning: DGO and EKF have no overlapping time window")
+        return None, None
+
+    time_axis = np.unique(np.concatenate([
+        dgo_mean["time"][
+            (dgo_mean["time"] >= t_start) & (dgo_mean["time"] <= t_end)],
+        ekf_mean["time"][
+            (ekf_mean["time"] >= t_start) & (ekf_mean["time"] <= t_end)],
+    ]))
+    if len(time_axis) < 2:
+        return None, None
+
+    def resample(data):
+        return {
+            "time": time_axis,
+            "mean": np.interp(time_axis, data["time"], data["mean"]),
+            "rms": np.interp(time_axis, data["time"], data["rms"]),
+            "drones": data["drones"],
+        }
+
+    print(f"  Fair comparison window: {t_start:.3f}s -> {t_end:.3f}s "
+          f"({len(time_axis)} aligned timestamps)")
+    return resample(dgo_mean), resample(ekf_mean)
+
+
 def stats(values):
     values = np.asarray(values, dtype=float)
     return {
@@ -140,6 +173,22 @@ def print_summary(name, mean_data):
     print(f"  rms(norm):  mean={rms_stats['mean']:.4f}m "
           f"rmse={rms_stats['rmse']:.4f}m p95={rms_stats['p95']:.4f}m "
           f"max={rms_stats['max']:.4f}m")
+
+
+def print_comparison(dgo_mean, ekf_mean):
+    if dgo_mean is None or ekf_mean is None:
+        print("\nDGO vs EKF: unavailable (no common aligned data)")
+        return
+
+    dgo_rmse = stats(dgo_mean["mean"])["rmse"]
+    ekf_rmse = stats(ekf_mean["mean"])["rmse"]
+    ratio = dgo_rmse / ekf_rmse if ekf_rmse > 0.0 else float("inf")
+    result = "PASS" if ratio < 1.0 else "FAIL"
+    print("\nDGO vs EKF fair-window acceptance")
+    print(f"  DGO mean-relative RMSE: {dgo_rmse:.4f}m")
+    print(f"  EKF mean-relative RMSE: {ekf_rmse:.4f}m")
+    print(f"  ratio DGO/EKF:          {ratio:.3f}")
+    print(f"  result:                  {result} (required ratio < 1.0)")
 
 
 def plot_mean_error(dgo_mean, ekf_mean, out_dir, show):
@@ -189,10 +238,12 @@ def load_run(run_id):
     print(f"Loading EKF relative CSVs from {ekf_log_dir}")
     ekf_dfs = load_method(ekf_log_dir, "ekf")
 
-    dgo_mean = build_mean_error(dgo_dfs)
-    ekf_mean = build_mean_error(ekf_dfs)
+    dgo_mean, ekf_mean = align_method_window(
+        build_mean_error(dgo_dfs),
+        build_mean_error(ekf_dfs))
     print_summary("DGO", dgo_mean)
     print_summary("EKF", ekf_mean)
+    print_comparison(dgo_mean, ekf_mean)
     return dgo_mean, ekf_mean
 
 
@@ -282,6 +333,7 @@ def main():
 
         print_summary("DGO multi-run average", dgo_mean)
         print_summary("EKF multi-run average", ekf_mean)
+        print_comparison(dgo_mean, ekf_mean)
         run_tag = f"runs_{args.start_id}_to_{args.end_id}"
         out_dir = os.path.abspath(args.out_dir) if args.out_dir else os.path.join(
             FIGURE_BASE, run_tag, "dgo_ekf_plot")
@@ -307,10 +359,12 @@ def main():
     print(f"\nLoading EKF relative CSVs from {ekf_log_dir}")
     ekf_dfs = load_method(ekf_log_dir, "ekf")
 
-    dgo_mean = build_mean_error(dgo_dfs)
-    ekf_mean = build_mean_error(ekf_dfs)
+    dgo_mean, ekf_mean = align_method_window(
+        build_mean_error(dgo_dfs),
+        build_mean_error(ekf_dfs))
     print_summary("DGO", dgo_mean)
     print_summary("EKF", ekf_mean)
+    print_comparison(dgo_mean, ekf_mean)
 
     if dgo_mean is None and ekf_mean is None:
         print("No valid DGO or EKF data loaded. Exiting.")

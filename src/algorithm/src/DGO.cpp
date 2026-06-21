@@ -51,6 +51,17 @@ public:
         pnh_.param("max_dgo_correction_z", max_dgo_correction_z_, 0.12);
         pnh_.param("max_dgo_step_xy", max_dgo_step_xy_, 0.30);
         pnh_.param("max_dgo_step_z", max_dgo_step_z_, 0.20);
+        pnh_.param("require_airborne_initialization",
+                   require_airborne_initialization_, true);
+        pnh_.param("min_dgo_start_altitude",
+                   min_dgo_start_altitude_, 0.35);
+        if (min_dgo_start_altitude_ < 0.0)
+        {
+            ROS_FATAL("[DGO] min_dgo_start_altitude must be non-negative: %.3f",
+                      min_dgo_start_altitude_);
+            ros::shutdown();
+            return;
+        }
 
         Pc.resize(uav_num_);
         com_positions_.resize(uav_num_);
@@ -126,13 +137,15 @@ public:
                  "max_communication_skew=%.2f max_gt_age=%.2f "
                  "ins_prior_stddev=(%.2f,%.2f) max_correction=(%.2f,%.2f) "
                  "max_step=(%.2f,%.2f) "
-                 "oracle_mode=%d",
+                 "airborne_init=%d min_start_altitude=%.2f oracle_mode=%d",
                  ros::this_node::getNamespace().c_str(), uav_id_, uav_num_,
                  initial_spacing_, max_sensor_age_, max_communication_age_,
                  max_communication_skew_, max_gt_age_,
                  ins_prior_stddev_xy_, ins_prior_stddev_z_,
                  max_dgo_correction_xy_, max_dgo_correction_z_,
                  max_dgo_step_xy_, max_dgo_step_z_,
+                 require_airborne_initialization_ ? 1 : 0,
+                 min_dgo_start_altitude_,
                  oracle_mode_ ? 1 : 0);
     }
 
@@ -487,6 +500,8 @@ private:
     double max_dgo_correction_z_ = 0.12;
     double max_dgo_step_xy_ = 0.30;
     double max_dgo_step_z_ = 0.20;
+    double min_dgo_start_altitude_ = 0.35;
+    bool require_airborne_initialization_ = true;
     
     ros::NodeHandle nh_;
     ros::NodeHandle pnh_;
@@ -595,6 +610,7 @@ private:
     bool camera_used_in_cost_ = false;   // 至少一个约束进入总代价
     std::vector<bool> camera_target_valid_;  // 统一供角度/XY 使用
     uint8_t mission_stage_ = 0;
+    bool dgo_started_ = false;
 
     struct CostBreakdown
     {
@@ -1068,6 +1084,46 @@ private:
         // 1. 本机 INS 必须就绪
         if (!latest_ins_msg_)
             return false;
+
+        // 地面阶段 UWB 距离约束缺乏足够方向信息，且各节点尚未形成稳定
+        // 闭环。此时启动分布式优化会让整个编队沿欠约束方向共同漂移。
+        // 首次起飞后锁存启动状态，降落阶段仍保持 DGO 连续运行。
+        if (!dgo_started_)
+        {
+            if (use_gazebo_initial_offsets_ && !origin_locked_)
+                return false;
+
+            const double altitude =
+                latest_ins_msg_->pose.pose.position.z;
+            const bool mission_started = mission_stage_ >= 1;
+            const bool altitude_ready =
+                std::isfinite(altitude) &&
+                altitude >= min_dgo_start_altitude_;
+            if (require_airborne_initialization_ &&
+                (!mission_started || !altitude_ready))
+            {
+                ROS_INFO_THROTTLE(
+                    5.0,
+                    "[iris_%d] DGO waiting for airborne initialization: "
+                    "stage=%u altitude=%.3f required=%.3f origin_locked=%d",
+                    uav_id_, static_cast<unsigned int>(mission_stage_),
+                    altitude, min_dgo_start_altitude_,
+                    origin_locked_ ? 1 : 0);
+                return false;
+            }
+
+            P_opt_ = latest_ins_msg_->pose.pose.position;
+            prev_P_opt_ = P_opt_;
+            Pc[uav_id_] = P_opt_;
+            has_prev_ins_pos_ = false;
+            ins_delta_valid_ = false;
+            ins_update_ = false;
+            dgo_started_ = true;
+            ROS_INFO("[iris_%d] DGO initialized from airborne INS: "
+                     "stage=%u altitude=%.3f p=(%.3f %.3f %.3f)",
+                     uav_id_, static_cast<unsigned int>(mission_stage_),
+                     altitude, P_opt_.x, P_opt_.y, P_opt_.z);
+        }
 
         // 2. 其他无人机通信要到齐且不能长期陈旧。不再要求每轮全员
         // has_new_com_，但旧数据不能无限参与参考时间和速度外推。

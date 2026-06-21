@@ -14,7 +14,10 @@
   <arg name="max_dgo_correction_z" default="0.12" />
   <arg name="max_dgo_step_xy" default="0.30" />
   <arg name="max_dgo_step_z" default="0.20" />
-  <arg name="max_dgo_ins_disagreement" default="0.75" />
+  <arg name="max_dgo_ins_disagreement" default="0.0" />
+  <arg name="stabilize_communication_position" default="false" />
+  <arg name="require_airborne_initialization" default="true" />
+  <arg name="min_dgo_start_altitude" default="0.35" />
   <arg name="max_position_correction_rate" default="0.8" />
   <arg name="max_prediction_speed" default="2.0" />
   <arg name="landing_descent_rate" default="0.45" />
@@ -39,6 +42,9 @@
     <arg name="max_dgo_step_xy" value="$(arg max_dgo_step_xy)" />
     <arg name="max_dgo_step_z" value="$(arg max_dgo_step_z)" />
     <arg name="max_dgo_ins_disagreement" value="$(arg max_dgo_ins_disagreement)" />
+    <arg name="stabilize_communication_position" value="$(arg stabilize_communication_position)" />
+    <arg name="require_airborne_initialization" value="$(arg require_airborne_initialization)" />
+    <arg name="min_dgo_start_altitude" value="$(arg min_dgo_start_altitude)" />
     <arg name="max_position_correction_rate" value="$(arg max_position_correction_rate)" />
     <arg name="max_prediction_speed" value="$(arg max_prediction_speed)" />
     <arg name="landing_descent_rate" value="$(arg landing_descent_rate)" />

@@ -49,20 +49,20 @@ public:
         }
         pnh_.param("use_dgo_position", use_dgo_position_, true);
         pnh_.param("max_dgo_age", max_dgo_age_, 0.3);
-        pnh_.param("stabilize_position", stabilize_position_, true);
+        pnh_.param("stabilize_position", stabilize_position_, false);
         pnh_.param("dgo_correction_gain", dgo_correction_gain_, 0.35);
         pnh_.param("ins_fallback_gain", ins_fallback_gain_, 0.15);
         pnh_.param("max_position_correction_rate",
                    max_position_correction_rate_, 0.8);
         pnh_.param("max_dgo_ins_disagreement",
-                   max_dgo_ins_disagreement_, 0.75);
+                   max_dgo_ins_disagreement_, 0.0);
         pnh_.param("max_prediction_speed", max_prediction_speed_, 2.0);
 
         ins_sub_ = nh_.subscribe("ins_estimate", 10,
                                  &CommunicationNode::insCallback, this);
         dgo_sub_ = nh_.subscribe("dgo_estimate", 10,
                                  &CommunicationNode::dgoCallback, this);
-        com_pub_ = nh_.advertise<sensors::ComMsg>("communication", 10);
+        com_pub_ = nh_.advertise<sensors::ComMsg>("communication", 1);
 
         ROS_INFO("[communication] ns=%s id=%u rate=%.1fHz pos_source=%s "
                  "vel_source=ins_estimate max_dgo_age=%.2f stabilize=%d "
@@ -139,10 +139,15 @@ private:
         if (use_dgo_position_ && latest_dgo_msg_)
         {
             const double age = std::fabs((now - latest_dgo_msg_->header.stamp).toSec());
-            use_dgo = age <= max_dgo_age_;
-            if (use_dgo)
+            const auto &dgo = latest_dgo_msg_->pose.pose.position;
+            use_dgo = age <= max_dgo_age_ &&
+                      std::isfinite(dgo.x) &&
+                      std::isfinite(dgo.y) &&
+                      std::isfinite(dgo.z);
+            // 可选的诊断保护。默认关闭，因为 INS 漂移正是 DGO 要修正的
+            // 对象；用 INS 作为硬门限会在后半程错误拒绝有效 DGO 修正。
+            if (use_dgo && max_dgo_ins_disagreement_ > 0.0)
             {
-                const auto &dgo = latest_dgo_msg_->pose.pose.position;
                 const auto &ins = latest_ins_msg_->pose.pose.position;
                 const double dx = dgo.x - ins.x;
                 const double dy = dgo.y - ins.y;
@@ -271,10 +276,10 @@ private:
     double dgo_correction_gain_ = 0.35;
     double ins_fallback_gain_ = 0.15;
     double max_position_correction_rate_ = 0.8;
-    double max_dgo_ins_disagreement_ = 0.75;
+    double max_dgo_ins_disagreement_ = 0.0;
     double max_prediction_speed_ = 2.0;
     bool use_dgo_position_ = true;
-    bool stabilize_position_ = true;
+    bool stabilize_position_ = false;
     bool has_ins_ = false;
     bool has_dgo_ = false;
     bool filtered_position_initialized_ = false;

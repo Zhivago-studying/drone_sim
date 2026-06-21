@@ -35,13 +35,18 @@ class TfBridge:
             'mavros/local_position/odom', Odometry, self.odom_callback)
 
     def odom_callback(self, msg):
-        t = TransformStamped()
-        t.header.stamp = msg.header.stamp
-        t.header.frame_id = 'map'
-        t.child_frame_id = self.child_frame_
-        t.transform.translation = msg.pose.pose.position
-        t.transform.rotation = msg.pose.pose.orientation
-        self.br_.sendTransform(t)
+        if rospy.is_shutdown():
+            return
+        try:
+            t = TransformStamped()
+            t.header.stamp = msg.header.stamp
+            t.header.frame_id = 'map'
+            t.child_frame_id = self.child_frame_
+            t.transform.translation = msg.pose.pose.position
+            t.transform.rotation = msg.pose.pose.orientation
+            self.br_.sendTransform(t)
+        except rospy.exceptions.ROSException:
+            pass
 
 
 if __name__ == '__main__':

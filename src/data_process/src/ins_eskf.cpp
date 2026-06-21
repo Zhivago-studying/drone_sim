@@ -480,9 +480,23 @@ private:
         if (!std::isfinite(msg->distance) || msg->distance < 0.05 || msg->distance > 20.0)
             return;
 
-        const double tof_noise = tof_noise_std_ * standard_normal_(flow_noise_rng_);
-        const double distance_meas = msg->distance + tof_noise;
-        if (!std::isfinite(distance_meas) || distance_meas < 0.05 || distance_meas > 20.0)
+        // PX4Flow/Gazebo 在量程下限附近输出硬饱和值。饱和段不能继续
+        // 叠加零均值噪声，否则截断后的测距会产生正偏，并被高度更新长期积累。
+        const bool tof_saturated =
+            msg->distance < tof_min_range_ + 0.03;
+        const double tof_noise = tof_saturated
+                                     ? 0.0
+                                     : tof_noise_std_ *
+                                           standard_normal_(flow_noise_rng_);
+        // 该模型的 ToF 安装在机体下方，落地时真实射线距离接近 0m，
+        // 但 MAVROS 会发布约 0.20m 的硬钳位值。因此饱和值对应的有效
+        // 相对距离是 0m，而不是 0.20m。
+        const double distance_meas = tof_saturated
+                                         ? 0.0
+                                         : msg->distance + tof_noise;
+        if (!std::isfinite(distance_meas) ||
+            (!tof_saturated && distance_meas < 0.05) ||
+            distance_meas > 20.0)
         {
             ROS_WARN_THROTTLE(10.0,
                               "[INS ESKF] noisy ToF distance invalid: raw=%.3f "
@@ -494,13 +508,13 @@ private:
         if (!height_initialized_)
         {
             height_ref_z_ = p_.z();
-            // PX4Flow/Gazebo 在量程下限会持续输出约 0.20m。不能将该饱和值
-            // 作为起飞前高度零点，否则后续高度会带入固定偏置。
-            if (msg->distance < tof_min_range_ + 0.03)
+            if (tof_saturated)
             {
+                // 饱和值已经转换成有效距离 0m；后续每个饱和样本也会
+                // 保持为 0m，不会再把原始 0.20m 注入高度状态。
                 height0_ = 0.0;
                 ROS_INFO("[INS ESKF] ToF saturated at %.3f m (min %.2f m), "
-                         "set height0=0 to avoid bias; ref_z=%.3f",
+                         "map saturated range to 0m; ref_z=%.3f",
                          msg->distance, tof_min_range_, height_ref_z_);
             }
             else
