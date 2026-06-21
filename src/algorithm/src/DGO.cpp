@@ -23,7 +23,6 @@
 #include <std_msgs/UInt8.h>
 #include <LBFGS.h>
 
-#define UWB_STDDEV 0.08
 #define EKF_X_STDDEV 0.845622420
 #define EKF_Y_STDDEV 0.841162516
 #define EKF_Z_STDDEV 0.080471782
@@ -45,20 +44,29 @@ public:
         pnh_.param("max_communication_skew", max_communication_skew_, 0.2);
         pnh_.param("max_gt_age", max_gt_age_, 0.1);
         pnh_.param("max_extrapolation_dt", max_extrapolation_dt_, 0.2);
+        pnh_.param("uwb_stddev", uwb_stddev_, 0.05);
+        pnh_.param("uwb_dynamic_stddev", uwb_dynamic_stddev_, 0.065);
         pnh_.param("ins_prior_stddev_xy", ins_prior_stddev_xy_, 0.25);
-        pnh_.param("ins_prior_stddev_z", ins_prior_stddev_z_, 0.10);
         pnh_.param("max_dgo_correction_xy", max_dgo_correction_xy_, 0.20);
-        pnh_.param("max_dgo_correction_z", max_dgo_correction_z_, 0.12);
         pnh_.param("max_dgo_step_xy", max_dgo_step_xy_, 0.30);
-        pnh_.param("max_dgo_step_z", max_dgo_step_z_, 0.20);
         pnh_.param("require_airborne_initialization",
                    require_airborne_initialization_, true);
         pnh_.param("min_dgo_start_altitude",
                    min_dgo_start_altitude_, 0.35);
-        if (min_dgo_start_altitude_ < 0.0)
+        if (min_dgo_start_altitude_ < 0.0 ||
+            uwb_stddev_ <= 0.0 ||
+            uwb_dynamic_stddev_ <= 0.0 ||
+            ins_prior_stddev_xy_ <= 0.0 ||
+            max_dgo_correction_xy_ <= 0.0 ||
+            max_dgo_step_xy_ <= 0.0)
         {
-            ROS_FATAL("[DGO] min_dgo_start_altitude must be non-negative: %.3f",
-                      min_dgo_start_altitude_);
+            ROS_FATAL("[DGO] invalid parameter: min_start_altitude=%.3f "
+                      "uwb_stddev=%.3f uwb_dynamic_stddev=%.3f "
+                      "ins_prior_stddev_xy=%.3f max_correction_xy=%.3f "
+                      "max_step_xy=%.3f",
+                      min_dgo_start_altitude_, uwb_stddev_,
+                      uwb_dynamic_stddev_, ins_prior_stddev_xy_,
+                      max_dgo_correction_xy_, max_dgo_step_xy_);
             ros::shutdown();
             return;
         }
@@ -135,15 +143,17 @@ public:
         ROS_INFO("[DGO] ns=%s uav_id=%d uav_num=%d initial_spacing=%.2f "
                  "max_sensor_age=%.2f max_communication_age=%.2f "
                  "max_communication_skew=%.2f max_gt_age=%.2f "
-                 "ins_prior_stddev=(%.2f,%.2f) max_correction=(%.2f,%.2f) "
-                 "max_step=(%.2f,%.2f) "
+                 "optimization=XY z_source=INS "
+                 "uwb_stddev=%.3f dynamic=%.3f "
+                 "ins_prior_stddev_xy=%.2f max_correction_xy=%.2f "
+                 "max_step_xy=%.2f "
                  "airborne_init=%d min_start_altitude=%.2f oracle_mode=%d",
                  ros::this_node::getNamespace().c_str(), uav_id_, uav_num_,
                  initial_spacing_, max_sensor_age_, max_communication_age_,
                  max_communication_skew_, max_gt_age_,
-                 ins_prior_stddev_xy_, ins_prior_stddev_z_,
-                 max_dgo_correction_xy_, max_dgo_correction_z_,
-                 max_dgo_step_xy_, max_dgo_step_z_,
+                 uwb_stddev_, uwb_dynamic_stddev_,
+                 ins_prior_stddev_xy_, max_dgo_correction_xy_,
+                 max_dgo_step_xy_,
                  require_airborne_initialization_ ? 1 : 0,
                  min_dgo_start_altitude_,
                  oracle_mode_ ? 1 : 0);
@@ -342,8 +352,11 @@ public:
             predicted.z += ins_delta_.z;
         }
 
-        Eigen::VectorXd x(3);
-        x << predicted.x, predicted.y, predicted.z;
+        // DGO 只优化水平位置。垂直状态完全继承 INS 短时增量，
+        // 避免 UWB 球面约束和偶发 theta 异常把 Z 拉偏。
+        P_opt_ = predicted;
+        Eigen::VectorXd x(2);
+        x << predicted.x, predicted.y;
 
         LBFGSpp::LBFGSParam<double> param;
         param.epsilon = 1e-5;
@@ -367,10 +380,8 @@ public:
             geometry_msgs::Point candidate;
             candidate.x = x[0];
             candidate.y = x[1];
-            candidate.z = x[2];
             if (!std::isfinite(candidate.x) ||
-                !std::isfinite(candidate.y) ||
-                !std::isfinite(candidate.z))
+                !std::isfinite(candidate.y))
             {
                 throw std::runtime_error("non-finite optimizer result");
             }
@@ -389,10 +400,7 @@ public:
 
             P_opt_.x = predicted.x + correction_x * correction_scale;
             P_opt_.y = predicted.y + correction_y * correction_scale;
-            P_opt_.z = predicted.z +
-                std::max(-max_dgo_correction_z_,
-                         std::min(max_dgo_correction_z_,
-                                  candidate.z - predicted.z));
+            P_opt_.z = predicted.z;
 
             const double step_x = P_opt_.x - prev_P_opt_.x;
             const double step_y = P_opt_.y - prev_P_opt_.y;
@@ -404,22 +412,14 @@ public:
                 P_opt_.x = prev_P_opt_.x + step_x * scale;
                 P_opt_.y = prev_P_opt_.y + step_y * scale;
             }
-            P_opt_.z = prev_P_opt_.z +
-                std::max(-max_dgo_step_z_,
-                         std::min(max_dgo_step_z_,
-                                  P_opt_.z - prev_P_opt_.z));
-
-            if (correction_scale < 1.0 ||
-                std::fabs(candidate.z - predicted.z) >
-                    max_dgo_correction_z_)
+            if (correction_scale < 1.0)
             {
                 ROS_WARN_THROTTLE(
                     5.0,
-                    "[iris_%d] DGO correction limited: raw=(%.3f %.3f %.3f) "
-                    "limit_xy=%.2f limit_z=%.2f",
+                    "[iris_%d] DGO XY correction limited: raw=(%.3f %.3f) "
+                    "limit_xy=%.2f",
                     uav_id_, correction_x, correction_y,
-                    candidate.z - predicted.z,
-                    max_dgo_correction_xy_, max_dgo_correction_z_);
+                    max_dgo_correction_xy_);
             }
             commitInsDelta();
 
@@ -494,12 +494,11 @@ private:
     double max_communication_skew_ = 0.2;
     double max_gt_age_ = 0.1;
     double max_extrapolation_dt_ = 0.2;
+    double uwb_stddev_ = 0.05;
+    double uwb_dynamic_stddev_ = 0.065;
     double ins_prior_stddev_xy_ = 0.25;
-    double ins_prior_stddev_z_ = 0.10;
     double max_dgo_correction_xy_ = 0.20;
-    double max_dgo_correction_z_ = 0.12;
     double max_dgo_step_xy_ = 0.30;
-    double max_dgo_step_z_ = 0.20;
     double min_dgo_start_altitude_ = 0.35;
     bool require_airborne_initialization_ = true;
     
@@ -716,7 +715,7 @@ private:
                 sync_diag_csv_ << ",com_dt_" << i << ",com_age_" << i;
         sync_diag_csv_ << ",uwb_dt,uwb_age,camera_dt,camera_age,"
                        << "ins_dt,ins_age,gt_dt,gt_age";
-        sync_diag_csv_ << ",mission_stage,"
+        sync_diag_csv_ << ",mission_stage,uwb_stddev,"
                        << "camera_msg_fresh,camera_raw_count,"
                        << "camera_valid_target,camera_angle_constraints,"
                        << "camera_xy_constraints,camera_used_in_cost,"
@@ -755,6 +754,7 @@ private:
         writeTimeOffset(sync_diag_csv_, best_gt_stamp_, ref);
 
         sync_diag_csv_ << ',' << static_cast<unsigned int>(mission_stage_)
+                       << ',' << currentUwbStddev()
                        << ',' << (camera_message_fresh_ ? 1 : 0)
                        << ',' << camera_raw_count_
                        << ',' << camera_valid_target_count_
@@ -920,6 +920,13 @@ private:
         return v * v;
     }
 
+    double currentUwbStddev() const
+    {
+        // Formation Stage::EXPAND_SHRINK == 3. 该阶段距离变化最快，
+        // UWB 滑窗会产生额外动态误差，因此使用实测的 0.065m。
+        return mission_stage_ == 3 ? uwb_dynamic_stddev_ : uwb_stddev_;
+    }
+
     int findUwbIndexForTarget(int target_id) const
     {
         const size_t n = std::min(best_uwb_.target_ids.size(), best_uwb_.distances.size());
@@ -992,7 +999,8 @@ private:
             {
                 uwb_meas = best_uwb_.distances[uwb_idx];
                 uwb_residual = uwb_meas - uwb_pred;
-                cost_uwb = sqr(uwb_residual / UWB_STDDEV);
+                const double uwb_stddev = currentUwbStddev();
+                cost_uwb = sqr(uwb_residual / uwb_stddev);
             }
 
             double alpha_meas = nanValue();
@@ -1030,12 +1038,12 @@ private:
                 xy_residual_y = proj * sa - rel_pred.y();
 
                 const double sigma_x2 = std::max(
-                    sqr(ct * ca * UWB_STDDEV) +
+                    sqr(ct * ca * currentUwbStddev()) +
                     sqr(-uwb_meas * ct * sa * ANGLE_ALPHA_STDDEV) +
                     sqr(-uwb_meas * st * ca * ANGLE_THETA_STDDEV),
                     0.05 * 0.05);
                 const double sigma_y2 = std::max(
-                    sqr(ct * sa * UWB_STDDEV) +
+                    sqr(ct * sa * currentUwbStddev()) +
                     sqr(uwb_meas * ct * ca * ANGLE_ALPHA_STDDEV) +
                     sqr(-uwb_meas * st * sa * ANGLE_THETA_STDDEV),
                     0.05 * 0.05);
@@ -1490,8 +1498,7 @@ private:
             delta.z = ins_delta_.z - (P_opt_.z - prev_P_opt_.z);
             penalty +=
                 (delta.x / ins_prior_stddev_xy_)*(delta.x / ins_prior_stddev_xy_) +
-                (delta.y / ins_prior_stddev_xy_)*(delta.y / ins_prior_stddev_xy_) +
-                (delta.z / ins_prior_stddev_z_)*(delta.z / ins_prior_stddev_z_);
+                (delta.y / ins_prior_stddev_xy_)*(delta.y / ins_prior_stddev_xy_);
 
             return penalty;
         }
@@ -1533,7 +1540,9 @@ private:
             {
                 continue;
             }
-            penalty += (dist_error_[target_id] / UWB_STDDEV) * (dist_error_[target_id] / UWB_STDDEV);
+            const double uwb_stddev = currentUwbStddev();
+            penalty += (dist_error_[target_id] / uwb_stddev) *
+                       (dist_error_[target_id] / uwb_stddev);
         }
         return penalty;
     }
@@ -1647,12 +1656,12 @@ private:
                                      - rel.y();
 
             double sigma_x2 =
-                std::pow(ct * ca * UWB_STDDEV, 2) +
+                std::pow(ct * ca * currentUwbStddev(), 2) +
                 std::pow(-d_uwb * ct * sa * ANGLE_ALPHA_STDDEV, 2) +
                 std::pow(-d_uwb * st * ca * ANGLE_THETA_STDDEV, 2);
 
             double sigma_y2 =
-                std::pow(ct * sa * UWB_STDDEV, 2) +
+                std::pow(ct * sa * currentUwbStddev(), 2) +
                 std::pow(d_uwb * ct * ca * ANGLE_ALPHA_STDDEV, 2) +
                 std::pow(-d_uwb * st * sa * ANGLE_THETA_STDDEV, 2);
 
@@ -1698,12 +1707,12 @@ private:
         return cb;
     }
 
-    double cal_cost(const Eigen::Vector3d& x)
+    double cal_cost(const Eigen::Vector2d& x)
     {
         geometry_msgs::Point old = P_opt_;
         P_opt_.x = x.x();
         P_opt_.y = x.y();
-        P_opt_.z = x.z();
+        // P_opt_.z 保持 RunDGO() 中由 INS 增量预测的固定值。
 
         //计算惩罚
         double cost = computeCostBreakdown().total();
@@ -1714,17 +1723,20 @@ private:
 
     double cal_cost_grad(const Eigen::VectorXd& x,Eigen::VectorXd& grad)
     {
-        Eigen::Vector3d xv;
-        xv << x[0],x[1],x[2];
+        if (x.size() != 2)
+            throw std::runtime_error("DGO XY optimizer expected 2 variables");
+
+        Eigen::Vector2d xv;
+        xv << x[0],x[1];
 
         double fx = cal_cost(xv);
-        grad.resize(3);
+        grad.resize(2);
         const double eps = 1e-4;
 
-        for(int k = 0;k<3;k++)
+        for(int k = 0;k<2;k++)
         {
-            Eigen::Vector3d xp = xv;
-            Eigen::Vector3d xm = xv;
+            Eigen::Vector2d xp = xv;
+            Eigen::Vector2d xm = xv;
             xp[k] += eps;
             xm[k] -= eps;
             double fp = cal_cost(xp);
