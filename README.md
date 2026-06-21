@@ -457,11 +457,5 @@ for j in N:
 | 6~8 | camera queue_size=1 | ~700 | `run_data/run_6~8/` |
 | 9~11 | ToF 高度观测改进 | ~700 | `run_data/run_9~11/` |
 
-绘图:
+### run_21~run_25
 
-```bash
-# 激活虚拟环境后
-source ~/swarm_localization/venv/bin/activate
-python3 src/test/scripts/dgo_plot.py --run-id 11 --no-show
-python3 src/test/scripts/dgo_ekf_plot.py --run-id 11 --no-show
-```
