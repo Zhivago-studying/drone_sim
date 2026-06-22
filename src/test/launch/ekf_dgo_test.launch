@@ -7,7 +7,7 @@
   <arg name="max_communication_age" default="0.5" />
   <arg name="max_communication_skew" default="0.2" />
   <arg name="max_gt_age" default="0.1" />
-  <arg name="max_extrapolation_dt" default="0.2" />
+  <arg name="max_extrapolation_dt" default="0.30" />
   <arg name="uwb_stddev" default="0.05" />
   <arg name="uwb_dynamic_stddev" default="0.065" />
   <arg name="ins_prior_stddev_xy" default="0.25" />
@@ -21,6 +21,12 @@
   <arg name="max_prediction_speed" default="2.0" />
   <arg name="landing_descent_rate" default="0.45" />
   <arg name="force_disarm_delay" default="2.0" />
+  <arg name="stop_after_mission_complete" default="true" />
+  <arg name="dgo_stop_stage" default="7" />
+  <arg name="publish_hold_after_stop" default="false" />
+  <arg name="ignore_after_mission_complete" default="true" />
+  <arg name="eval_stop_stage" default="7" />
+  <arg name="count_ignored_callbacks" default="true" />
   <arg name="run_id" default="" />
 
   <!-- Alias launch: the full mission launch owns the evaluator node. -->
@@ -47,6 +53,12 @@
     <arg name="max_prediction_speed" value="$(arg max_prediction_speed)" />
     <arg name="landing_descent_rate" value="$(arg landing_descent_rate)" />
     <arg name="force_disarm_delay" value="$(arg force_disarm_delay)" />
+    <arg name="stop_after_mission_complete" value="$(arg stop_after_mission_complete)" />
+    <arg name="dgo_stop_stage" value="$(arg dgo_stop_stage)" />
+    <arg name="publish_hold_after_stop" value="$(arg publish_hold_after_stop)" />
+    <arg name="ignore_after_mission_complete" value="$(arg ignore_after_mission_complete)" />
+    <arg name="eval_stop_stage" value="$(arg eval_stop_stage)" />
+    <arg name="count_ignored_callbacks" value="$(arg count_ignored_callbacks)" />
     <arg name="run_id" value="$(arg run_id)" />
   </include>
 </launch>

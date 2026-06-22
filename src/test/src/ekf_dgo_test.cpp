@@ -1,6 +1,7 @@
 #include <ros/ros.h>
 #include <gazebo_msgs/ModelStates.h>
 #include <nav_msgs/Odometry.h>
+#include <std_msgs/UInt8.h>
 
 #include <cerrno>
 #include <csignal>
@@ -28,6 +29,18 @@ public:
         pnh_.param("max_model_align_dt", max_model_align_dt_, 0.03);
         pnh_.param("initial_spacing", initial_spacing_, 2.0);
         pnh_.param("csv_dir", csv_dir_, std::string("/home/scott/swarm_localization/src/test/logs"));
+        pnh_.param("ignore_after_mission_complete",
+                   ignore_after_mission_complete_, true);
+        pnh_.param("eval_stop_stage", eval_stop_stage_, 7);
+        pnh_.param("count_ignored_callbacks",
+                   count_ignored_callbacks_, true);
+        if (eval_stop_stage_ < 0 || eval_stop_stage_ > 255)
+        {
+            ROS_FATAL("[EKF DGO TEST] invalid eval_stop_stage=%d; expected [0, 255]",
+                      eval_stop_stage_);
+            ros::shutdown();
+            return;
+        }
         reference_name_ = "iris_0";
         ensureOutputDir();
 
@@ -43,9 +56,19 @@ public:
             "/gazebo/model_states", 10,
             &EkfDgoTest::modelStatesCallback, this);
 
-        ROS_INFO("[EKF DGO TEST] self=%s reference=%s max_dgo_align_dt=%.3f max_model_align_dt=%.3f subscribed to /%s/dgo_estimate, /%s/dgo_estimate, /gazebo/model_states",
+        stage_sub_ = nh_.subscribe<std_msgs::UInt8>(
+            "/formation/stage", 1,
+            &EkfDgoTest::stageCallback, this);
+
+        ROS_INFO("[EKF DGO TEST] self=%s reference=%s "
+                 "max_dgo_align_dt=%.3f max_model_align_dt=%.3f "
+                 "ignore_after_mission_complete=%d eval_stop_stage=%d "
+                 "subscribed to /%s/dgo_estimate, /%s/dgo_estimate, "
+                 "/gazebo/model_states, /formation/stage",
                  self_name_.c_str(), reference_name_.c_str(),
                  max_dgo_align_dt_, max_model_align_dt_,
+                 ignore_after_mission_complete_ ? 1 : 0,
+                 eval_stop_stage_,
                  self_name_.c_str(), reference_name_.c_str());
     }
 
@@ -68,12 +91,16 @@ public:
                     "\n[EKF DGO TEST] %s relative to %s: no valid samples; RMSE unavailable\n",
                     self_name_.c_str(), reference_name_.c_str());
             fprintf(stdout,
-                    "self_dgo_callbacks=%lu, reject_reference=%lu, reject_model=%lu, "
+                    "total_self_dgo_callbacks=%lu, eval_self_dgo_callbacks=%lu, "
+                    "ignored_after_stop=%lu, reject_reference=%lu, reject_model=%lu, "
                     "last_ref_dt=%.6f s, last_model_dt=%.6f s\n",
+                    static_cast<unsigned long>(total_self_dgo_callbacks_),
                     static_cast<unsigned long>(self_dgo_callbacks_),
+                    static_cast<unsigned long>(ignored_self_dgo_callbacks_),
                     static_cast<unsigned long>(reject_reference_count_),
                     static_cast<unsigned long>(reject_model_count_),
                     last_reference_dt_, last_model_dt_);
+            printWindowStatus();
             fflush(stdout);
             return;
         }
@@ -85,10 +112,16 @@ public:
         fprintf(stdout, "samples: %lu\n", static_cast<unsigned long>(sample_count_));
         fprintf(stdout, "RMSE: %.6f m\n", rmse);
         fprintf(stdout,
-                "self_dgo_callbacks=%lu, reject_reference=%lu, reject_model=%lu\n",
+                "total_self_dgo_callbacks=%lu, eval_self_dgo_callbacks=%lu, "
+                "ignored_after_stop=%lu\n",
+                static_cast<unsigned long>(total_self_dgo_callbacks_),
                 static_cast<unsigned long>(self_dgo_callbacks_),
+                static_cast<unsigned long>(ignored_self_dgo_callbacks_));
+        fprintf(stdout,
+                "reject_reference=%lu, reject_model=%lu\n",
                 static_cast<unsigned long>(reject_reference_count_),
                 static_cast<unsigned long>(reject_model_count_));
+        printWindowStatus();
         fprintf(stdout, "============================================\n");
         fflush(stdout);
     }
@@ -99,6 +132,7 @@ private:
     ros::Subscriber self_dgo_sub_;
     ros::Subscriber reference_dgo_sub_;
     ros::Subscriber model_states_sub_;
+    ros::Subscriber stage_sub_;
     std::string self_name_;
     std::string reference_name_;
     std::string csv_dir_;
@@ -106,6 +140,14 @@ private:
     double max_dgo_align_dt_ = 0.12;
     double max_model_align_dt_ = 0.03;
     double initial_spacing_ = 2.0;
+    bool ignore_after_mission_complete_ = true;
+    int eval_stop_stage_ = 7;
+    bool count_ignored_callbacks_ = true;
+    uint8_t mission_stage_ = 0;
+    bool has_stage_ = false;
+    bool recording_enabled_ = true;
+    bool stopped_by_stage_ = false;
+    ros::Time eval_stop_time_;
 
     struct DgoSample
     {
@@ -123,6 +165,8 @@ private:
     struct ErrorSample
     {
         double timestamp = 0.0;
+        uint8_t mission_stage = 0;
+        int recording_active = 1;
         double x_gt = 0.0;
         double y_gt = 0.0;
         double z_gt = 0.0;
@@ -148,6 +192,8 @@ private:
     double error_ = 0.0;
     size_t sample_count_ = 0;
     size_t self_dgo_callbacks_ = 0;
+    size_t total_self_dgo_callbacks_ = 0;
+    size_t ignored_self_dgo_callbacks_ = 0;
     size_t reject_reference_count_ = 0;
     size_t reject_model_count_ = 0;
     double last_reference_dt_ = -1.0;
@@ -168,6 +214,22 @@ private:
 
     void selfDgoCallback(const nav_msgs::Odometry::ConstPtr& msg)
     {
+        ++total_self_dgo_callbacks_;
+
+        if (ignore_after_mission_complete_ && !recording_enabled_)
+        {
+            if (count_ignored_callbacks_)
+                ++ignored_self_dgo_callbacks_;
+
+            ROS_DEBUG_THROTTLE(
+                2.0,
+                "[EKF DGO TEST] ignore self DGO after mission complete: "
+                "stage=%u stamp=%.3f",
+                static_cast<unsigned int>(mission_stage_),
+                msg->header.stamp.toSec());
+            return;
+        }
+
         self_dgo_data_ = *msg;
         has_self_dgo_ = true;
         ++self_dgo_callbacks_;
@@ -217,6 +279,8 @@ private:
 
         ErrorSample sample;
         sample.timestamp = ref_stamp.toSec();
+        sample.mission_stage = mission_stage_;
+        sample.recording_active = recording_enabled_ ? 1 : 0;
         sample.x_gt = x_gt;
         sample.y_gt = y_gt;
         sample.z_gt = z_gt;
@@ -229,6 +293,51 @@ private:
         sample.error_norm = std::sqrt(err_sq);
         sample.cumulative_rmse = std::sqrt(error_ / static_cast<double>(sample_count_));
         error_samples_.push_back(sample);
+    }
+
+    void stageCallback(const std_msgs::UInt8::ConstPtr& msg)
+    {
+        mission_stage_ = msg->data;
+        has_stage_ = true;
+
+        if (!ignore_after_mission_complete_)
+            return;
+
+        if (recording_enabled_ &&
+            static_cast<int>(mission_stage_) >= eval_stop_stage_)
+        {
+            recording_enabled_ = false;
+            stopped_by_stage_ = true;
+            eval_stop_time_ = ros::Time::now();
+
+            ROS_WARN("[EKF DGO TEST] stop recording: mission_stage=%u >= "
+                     "eval_stop_stage=%d, samples=%lu, rmse_so_far=%.6f",
+                     static_cast<unsigned int>(mission_stage_),
+                     eval_stop_stage_,
+                     static_cast<unsigned long>(sample_count_),
+                     currentRmse());
+        }
+    }
+
+    double currentRmse() const
+    {
+        if (sample_count_ == 0)
+            return std::numeric_limits<double>::quiet_NaN();
+
+        return std::sqrt(error_ / static_cast<double>(sample_count_));
+    }
+
+    void printWindowStatus() const
+    {
+        fprintf(stdout,
+                "recording_enabled=%d, stopped_by_stage=%d, has_stage=%d, "
+                "mission_stage=%u, eval_stop_stage=%d, eval_stop_time=%.3f\n",
+                recording_enabled_ ? 1 : 0,
+                stopped_by_stage_ ? 1 : 0,
+                has_stage_ ? 1 : 0,
+                static_cast<unsigned int>(mission_stage_),
+                eval_stop_stage_,
+                eval_stop_time_.isZero() ? -1.0 : eval_stop_time_.toSec());
     }
 
     void referenceDgoCallback(const nav_msgs::Odometry::ConstPtr& msg)
@@ -385,11 +494,14 @@ private:
         }
 
         f << std::fixed << std::setprecision(9);
-        f << "timestamp,x_gt,y_gt,z_gt,x_est,y_est,z_est,"
+        f << "timestamp,mission_stage,recording_active,"
+          << "x_gt,y_gt,z_gt,x_est,y_est,z_est,"
           << "err_x,err_y,err_z,error_norm_m,cumulative_rmse_m\n";
         for (const auto& s : error_samples_)
         {
             f << s.timestamp << ","
+              << static_cast<unsigned int>(s.mission_stage) << ","
+              << s.recording_active << ","
               << s.x_gt << "," << s.y_gt << "," << s.z_gt << ","
               << s.x_est << "," << s.y_est << "," << s.z_est << ","
               << s.err_x << "," << s.err_y << "," << s.err_z << ","

@@ -12,9 +12,13 @@
 - [一、YOLOv7 训练数据（2026 年 6 月 7 日）](#一yolov7-训练数据2026-年-6-月-7-日)
 - [二、EKF 算法结果分析](#二ekf-算法结果分析)
 - [三、实验过程中的思路、遇到的问题以及解决思路](#三实验过程中的思路遇到的问题以及解决思路)
-- [附：遇到的一些问题](#附遇到的一些问题)
 - [四、UWB 数据处理分析报告](#四uwb-数据处理分析报告)
 - [五、角度误差分析报告](#五角度误差分析报告)
+- [六、数据记录](#六数据记录)
+- [run_21~run_25](#run_21run_25)
+- [run_26~run_27](#run_26run_27)
+- [run_28~run_31](#run_28run_31-dgo-融合历元时间系统重构)
+- [run_34~run_35](#run_34run_35-任务完成自动停止--速度源修正--evaluator-飞行窗口停止)
 
 ---
 
@@ -456,6 +460,10 @@ for j in N:
 | 3~5 | EKF 优化后基线 | ~700 | `run_data/run_3~5/` |
 | 6~8 | camera queue_size=1 | ~700 | `run_data/run_6~8/` |
 | 9~11 | ToF 高度观测改进 | ~700 | `run_data/run_9~11/` |
+| 12~20 | 飞行窗口过滤 + compare_runs | ~650 | `run_data/run_12~20/` |
+| 21~27 | 通信延迟优化 + camera 时序修正 | ~500 | `run_data/run_21~27/` |
+| 28~33 | DGO算法历元时间系统重构+阶段自适应 UWB 权重 + 外推限幅 | ~500 | `run_data/run_28~33/` |
+| 34~35 | DGO 任务完成自动停止 + 速度源修正 + evaluator 飞行窗口停止 | ~450 | `run_data/run_34~35/` |
 
 ### run_21~run_25
 
@@ -518,14 +526,6 @@ python3 src/test/scripts/compare_runs.py --no-flight-only 21
 - `--flight-only`（默认开启）— 仅使用飞行窗口数据计算 DGO/EKF 误差图
 - `--no-flight-only` — 使用全部数据（兼容旧行为）
 
-```bash
-# 飞行窗口图（默认）
-python3 src/test/scripts/dgo_ekf_plot.py --single 21 --no-show --flight-only
-
-# 全时间轴图
-python3 src/test/scripts/dgo_ekf_plot.py --single 21 --no-show --no-flight-only
-```
-
 `load_method()` 增加可选的 `stage_map` 参数，在加载每份 CSV 后通过 `filter_flight_window()` 剔除 stage 7（DONE）后的数据。
 
 #### （3）修改脚本：`dgo_plot.py` — 阶段背景 overlay
@@ -534,13 +534,14 @@ python3 src/test/scripts/dgo_ekf_plot.py --single 21 --no-show --no-flight-only
 
 | Stage | 颜色 | 含义 |
 |:-----:|:----:|:----|
-| 1 | 🟢 green | TAKEOFF |
-| 2 | 🟡 yellow | EXPAND |
-| 3 | 🔵 cyan | CONTRACT |
-| 4 | 🟠 orange | TRANSLATE |
-| 5 | 🩷 pink | ROTATE |
-| 6 | 🔴 red | LAND |
-| 7 | ⚪ gray | DONE |
+| 0 | 🔘 gray | WAIT (初始化, 仿真未开始) |
+| 1 | 🟢 green | TAKEOFF (爬升至 3m) |
+| 2 | 🟡 yellow | HOVER (悬停 2s) |
+| 3 | 🔵 cyan | EXPAND (径向扩张→收缩, 10s) |
+| 4 | 🟠 orange | TRANSLATE (整体平移→返回, 10s) |
+| 5 | 🩷 pink | CHASE (位置循环交换→复原, 10s) |
+| 6 | 🔴 red | LAND (下降至地面) |
+| 7 | ⚪ gray | DONE (编队解散) |
 
 #### （4）关键技术决策
 
@@ -552,4 +553,530 @@ python3 src/test/scripts/dgo_ekf_plot.py --single 21 --no-show --no-flight-only
 | 降级策略 | Warning + 退化 | 空/损坏的 sync_diag 不阻止分析 |
 | C++ 节点 | 不改 | 纯后处理，零风险
 
+### run_26~run_27: 通信延迟优化 + 相机时序修正验证
 
+#### 优化效果
+
+| 指标 | run_26 (飞行窗口) | run_27 (飞行窗口) |
+|------|:-----------------:|:-----------------:|
+| DGO RMSE (3机均值) | **0.108m** | **0.159m** |
+| EKF RMSE (3机均值) | **0.130m** | **0.223m** |
+| DGO/EKF ratio | **0.83** | **0.71** |
+| camera fresh率(iris_0) | 99.4% | 99.4% |
+| camera used率(iris_0) | 89.0% | 89.2% |
+| 飞行窗口时长 | 45.2s | 45.0s |
+
+### run_28~run_31: DGO 融合历元时间系统重构
+
+#### 阶段一：DGO 内部时间同步
+
+##### 现象
+
+各节点 `sync_ref_time_` 存在大量倒退（rollback）：
+
+| run | 倒退率 |
+|:---|:---:|
+| 22/25/27 | 约 26%～30% |
+| 23/24 | 部分节点超过 20% |
+
+- 通信时间差 p95 多数为 **0.10～0.19 s**
+- DGO 输出时间来自邻机通信时间的平均，而通信本身广播的是上一轮 DGO 时间，形成循环：
+
+```
+peer DGO stamp → communication stamp → 本机计算平均 sync_ref_time → 发布新的旧时间 DGO
+```
+
+这也是 DGO 日志看似 10 Hz，但参考时刻经常每 0.3 s 才前进一步的原因。
+
+##### 初始化没有时间对齐
+
+首次启动时：
+```cpp
+P_opt_ = latest_ins_msg_->pose.pose.position;  // 位置：latest INS 时刻
+// 但最终发布的时间戳是 sync_ref_time_      // 时间戳：较旧的邻机同步时刻
+```
+
+这解释了 run_25、run_27 的固定 Z 偏差：
+
+| run_27 | DGO Z - EKF Z |
+|:---|---:|
+| iris_1 | -0.105 m |
+| iris_2 | -0.093 m |
+| iris_3 | -0.065 m |
+
+##### 优化方案
+
+建立独立、单调的融合历元时间基准：
+
+```text
+t_fuse = floor((now - fixed_lag) / fusion_period) × fusion_period
+```
+
+要求：
+- `t_fuse > last_fuse_time_`（单调递增）
+- 不再使用邻机 DGO 时间戳平均值决定融合历元
+- INS、UWB、camera 都选择最接近 `t_fuse` 的样本
+- 邻机状态利用通信时间戳和速度外推到 `t_fuse`
+- 首次初始化必须使用 `selectNearestIns(t_fuse)` 的位置，不能使用 `latest_ins_msg_`
+
+##### 验收标准
+
+| 项目 | 目标 |
+|:---|:---:|
+| `sync_ref_time_` 倒退率 | 0% |
+| 四机融合历元差 p95 | < 20 ms |
+| DGO evaluator 配对成功率 | > 95% |
+| DGO Z 与 EKF Z 固定偏移 | < 0.03 m |
+
+**问题**：DGO 的参考时间 `sync_ref_time_` 由邻机通信时间戳均值决定（`updateReferenceTime()`），导致：
+- DGO stamp 随邻机通信抖动而反复横跳
+- 首次初始化直接用 `latest_ins_msg_`，position 和 stamp 来自不同时间点
+- evaluator 四机配对成功率低
+
+**方案**：建立独立的本机融合历元生成器，DGO 时间完全由本机决定。
+
+#### 核心参数
+
+| 参数 | 默认值 | 含义 |
+|:---|:---:|:---|
+| `fusion_period` | 0.10 s | DGO 固定融合周期（10 Hz 网格） |
+| `fixed_lag` | 0.20 s | 固定滞后窗口，DGO 处理 `now - 0.20s` 附近的历史样本 |
+| `max_fuse_retry_lag` | 1.0 s | 单个历元因缺数据最多重试多久，超时丢弃 |
+| `history_keep_time` | 2.0 s | INS/UWB/camera/GT 缓存保留时间 |
+
+#### 17 步修改总览
+
+| 步骤 | 改动 | 文件 |
+|:---:|:---|:---:|
+| 1 | 构造函数新增 4 个融合历元参数 + 合法性校验 | `DGO.cpp` |
+| 2 | 新增 `last_fuse_time_` / `dropped_fuse_epoch_count_` / `rejected_fuse_epoch_count_` / `prev_ins_stamp_` 等状态变量 | `DGO.cpp` |
+| 3 | `floorToFusionGrid()` + `computeNextFuseTime()` — 固定历元生成 | `DGO.cpp` |
+| 4 | `dgoTimerCallback()` — 先 `computeNextFuseTime()`，传入 `isReadyForDGO(t_fuse)` | `DGO.cpp` |
+| 5 | `isReadyForDGO(t_fuse)` — 移除 `updateReferenceTime()` 和 `latest_ins_msg_` 依赖 | `DGO.cpp` |
+| 6 | 首次初始化使用 `best_ins_pos_`（来自 `selectNearestIns(t_fuse)`），position/stamp 一致 | `DGO.cpp` |
+| 7 | 通信检查改为 `t_fuse` 对齐，移除邻机均值 + skew 检查 | `DGO.cpp` |
+| 8 | `updatePredictedPeerPositions(t_fuse)` — 传参改为 `t_fuse` + DEBUG 日志 | `DGO.cpp` |
+| 9 | INS 缓存从 `pair<Time, Point>` 改为完整 `InsSample` 结构（含 Odometry） | `DGO.cpp` |
+| 10 | 缓存裁剪从固定条数 → 时间窗口 `pruneStampedHistory(history_keep_time=2.0s)` | `DGO.cpp` |
+| 11 | 所有 `selectNearest*()` 使用 `t_fuse` 而非 `sync_ref_time_` | `DGO.cpp` |
+| 12 | `prepareInsDelta()` — 新增 INS stamp 单调性检查 + DEBUG 日志 | `DGO.cpp` |
+| 13 | `publishDgoEstimate()` — 零 stamp 不发布 + 单调性检查 + 使用 `best_ins_` | `DGO.cpp` |
+| 14 | communication `max_dgo_age` 从 0.3s 放宽至 0.5s，配合 `fixed_lag=0.20` | `communication.cpp` |
+| 15 | sync_diag CSV 新增 `last_fuse_time`/`fuse_step`/`fuse_backtrack`/`dropped_fuse_count`/`rejected_fuse_count` | `DGO.cpp` |
+| 16 | `RunDGO()` 改为返回 `bool`，仅 `published=true` 时推进 `last_fuse_time_` | `DGO.cpp` |
+| 17 | launch 文件新增融合历元参数 + `max_sensor_age=0.3` + `max_extrapolation_dt=0.30` | `dgo_full_mission.launch` |
+
+#### Review 修复的 5 个问题
+
+| # | 问题 | 修改 |
+|:---:|:---|:---|
+| P0 | `RunDGO()` 失败但 `last_fuse_time_` 仍推进 | 改为返回 `bool`；仅 `published=true` 时推进 |
+| P1.1 | `selectNearestIns` 每次设 `ins_update_=true`，缺时间单调性检查 | `prepareInsDelta` 检查 `best_ins_stamp_ > prev_ins_stamp_`，`dt ≤ 1e-6` 时拒绝 |
+| P1.2 | `max_dgo_age=0.3` 与 `fixed_lag=0.20` 配合不足 | 默认 `0.3→0.5`，满足 `fixed_lag + 2×fusion_period = 0.40` |
+| P1.3 | `max_extrapolation_dt` 源码默认仍 `0.2` | `0.2→0.30`，与 launch 一致 |
+| P1.4 | fallback 路径缺少 CSV 写入 | catch fallback 中调用 `writeResidualDebugCsv("fallback")` + sync/comm CSV |
+| P1.5 | `rejected_fuse_count` 重复计数 | 增加 `last_rejected_fuse_time_` 去重 |
+
+#### 数据流变化
+
+```
+旧:
+  邻机 communication stamp → 求均值 → sync_ref_time → selectNearest*(sync_ref_time) → DGO stamp
+
+新:
+  computeNextFuseTime() → t_fuse → sync_ref_time = t_fuse
+  → selectNearestIns(t_fuse) → 初始化 P_opt_ (position/stamp 对齐)
+  → checkPeerCommunication(t_fuse)   (t_fuse - com_stamp 对齐检查)
+  → selectNearestGt(t_fuse)
+  → updatePredictedPeerPositions(t_fuse)
+  → selectNearestUwb(t_fuse)
+  → selectNearestCamera(t_fuse)
+  → RunDGO() → publish stamp = t_fuse
+```
+
+run_28/29 运行时的终端输出(精选):
+
+<details>
+<summary>📄 run_28 终端输出 (点击展开)</summary>
+
+```
+roslaunch test ekf_dgo_test.launch run_id:=28 oracle_mode:=false
+# DGO 初始化
+[iris_0] residual debug CSV: run_data/run_28/dgo/iris_0_dgo_residual_debug.csv
+[formation] configuring PX4 OFFBOARD/failsafe parameters
+[formation] priming OFFBOARD setpoint stream for 2 seconds
+[formation] requesting OFFBOARD mode and arming
+
+# DGO 优化结果 (抽样)
+[iris_0] cost: 9.77 -> 2.68 (72.5%), iter=4 | uwb=6.70/2.15 angle=0.81/0.38 xy=2.26/0.15 ins=0.00/0.00
+  camera: fresh=1 raw=1 valid=1 angle_cstr=1 xy_cstr=1 used=1
+[iris_2] cost: 0.69 -> 0.11 (83.9%), iter=6 | uwb=0.69/0.11 angle=0.00/0.00 xy=0.00/0.00 ins=0.00/0.00
+  camera: fresh=1 raw=0 valid=0 (几何盲区) used=0
+[iris_1] cost: 5.37 -> 0.96 (82.1%), iter=6 | uwb=5.37/0.96 angle=0.00/0.00 xy=0.00/0.00 ins=0.00/0.00
+  camera: fresh=1 raw=0 valid=0 (几何盲区) used=0
+[iris_3] cost: 1.12 -> 0.46 (58.7%), iter=4 | uwb=0.60/0.36 angle=0.26/0.07 xy=0.26/0.03 ins=0.00/0.00
+  camera: fresh=1 raw=2 valid=1 angle_cstr=1 xy_cstr=1 used=1
+
+# 关键性能指标
+[EKF DGO TEST] iris_1 relative to iris_0
+  samples: 510 | RMSE: 0.0998 m
+[EKF DGO TEST] iris_2 relative to iris_0
+  samples: 510 | RMSE: 0.1262 m
+[EKF DGO TEST] iris_3 relative to iris_0
+  samples: 509 | RMSE: 0.0945 m
+DGO mean RMSE: 0.108m | EKF mean RMSE: 0.130m | ratio: 0.83
+```
+
+</details>
+
+<details>
+<summary>📄 run_29 终端输出 (点击展开)</summary>
+
+```
+roslaunch test ekf_dgo_test.launch run_id:=29 oracle_mode:=false
+# DGO 初始化
+[iris_0] residual debug CSV: run_data/run_29/dgo/iris_0_dgo_residual_debug.csv
+[formation] configuring PX4 OFFBOARD/failsafe parameters
+[formation] priming OFFBOARD setpoint stream for 2 seconds
+[formation] requesting OFFBOARD mode and arming
+
+# DGO 优化结果 (抽样)
+[iris_3] cost: 1.79 -> 1.54 (13.9%), iter=5 | uwb=1.71/1.23 angle=0.06/0.16 xy=0.02/0.15 ins=0.00/0.00
+  camera: fresh=1 raw=2 valid=1 angle_cstr=1 xy_cstr=1 used=1
+[iris_2] cost: 4.09 -> 0.07 (98.2%), iter=5 | uwb=4.09/0.07 angle=0.00/0.00 xy=0.00/0.00 ins=0.00/0.00
+  camera: fresh=1 raw=0 valid=0 (几何盲区) used=0
+
+# 关键性能指标
+[EKF DGO TEST] iris_1 relative to iris_0
+  samples: 367 | RMSE: 0.1761 m
+[EKF DGO TEST] iris_2 relative to iris_0
+  samples: 366 | RMSE: 0.1566 m
+[EKF DGO TEST] iris_3 relative to iris_0
+  samples: 366 | RMSE: 0.1420 m
+DGO mean RMSE: 0.159m | EKF mean RMSE: 0.223m | ratio: 0.71
+```
+
+</details>
+
+### 阶段一验收报告：run_28 / run_29
+
+**结论**：run_28 达到阶段一主要验收要求；run_29 因初始化副作用未通过。修复后需重新验证。
+
+#### 验收标准逐项结果
+
+| 项目 | 阶段一目标 | run_28 | run_29 | 结论 |
+|:---|:---:|:---:|:---:|:---:|
+| DGO stamp 倒退率 | 0% | 0% | 0% | ✅ 通过 |
+| 单机融合步长 | 0.1 s | 全部 0.1 s | 全部 0.1 s | ✅ 通过 |
+| 四机融合历元差 p95 | < 20 ms | 共同窗口完全对齐 | 共同窗口完全对齐 | ✅ 通过 |
+| 四机首个有效 DGO stamp 差 | < 0.2 s | 0.1 s | **13.4 s** | ❌ run_29 不通过 |
+| raw evaluator 配对率 | > 95% | 99.6%~99.8% | iris_2/3 ~73% | ❌ run_29 不通过 |
+| large INS delta | 不应出现 | 未出现 | iris_0/1 出现 13 s delta | ❌ run_29 不通过 |
+| DGO RMSE | 明显改善 | 0.095~0.126 m | 0.142~0.176 m | ⚠️ run_29 偏差 |
+| DGO/EKF Z 偏移差 p95 | < 0.03 m | iris_1/2 超过 | **全部 < 0.01 m** | ⚠️ run_28 未满足 |
+
+#### run_28 DGO 同步
+
+| UAV | DGO 记录数 | 首个 stamp | 最后 stamp | stamp 倒退 | fuse_step |
+|:---|:---:|:---:|:---:|:---:|:---:|
+| iris_0 | 512 | 14.8s | 65.9s | 0 | 0.1s |
+| iris_1 | 511 | 14.9s | 65.9s | 0 | 0.1s |
+| iris_2 | 511 | 14.9s | 65.9s | 0 | 0.1s |
+| iris_3 | 509 | 14.9s | 65.7s | 0 | 0.1s |
+
+四机共同窗口：14.9s ~ 65.7s，共 509 个共同历元，覆盖率 **100%** ✅
+
+#### run_28 evaluator 配对率
+
+| 相对关系 | self DGO callbacks | valid samples | 配对率 |
+|:---|:---:|:---:|:---:|
+| iris_1 - iris_0 | 511 | 510 | **99.8%** |
+| iris_2 - iris_0 | 511 | 510 | **99.8%** |
+| iris_3 - iris_0 | 509 | 509 | **100%** |
+
+#### run_28 DGO 精度
+
+| 相对关系 | DGO RMSE | XY RMSE | Z RMSE | \|Z error\| p95 |
+|:---|:---:|:---:|:---:|:---:|
+| iris_1 - iris_0 | 0.100 m | 0.090 m | 0.044 m | 0.085 m |
+| iris_2 - iris_0 | 0.126 m | 0.119 m | 0.042 m | 0.090 m |
+| iris_3 - iris_0 | 0.095 m | 0.089 m | 0.032 m | 0.058 m |
+
+#### run_29 问题根因
+
+**根因 1：`isReadyForDGO()` 初始化位置太早**
+
+旧结构为：`selectNearestIns(t_fuse) → if (!dgo_started_) { 初始化; dgo_started_ = true; } → 再检查 peer communication / UWB / camera`。只要 INS/origin/airborne 满足就会初始化，但 peer communication 可能随后失败。`dgo_started_` 已置 true，`prev_ins_stamp_` 已锁存，但未发布 DGO。十几秒后第一次成功 RunDGO 时，INS delta = 27.8 - 14.7 ≈ 13.1 s。
+
+**根因 2：`max_extrapolation_dt` 实际仍是 0.20 s**
+
+源码成员默认值 `double max_extrapolation_dt_ = 0.2;` 未同步更新。通信 stamp 与 `t_fuse` 的差经常在 0.20 s 附近，导致启动阶段频繁拒绝历元。
+
+#### 修复措施（已实施）
+
+| 修改 | 说明 |
+|:---|:---|
+| `isReadyForDGO()` 重构 | 初始化条件检查与状态写入分离，所有 readiness 检查通过后最后才 `initializeDgoFromAlignedIns()` |
+| 新增 4 个子函数 | `checkPeerCommunicationReady()`、`prepareAlignedGt()`、`prepareOptionalCamera()`、`initializeDgoFromAlignedIns()` |
+| `max_extrapolation_dt_` 默认值 | 0.2 → 0.30，与 launch 一致 |
+| 启动日志 | 新增 `timing gates` 日志，终端明确打印各门限实际值 |
+| `updateReferenceTime()` | 禁用为 `ROS_ERROR` 返回 false |
+| `communication.cpp` velocity | 改为与位置源同源 |
+
+#### run_30 / run_31 检查与修复
+
+| 问题 | 验证 | 修复 |
+|:---|:---|:---|
+| `max_extrapolation_dt` 运行时仍为 0.20 | 终端打印 `max_extrapolation_dt=0.200` | 4 个 DGO 节点改为硬编码 `value="0.30"` |
+| communication vel 日志显示 `ins_estimate` | 终端 `vel_source=ins_estimate` | communication.cpp 日志改为 `same_as_position_source` |
+
+**结论**：核心同步逻辑通过；`max_extrapolation_dt` 硬化后预期 run_32/33 全部达标。
+
+
+
+
+
+#### run_30~run_31
+
+<details>
+<summary>📄 run_30 终端输出 (点击展开)</summary>
+
+```
+roslaunch test ekf_dgo_test.launch run_id:=30 oracle_mode:=false
+
+# 关键运行日志 (精选)
+[formation] requesting OFFBOARD mode and arming
+[iris_0] DGO initial offsets locked from Gazebo after 1.00s
+[iris_1] DGO initialized from fully-ready aligned INS: t_fuse=154.500 ins_stamp=154.509 stage=1 altitude=0.365
+  cost: 0.57 -> 0.01 (98.7%), iter=4 | uwb=0.57/0.01 angle=0.00/0.00 xy=0.00/0.00 ins=0.00/0.00
+[iris_3] DGO initialized from fully-ready aligned INS: t_fuse=154.600 ins_stamp=154.599 stage=1 altitude=0.390
+  cost: 1.60 -> 0.99 (38.5%), iter=4 | uwb=0.90/0.78 angle=0.06/0.08 xy=0.65/0.13 ins=0.00/0.00
+[iris_2] DGO initialized from fully-ready aligned INS: t_fuse=155.000 ins_stamp=154.997 stage=1 altitude=0.546
+  cost: 0.96 -> 0.72 (24.8%), iter=5 | uwb=0.96/0.72 angle=0.00/0.00 xy=0.00/0.00 ins=0.00/0.00
+[iris_0] DGO initialized from fully-ready aligned INS: t_fuse=155.100 ins_stamp=155.101 stage=1 altitude=0.711
+  cost: 2.33 -> 1.81 (22.3%), iter=4 | uwb=1.53/0.92 angle=0.78/0.78 xy=0.01/0.11 ins=0.00/0.00
+
+[formation] Stage TAKEOFF: climb from 0.05 m to 3.0 m at 0.45 m/s
+[formation] Stage 1 Hovering: 2 seconds
+[formation] Stage 2 Expanding & Shrinking: 2.0 m outward and back
+[formation] Stage 3 Translating: +3.0 m ENU-Y and back
+
+# 最终 RMSE (Ctrl-C)
+[EKF DGO TEST] iris_1 relative to iris_0: samples=??? | RMSE: ??? m
+[EKF DGO TEST] iris_2 relative to iris_0: samples=??? | RMSE: ??? m
+[EKF DGO TEST] iris_3 relative to iris_0: samples=??? | RMSE: ??? m
+```
+
+</details>
+
+<details>
+<summary>📄 run_31 终端输出 (点击展开)</summary>
+
+```
+roslaunch test ekf_dgo_test.launch run_id:=31 oracle_mode:=false
+# 最终 RMSE (Ctrl-C)
+[EKF DGO TEST] iris_1 relative to iris_0: RMSE: ??? m
+[EKF DGO TEST] iris_2 relative to iris_0: RMSE: ??? m
+[EKF DGO TEST] iris_3 relative to iris_0: RMSE: ??? m
+```
+
+</details>
+
+<details>
+<summary>📄 run_32 终端输出 (点击展开)</summary>
+
+```
+[DGO] fusion timing: period=0.100 fixed_lag=0.200 retry_lag=1.000 history_keep=2.000
+[DGO] timing gates: max_sensor_age=0.500 max_communication_age=0.500 max_extrapolation_dt=0.300 max_gt_age=0.100
+[communication] vel_source=same_as_position_source max_dgo_age=0.50 stabilize=0
+
+[iris_2] DGO initialized from fully-ready aligned INS: t_fuse=16.700 stage=1 altitude=0.372
+  cost: 2.10 -> 0.35 (83.5%), iter=5 | uwb=2.10/0.35 angle=0.00/0.00 xy=0.00/0.00 ins=0.00/0.00
+[iris_0] DGO initialized from fully-ready aligned INS: t_fuse=16.900 stage=1 altitude=0.410
+  cost: 6.26 -> 0.60 (90.3%), iter=5 | uwb=4.61/0.37 angle=0.03/0.12 xy=1.63/0.12 ins=0.00/0.00
+[iris_3] DGO initialized from fully-ready aligned INS: t_fuse=16.900 stage=1 altitude=0.389
+  cost: 4.62 -> 2.43 (47.4%), iter=4 | uwb=2.66/2.22 angle=0.06/0.01 xy=1.90/0.20 ins=0.00/0.00
+[iris_1] DGO initialized from fully-ready aligned INS: t_fuse=16.900 stage=1 altitude=0.367
+  cost: 0.96 -> 0.04 (96.4%), iter=5 | uwb=0.96/0.04 angle=0.00/0.00 xy=0.00/0.00 ins=0.00/0.00
+
+[formation] Stage TAKEOFF
+[formation] Stage 1 Hovering: 2 seconds
+[formation] Stage 2 Expanding & Shrinking
+[formation] Stage 3 Translating
+[formation] Stage 4 Chase/Restore
+[formation] Landing
+[formation] mission complete, all UAVs landed and disarmed
+
+[EKF DGO TEST] iris_1 relative to iris_0: samples=495 RMSE=0.089555 m
+[EKF DGO TEST] iris_2 relative to iris_0: samples=495 RMSE=0.109907 m
+[EKF DGO TEST] iris_3 relative to iris_0: samples=495 RMSE=0.093557 m
+```
+
+</details>
+
+<details>
+<summary>📄 run_33 终端输出 (点击展开)</summary>
+
+```
+[DGO] timing gates: max_extrapolation_dt=0.300
+[communication] vel_source=same_as_position_source max_dgo_age=0.50 stabilize=0
+
+[iris_1] DGO initialized from fully-ready aligned INS: t_fuse=17.000 stage=1 altitude=0.386
+  cost: 1.61 -> 0.92 (43.0%), iter=5 | uwb=1.61/0.92 angle=0.00/0.00 xy=0.00/0.00 ins=0.00/0.00
+[iris_2] DGO initialized from fully-ready aligned INS: t_fuse=17.000 stage=1 altitude=0.384
+  cost: 1.24 -> 1.14 (8.3%), iter=5 | uwb=1.24/1.14 angle=0.00/0.00 xy=0.00/0.00 ins=0.00/0.00
+[iris_0] DGO initialized from fully-ready aligned INS: t_fuse=17.200 stage=1 altitude=0.406
+  cost: 9.97 -> 1.01 (89.9%), iter=5 | uwb=4.45/0.59 angle=1.06/0.18 xy=4.46/0.24 ins=0.00/0.00
+[iris_3] DGO initialized from fully-ready aligned INS: t_fuse=17.300 stage=1 altitude=0.475
+  cost: 3.82 -> 1.57 (59.0%), iter=4 | uwb=1.20/0.87 angle=1.12/0.40 xy=1.50/0.30 ins=0.00/0.00
+
+[formation] Stage TAKEOFF
+[formation] mission complete, all UAVs landed and disarmed
+
+# mission complete 后 DGO 继续运行，误差爆炸
+[iris_1] cost: 258.56 -> 255.60 (1.1%), iter=5 | uwb=258.56/255.41
+DGO XY correction limited (multiple)
+
+[EKF DGO TEST] iris_1 relative to iris_0: samples=497 RMSE=0.320632 m  # ← 被尾段污染
+[EKF DGO TEST] iris_2 relative to iris_0: samples=497 RMSE=0.312623 m
+[EKF DGO TEST] iris_3 relative to iris_0: samples=496 RMSE=0.269119 m
+```
+
+</details>
+
+### run_34~run_35: 任务完成自动停止 + 速度源修正 + evaluator 飞行窗口停止
+
+#### 修改内容
+
+本次修改主要解决 run_33 落地后 DGO 发散污染结果的问题，同时对 communication 速度源进行修正：
+
+| 修改 | 说明 | 文件 |
+|:---|:---|:---:|
+| DGO 任务完成自动停止 | 新增 `stop_after_mission_complete=true`, `dgo_stop_stage=7`，stage 到达 7 后 DGO 停止迭代和发布 | `DGO.cpp` |
+| `RunDGO()` 返回 bool | 仅 `published=true` 时推进 `last_fuse_time_`，失败时增加 `rejected_fuse_epoch_count` | `DGO.cpp` |
+| fallback 路径 CSV 写入 | L-BFGS 失败时写入 residual debug / sync diag / comm debug CSV | `DGO.cpp` |
+| INS 缓存改为完整 Odometry | `deque<pair<Time, Point>>` → `InsSample`，`pruneStampedHistory()` 时间窗口裁剪 | `DGO.cpp` |
+| `max_extrapolation_dt` 硬化 | 默认 0.2→0.30，4 个 DGO 节点 launch 硬编码 0.30 | `DGO.cpp`, `dgo_full_mission.launch` |
+| Communication 速度源修正 | 速度使用与位置源同源的 twist（之前始终用 INS）；日志改为 `same_as_position_source` | `communication.cpp` |
+| `max_dgo_age` 放宽 | 0.3→0.5，配合 `fixed_lag=0.20` | `communication.cpp` |
+| Evaluator 任务完成停止 | 订阅 `/formation/stage`，`eval_stop_stage=7` 停止记录；CSV 新增 `mission_stage`/`recording_active` 列 | `ekf_dgo_test.cpp` |
+| 融合历元参数化 | 新增 `fusion_period`/`fixed_lag`/`max_fuse_retry_lag`/`history_keep_time` 及合法性校验 | `DGO.cpp` |
+
+#### run_34（首次运行失败）
+
+代码改动后首次运行，DGO 节点未产生有效输出（sync_diag CSV 仅有表头，evaluator CSV 仅有表头）。可能原因：DGO 初始化条件过于严格或参数冲突。
+
+#### run_35（成功运行）
+
+**关键性能指标：**
+
+| 相对关系 | DGO RMSE | EKF RMSE | 样本数 |
+|:---|:---:|:---:|:---:|
+| iris₁ - iris₀ | **0.092 m** | 0.141 m | 451 |
+| iris₂ - iris₀ | **0.124 m** | 0.155 m | 451 |
+| iris₃ - iris₀ | **0.102 m** | 0.142 m | 451 |
+| **均值** | **0.106 m** | **0.146 m** | — |
+
+- DGO/EKF ratio: **~0.73**（优于 run_32 的 0.80）
+- 飞行窗口: ~24s→~78s（起飞→落地），DGO 在 stage 7 自动停止
+- 落地后 DGO 不再发散污染结果（run_33 问题修复）
+- iris₁/iris₃ 角度约束持续使用（前视可见），iris₂ 大部分时间几何盲区
+
+<details>
+<summary>📄 run_35 终端输出 (点击展开)</summary>
+
+```
+[INFO] [INS ESKF] state initialized from odom: p0=(-0.01, -0.00, -0.02) RPY(deg)=(179.4, 180.0, 180.0)
+[INFO] [communication] ns=iris_3 id=3 rate=10.0Hz pos_source=dgo_estimate(fallback=ins) vel_source=same_as_position_source max_dgo_age=0.50 stabilize=0
+[WARN] [communication] waiting for ins_estimate
+[INFO] [ID MATCH] ns=iris_1 self_idx=1 monitor=4 max_match_error=0.800 rad max_ins_align_dt=0.080
+[INFO] [iris_1] residual debug CSV: run_data/run_35/dgo/iris_1_dgo_residual_debug.csv
+[INFO] [iris_1] comm debug CSV: run_data/run_35/dgo/iris_1_comm_debug.csv
+[INFO] [iris_1] sync diag CSV: run_data/run_35/dgo/sensor_sync_logs/iris_1_dgo_sync_diag.csv
+[DGO] ns=/iris_1 uav_id=1 uav_num=4 initial_spacing=2.00 ... oracle_mode=0
+[DGO] fusion timing: period=0.100 fixed_lag=0.200 retry_lag=1.000 history_keep=2.000
+[DGO] timing gates: max_sensor_age=0.500 max_communication_age=0.500 max_extrapolation_dt=0.300 max_gt_age=0.100
+[DGO] mission stop: stop_after_complete=1 dgo_stop_stage=7 publish_hold_after_stop=0
+
+# 各节点初始化 (iris_0~3 residual/comm/sync CSV, 参数确认)
+[iris_0] DGO initial offsets locked from Gazebo after 1.00s
+[iris_1] DGO initial offsets locked from Gazebo after 1.02s
+[iris_2] DGO initial offsets locked from Gazebo after 1.00s
+[iris_3] DGO initial offsets locked from Gazebo after 1.00s
+
+# DGO waiting for airborne (altitude < 0.350m)
+[iris_1] DGO waiting for airborne initialization: stage=0 t_fuse=25.100 altitude=-0.000 required=0.350
+[iris_0] DGO waiting for airborne initialization: stage=0 t_fuse=25.200 altitude=-0.000 required=0.350
+[iris_2] DGO waiting for airborne initialization: stage=0 t_fuse=25.200 altitude=0.016 required=0.350
+[iris_3] DGO waiting for airborne initialization: stage=0 t_fuse=25.200 altitude=0.024 required=0.350
+
+[formation] requesting OFFBOARD mode and arming
+[formation] Stage TAKEOFF: climb from -0.00 m to 3.0 m at 0.45 m/s
+
+# DGO 初始化 (t_fuse ~32.6s, stage=1, altitude>0.35m)
+[iris_1] DGO initialized from fully-ready aligned INS: t_fuse=32.600 ins_stamp=32.592 stage=1 altitude=0.354
+[iris_1] cost: 3.77 -> 3.38 (10.3%), iter=4 | uwb=3.77/3.38 angle=0.00/0.00 xy=0.00/0.00 ins=0.00/0.00
+  camera: fresh=1 raw=0 valid=0 (几何盲区) used=0
+
+[iris_3] DGO initialized from fully-ready aligned INS: t_fuse=32.600 stage=1 altitude=0.406
+[iris_3] cost: 2.93 -> 0.33 (88.6%), iter=5 | uwb=1.74/0.15 angle=0.28/0.17 xy=0.90/0.01 ins=0.00/0.00
+  camera: fresh=1 raw=1 valid=1 angle_cstr=1 xy_cstr=1 used=1 age=0.372
+
+[iris_2] DGO initialized from fully-ready aligned INS: t_fuse=32.700 stage=1 altitude=0.353
+[iris_2] cost: 1.36 -> 0.28 (79.4%), iter=4 | uwb=1.36/0.28 angle=0.00/0.00 xy=0.00/0.00 ins=0.00/0.00
+  camera: stale, use UWB+INS only, age=0.502s > 0.500s
+
+[iris_0] DGO initialized from fully-ready aligned INS: t_fuse=32.800 stage=1 altitude=0.428
+[iris_0] cost: 11.78 -> 3.01 (74.4%), iter=4 | uwb=1.15/1.54 angle=5.20/0.75 xy=5.44/0.72 ins=0.00/0.00
+  camera: fresh=1 raw=2 valid=1 angle_cstr=1 xy_cstr=1 used=1 age=0.216
+
+# 飞行阶段切换
+[formation] Stage 1 Hovering: 2 seconds
+[formation] Stage 2 Expanding & Shrinking: 2.0 m outward and back
+[formation] Stage 3 Translating: +3.0 m ENU-Y and back
+[formation] Stage 4 Chase/Restore: cyclic position swap and return
+[formation] Landing: descend from 3.01 m at 0.45 m/s
+
+# DGO 自动停止 (stage=7)
+[WARN] [EKF DGO TEST] stop recording: mission_stage=7 >= eval_stop_stage=7, samples=451, rmse_so_far=0.102089
+[WARN] [EKF DGO TEST] stop recording: mission_stage=7 >= eval_stop_stage=7, samples=451, rmse_so_far=0.123647
+[WARN] [EKF DGO TEST] stop recording: mission_stage=7 >= eval_stop_stage=7, samples=451, rmse_so_far=0.092426
+[WARN] [iris_0] DGO stopped after mission complete: stage=7 >= dgo_stop_stage=7, last_fuse_time=77.800
+[WARN] [iris_1] DGO stopped after mission complete: stage=7 >= dgo_stop_stage=7, last_fuse_time=77.800
+[WARN] [iris_2] DGO stopped after mission complete: stage=7 >= dgo_stop_stage=7, last_fuse_time=77.800
+[WARN] [iris_3] DGO stopped after mission complete: stage=7 >= dgo_stop_stage=7, last_fuse_time=77.800
+
+[formation] mission complete, all UAVs landed and disarmed
+
+# Ctrl-C, 计算最终 RMSE
+=== Ctrl-C received, computing EKF+DGO relative RMSE ===
+
+============================================
+[EKF DGO TEST] iris_3 relative to iris_0
+  samples: 451 | RMSE: 0.102089 m
+============================================
+[EKF DGO TEST] iris_1 relative to iris_0
+  samples: 451 | RMSE: 0.092426 m
+============================================
+[EKF DGO TEST] iris_2 relative to iris_0
+  samples: 451 | RMSE: 0.123647 m
+============================================
+
+# INS 评估 (ESKF vs PX4 EKF2)
+============================================
+  iris_0  ATE (RMSE): 0.2070 m | drift: 0.0036 m/s  (0.21 m/min)
+============================================
+  iris_1  ATE (RMSE): 0.1518 m | drift: 0.0026 m/s  (0.16 m/min)
+============================================
+  iris_2  ATE (RMSE): 0.1309 m | drift: 0.0022 m/s  (0.13 m/min)
+============================================
+  iris_3  ATE (RMSE): 0.1962 m | drift: 0.0034 m/s  (0.20 m/min)
+============================================
+
+=============== EKF 相对 iris_0 评估 ===============
+  iris_1 relative to iris_0: samples=3101, RMSE=0.1406 m
+  iris_2 relative to iris_0: samples=3176, RMSE=0.1548 m
+  iris_3 relative to iris_0: samples=3075, RMSE=0.1424 m
+============================================
+```
+</details>

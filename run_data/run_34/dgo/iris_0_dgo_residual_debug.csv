@@ -1,0 +1,1 @@
+stamp,phase,self_id,target_id,uwb_dt,camera_dt,com_dt,rel_gt_x,rel_gt_y,rel_gt_z,rel_pred_x,rel_pred_y,rel_pred_z,uwb_meas,uwb_pred,uwb_residual,alpha_meas,alpha_pred,alpha_residual,theta_meas,theta_pred,theta_residual,xy_residual_x,xy_residual_y,cost_uwb,cost_angle,cost_xy,cost_ins,cam_target_valid,angle_constraint_valid,xy_constraint_valid

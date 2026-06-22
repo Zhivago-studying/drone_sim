@@ -48,7 +48,7 @@ public:
             publish_rate_ = 10.0;
         }
         pnh_.param("use_dgo_position", use_dgo_position_, true);
-        pnh_.param("max_dgo_age", max_dgo_age_, 0.3);
+        pnh_.param("max_dgo_age", max_dgo_age_, 0.5);
         pnh_.param("stabilize_position", stabilize_position_, false);
         pnh_.param("dgo_correction_gain", dgo_correction_gain_, 0.35);
         pnh_.param("ins_fallback_gain", ins_fallback_gain_, 0.15);
@@ -65,7 +65,7 @@ public:
         com_pub_ = nh_.advertise<sensors::ComMsg>("communication", 1);
 
         ROS_INFO("[communication] ns=%s id=%u rate=%.1fHz pos_source=%s "
-                 "vel_source=ins_estimate max_dgo_age=%.2f stabilize=%d "
+                 "vel_source=same_as_position_source max_dgo_age=%.2f stabilize=%d "
                  "gain_dgo=%.2f gain_ins=%.2f correction_rate=%.2f "
                  "max_dgo_ins_disagreement=%.2f max_prediction_speed=%.2f",
                  ns.c_str(), static_cast<unsigned int>(id_), publish_rate_,
@@ -178,10 +178,15 @@ private:
         msg.header.frame_id = pos_src->header.frame_id;
         msg.id = id_;
 
-        // 速度始终来自 INS: DGO 目前只修正位置,不估计速度。
-        msg.velocity.x = latest_ins_msg_->twist.twist.linear.x;
-        msg.velocity.y = latest_ins_msg_->twist.twist.linear.y;
-        msg.velocity.z = latest_ins_msg_->twist.twist.linear.z;
+        // 速度使用与位置源相同时间语义的 twist。
+        // 当位置源为 DGO 时，dgo_estimate.twist 已由 DGO 节点复制自
+        // t_fuse 对齐后的 INS 样本；当位置源为 INS 时，position/velocity/stamp
+        // 都来自同一个 INS 消息。
+        const nav_msgs::Odometry::ConstPtr &vel_src =
+            use_dgo ? latest_dgo_msg_ : latest_ins_msg_;
+        msg.velocity.x = vel_src->twist.twist.linear.x;
+        msg.velocity.y = vel_src->twist.twist.linear.y;
+        msg.velocity.z = vel_src->twist.twist.linear.z;
 
         if (stabilize_position_)
         {
@@ -272,7 +277,7 @@ private:
     uint8_t id_ = 0;
     uint32_t seq_ = 0;
     double publish_rate_ = 10.0;
-    double max_dgo_age_ = 0.3;
+    double max_dgo_age_ = 0.5;
     double dgo_correction_gain_ = 0.35;
     double ins_fallback_gain_ = 0.15;
     double max_position_correction_rate_ = 0.8;

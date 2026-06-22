@@ -11,7 +11,7 @@
   <arg name="max_communication_age" default="0.5" />
   <arg name="max_communication_skew" default="0.2" />
   <arg name="max_gt_age" default="0.1" />
-  <arg name="max_extrapolation_dt" default="0.2" />
+  <arg name="max_extrapolation_dt" default="0.30" />
   <arg name="uwb_stddev" default="0.05" />
   <arg name="uwb_dynamic_stddev" default="0.065" />
   <arg name="ins_prior_stddev_xy" default="0.25" />
@@ -25,6 +25,12 @@
   <arg name="max_prediction_speed" default="2.0" />
   <arg name="landing_descent_rate" default="0.45" />
   <arg name="force_disarm_delay" default="2.0" />
+  <arg name="stop_after_mission_complete" default="true" />
+  <arg name="dgo_stop_stage" default="7" />
+  <arg name="publish_hold_after_stop" default="false" />
+  <arg name="ignore_after_mission_complete" default="true" />
+  <arg name="eval_stop_stage" default="7" />
+  <arg name="count_ignored_callbacks" default="true" />
   <arg name="run_id" default="" />
 
   <!--
@@ -94,7 +100,7 @@
       <param name="max_communication_age" value="$(arg max_communication_age)" />
       <param name="max_communication_skew" value="$(arg max_communication_skew)" />
       <param name="max_gt_age" value="$(arg max_gt_age)" />
-      <param name="max_extrapolation_dt" value="$(arg max_extrapolation_dt)" />
+      <param name="max_extrapolation_dt" value="0.30" />
       <param name="uwb_stddev" value="$(arg uwb_stddev)" />
       <param name="uwb_dynamic_stddev" value="$(arg uwb_dynamic_stddev)" />
       <param name="ins_prior_stddev_xy" value="$(arg ins_prior_stddev_xy)" />
@@ -102,6 +108,13 @@
       <param name="max_dgo_step_xy" value="$(arg max_dgo_step_xy)" />
       <param name="require_airborne_initialization" value="$(arg require_airborne_initialization)" />
       <param name="min_dgo_start_altitude" value="$(arg min_dgo_start_altitude)" />
+      <param name="fusion_period" value="0.10" />
+      <param name="fixed_lag" value="0.20" />
+      <param name="history_keep_time" value="2.0" />
+      <param name="max_fuse_retry_lag" value="1.0" />
+      <param name="stop_after_mission_complete" value="$(arg stop_after_mission_complete)" />
+      <param name="dgo_stop_stage" value="$(arg dgo_stop_stage)" />
+      <param name="publish_hold_after_stop" value="$(arg publish_hold_after_stop)" />
     </node>
   </group>
 
@@ -137,7 +150,7 @@
       <param name="max_communication_age" value="$(arg max_communication_age)" />
       <param name="max_communication_skew" value="$(arg max_communication_skew)" />
       <param name="max_gt_age" value="$(arg max_gt_age)" />
-      <param name="max_extrapolation_dt" value="$(arg max_extrapolation_dt)" />
+      <param name="max_extrapolation_dt" value="0.30" />
       <param name="uwb_stddev" value="$(arg uwb_stddev)" />
       <param name="uwb_dynamic_stddev" value="$(arg uwb_dynamic_stddev)" />
       <param name="ins_prior_stddev_xy" value="$(arg ins_prior_stddev_xy)" />
@@ -145,6 +158,13 @@
       <param name="max_dgo_step_xy" value="$(arg max_dgo_step_xy)" />
       <param name="require_airborne_initialization" value="$(arg require_airborne_initialization)" />
       <param name="min_dgo_start_altitude" value="$(arg min_dgo_start_altitude)" />
+      <param name="fusion_period" value="0.10" />
+      <param name="fixed_lag" value="0.20" />
+      <param name="history_keep_time" value="2.0" />
+      <param name="max_fuse_retry_lag" value="1.0" />
+      <param name="stop_after_mission_complete" value="$(arg stop_after_mission_complete)" />
+      <param name="dgo_stop_stage" value="$(arg dgo_stop_stage)" />
+      <param name="publish_hold_after_stop" value="$(arg publish_hold_after_stop)" />
     </node>
   </group>
 
@@ -180,7 +200,7 @@
       <param name="max_communication_age" value="$(arg max_communication_age)" />
       <param name="max_communication_skew" value="$(arg max_communication_skew)" />
       <param name="max_gt_age" value="$(arg max_gt_age)" />
-      <param name="max_extrapolation_dt" value="$(arg max_extrapolation_dt)" />
+      <param name="max_extrapolation_dt" value="0.30" />
       <param name="uwb_stddev" value="$(arg uwb_stddev)" />
       <param name="uwb_dynamic_stddev" value="$(arg uwb_dynamic_stddev)" />
       <param name="ins_prior_stddev_xy" value="$(arg ins_prior_stddev_xy)" />
@@ -188,6 +208,13 @@
       <param name="max_dgo_step_xy" value="$(arg max_dgo_step_xy)" />
       <param name="require_airborne_initialization" value="$(arg require_airborne_initialization)" />
       <param name="min_dgo_start_altitude" value="$(arg min_dgo_start_altitude)" />
+      <param name="fusion_period" value="0.10" />
+      <param name="fixed_lag" value="0.20" />
+      <param name="history_keep_time" value="2.0" />
+      <param name="max_fuse_retry_lag" value="1.0" />
+      <param name="stop_after_mission_complete" value="$(arg stop_after_mission_complete)" />
+      <param name="dgo_stop_stage" value="$(arg dgo_stop_stage)" />
+      <param name="publish_hold_after_stop" value="$(arg publish_hold_after_stop)" />
     </node>
   </group>
 
@@ -223,7 +250,7 @@
       <param name="max_communication_age" value="$(arg max_communication_age)" />
       <param name="max_communication_skew" value="$(arg max_communication_skew)" />
       <param name="max_gt_age" value="$(arg max_gt_age)" />
-      <param name="max_extrapolation_dt" value="$(arg max_extrapolation_dt)" />
+      <param name="max_extrapolation_dt" value="0.30" />
       <param name="uwb_stddev" value="$(arg uwb_stddev)" />
       <param name="uwb_dynamic_stddev" value="$(arg uwb_dynamic_stddev)" />
       <param name="ins_prior_stddev_xy" value="$(arg ins_prior_stddev_xy)" />
@@ -231,6 +258,13 @@
       <param name="max_dgo_step_xy" value="$(arg max_dgo_step_xy)" />
       <param name="require_airborne_initialization" value="$(arg require_airborne_initialization)" />
       <param name="min_dgo_start_altitude" value="$(arg min_dgo_start_altitude)" />
+      <param name="fusion_period" value="0.10" />
+      <param name="fixed_lag" value="0.20" />
+      <param name="history_keep_time" value="2.0" />
+      <param name="max_fuse_retry_lag" value="1.0" />
+      <param name="stop_after_mission_complete" value="$(arg stop_after_mission_complete)" />
+      <param name="dgo_stop_stage" value="$(arg dgo_stop_stage)" />
+      <param name="publish_hold_after_stop" value="$(arg publish_hold_after_stop)" />
     </node>
   </group>
 
@@ -258,6 +292,9 @@
       <param name="max_align_dt" value="$(arg max_align_dt)" />
       <param name="max_dgo_align_dt" value="$(arg max_dgo_align_dt)" />
       <param name="max_model_align_dt" value="$(arg max_model_align_dt)" />
+      <param name="ignore_after_mission_complete" value="$(arg ignore_after_mission_complete)" />
+      <param name="eval_stop_stage" value="$(arg eval_stop_stage)" />
+      <param name="count_ignored_callbacks" value="$(arg count_ignored_callbacks)" />
     </node>
   </group>
 
@@ -267,6 +304,9 @@
       <param name="max_align_dt" value="$(arg max_align_dt)" />
       <param name="max_dgo_align_dt" value="$(arg max_dgo_align_dt)" />
       <param name="max_model_align_dt" value="$(arg max_model_align_dt)" />
+      <param name="ignore_after_mission_complete" value="$(arg ignore_after_mission_complete)" />
+      <param name="eval_stop_stage" value="$(arg eval_stop_stage)" />
+      <param name="count_ignored_callbacks" value="$(arg count_ignored_callbacks)" />
     </node>
   </group>
 
@@ -276,6 +316,9 @@
       <param name="max_align_dt" value="$(arg max_align_dt)" />
       <param name="max_dgo_align_dt" value="$(arg max_dgo_align_dt)" />
       <param name="max_model_align_dt" value="$(arg max_model_align_dt)" />
+      <param name="ignore_after_mission_complete" value="$(arg ignore_after_mission_complete)" />
+      <param name="eval_stop_stage" value="$(arg eval_stop_stage)" />
+      <param name="count_ignored_callbacks" value="$(arg count_ignored_callbacks)" />
     </node>
   </group>
 </launch>

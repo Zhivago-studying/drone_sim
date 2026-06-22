@@ -43,7 +43,7 @@ public:
         pnh_.param("max_communication_age", max_communication_age_, 0.5);
         pnh_.param("max_communication_skew", max_communication_skew_, 0.2);
         pnh_.param("max_gt_age", max_gt_age_, 0.1);
-        pnh_.param("max_extrapolation_dt", max_extrapolation_dt_, 0.2);
+        pnh_.param("max_extrapolation_dt", max_extrapolation_dt_, 0.30);
         pnh_.param("uwb_stddev", uwb_stddev_, 0.05);
         pnh_.param("uwb_dynamic_stddev", uwb_dynamic_stddev_, 0.065);
         pnh_.param("ins_prior_stddev_xy", ins_prior_stddev_xy_, 0.25);
@@ -53,20 +53,42 @@ public:
                    require_airborne_initialization_, true);
         pnh_.param("min_dgo_start_altitude",
                    min_dgo_start_altitude_, 0.35);
+        // 融合历元参数
+        pnh_.param("fusion_period", fusion_period_, 0.1);
+        pnh_.param("fixed_lag", fixed_lag_, 0.20);
+        pnh_.param("max_fuse_retry_lag", max_fuse_retry_lag_, 1.0);
+        pnh_.param("history_keep_time", history_keep_time_, 2.0);
+        pnh_.param("stop_after_mission_complete",
+                   stop_after_mission_complete_, true);
+        pnh_.param("dgo_stop_stage", dgo_stop_stage_, 7);
+        pnh_.param("publish_hold_after_stop",
+                   publish_hold_after_stop_, false);
         if (min_dgo_start_altitude_ < 0.0 ||
             uwb_stddev_ <= 0.0 ||
             uwb_dynamic_stddev_ <= 0.0 ||
             ins_prior_stddev_xy_ <= 0.0 ||
             max_dgo_correction_xy_ <= 0.0 ||
-            max_dgo_step_xy_ <= 0.0)
+            max_dgo_step_xy_ <= 0.0 ||
+            fusion_period_ <= 0.0 ||
+            fixed_lag_ < 0.0 ||
+            max_fuse_retry_lag_ <= fixed_lag_ ||
+            history_keep_time_ < fixed_lag_ + 0.5 ||
+            dgo_stop_stage_ < 0 ||
+            dgo_stop_stage_ > 255)
         {
             ROS_FATAL("[DGO] invalid parameter: min_start_altitude=%.3f "
                       "uwb_stddev=%.3f uwb_dynamic_stddev=%.3f "
                       "ins_prior_stddev_xy=%.3f max_correction_xy=%.3f "
-                      "max_step_xy=%.3f",
+                      "max_step_xy=%.3f "
+                      "fusion_period=%.3f fixed_lag=%.3f "
+                      "max_fuse_retry_lag=%.3f history_keep_time=%.3f "
+                      "dgo_stop_stage=%d",
                       min_dgo_start_altitude_, uwb_stddev_,
                       uwb_dynamic_stddev_, ins_prior_stddev_xy_,
-                      max_dgo_correction_xy_, max_dgo_step_xy_);
+                      max_dgo_correction_xy_, max_dgo_step_xy_,
+                      fusion_period_, fixed_lag_,
+                      max_fuse_retry_lag_, history_keep_time_,
+                      dgo_stop_stage_);
             ros::shutdown();
             return;
         }
@@ -157,6 +179,25 @@ public:
                  require_airborne_initialization_ ? 1 : 0,
                  min_dgo_start_altitude_,
                  oracle_mode_ ? 1 : 0);
+
+        ROS_INFO("[DGO] fusion timing: period=%.3f fixed_lag=%.3f "
+                 "retry_lag=%.3f history_keep=%.3f",
+                 fusion_period_, fixed_lag_,
+                 max_fuse_retry_lag_, history_keep_time_);
+
+        ROS_INFO("[DGO] timing gates: max_sensor_age=%.3f "
+                 "max_communication_age=%.3f max_extrapolation_dt=%.3f "
+                 "max_gt_age=%.3f",
+                 max_sensor_age_,
+                 max_communication_age_,
+                 max_extrapolation_dt_,
+                 max_gt_age_);
+
+        ROS_INFO("[DGO] mission stop: stop_after_complete=%d "
+                 "dgo_stop_stage=%d publish_hold_after_stop=%d",
+                 stop_after_mission_complete_ ? 1 : 0,
+                 dgo_stop_stage_,
+                 publish_hold_after_stop_ ? 1 : 0);
     }
 
     ~DGO()
@@ -196,7 +237,13 @@ public:
     }
     void insCallback(const nav_msgs::Odometry::ConstPtr &msg)
     {
-        latest_ins_msg_ = msg;
+        // 缓存完整 Odometry, 确保 publishDgoEstimate 时 orientation/twist/covariance 对齐 t_fuse
+        InsSample sample;
+        sample.stamp = msg->header.stamp;
+        sample.msg = *msg;
+        ins_history_.push_back(sample);
+        ros::Time now = msg->header.stamp;
+        pruneStampedHistory(ins_history_, now);
 
         geometry_msgs::Point P_i;
         P_i.x = msg->pose.pose.position.x;
@@ -212,12 +259,6 @@ public:
             P_opt_.z = P_i.z;
         }
 
-        // 缓存 INS 位置, 用于后续按 sync_ref_time_ 统一挑选
-        ins_history_.push_back({msg->header.stamp, P_i});
-        if (ins_history_.size() > 20)
-            ins_history_.pop_front();
-
-        // 标记本地 INS 数据已收到 (不再依赖其他机通信是否到齐)
         has_com_[uav_id_] = true;
         has_new_com_[uav_id_] = (msg->header.seq != last_seq_[uav_id_]);
         last_seq_[uav_id_] = msg->header.seq;
@@ -225,19 +266,17 @@ public:
 
     void uwbCallback(const data_process::UwbProcessed::ConstPtr &msg)
     {
-        // 仅缓存, 具体挑选在 isReadyForDGO() 中按 sync_ref_time_ 统一进行
         uwb_history_.push_back({msg->header.stamp, *msg});
-        if (uwb_history_.size() > 20)
-            uwb_history_.pop_front();
+        ros::Time now = msg->header.stamp;
+        pruneTimeHistory(uwb_history_, now);
         has_uwb_ = true;
     }
 
     void cameraCallback(const data_process::CameraAngleMatch::ConstPtr &msg)
     {
-        // 仅缓存, 具体挑选在 isReadyForDGO() 中按 sync_ref_time_ 统一进行
         camera_history_.push_back({msg->header.stamp, *msg});
-        if (camera_history_.size() > 20)
-            camera_history_.pop_front();
+        ros::Time now = msg->header.stamp;
+        pruneTimeHistory(camera_history_, now);
         has_camera_ = true;
     }
 
@@ -317,8 +356,8 @@ public:
             sample.valid[i] = true;
         }
         gt_history_.push_back(sample);
-        while (gt_history_.size() > 300)
-            gt_history_.pop_front();
+        ros::Time gt_now = sample_stamp;
+        pruneStampedHistory(gt_history_, gt_now);
     }
 
     void stageCallback(const std_msgs::UInt8::ConstPtr &msg)
@@ -328,21 +367,83 @@ public:
 
     void dgoTimerCallback(const ros::TimerEvent& event)
     {
-        if(isReadyForDGO())
+        if (dgo_stopped_by_stage_ || missionCompleteForDgo())
         {
-            //DGO算法
-            RunDGO();
+            ++stopped_timer_count_;
+
+            if (!dgo_stopped_by_stage_)
+            {
+                dgo_stopped_by_stage_ = true;
+                dgo_stop_time_ = ros::Time::now();
+
+                ROS_WARN("[iris_%d] DGO stopped after mission complete: "
+                         "stage=%u >= dgo_stop_stage=%d, "
+                         "last_fuse_time=%.3f last_pub_stamp=%.3f",
+                         uav_id_,
+                         static_cast<unsigned int>(mission_stage_),
+                         dgo_stop_stage_,
+                         last_fuse_time_.isZero() ? -1.0
+                                                  : last_fuse_time_.toSec(),
+                         last_published_dgo_stamp_.isZero() ? -1.0
+                                                            : last_published_dgo_stamp_.toSec());
+            }
+
+            ROS_INFO_THROTTLE(
+                5.0,
+                "[iris_%d] DGO stopped after mission complete, "
+                "stage=%u stopped_timer_count=%lu",
+                uav_id_,
+                static_cast<unsigned int>(mission_stage_),
+                static_cast<unsigned long>(stopped_timer_count_));
+
+            if (publish_hold_after_stop_)
+                publishHoldDgoEstimate();
+
+            return;
+        }
+
+        ros::Time t_fuse;
+        if (!computeNextFuseTime(t_fuse))
+            return;
+
+        sync_ref_time_ = t_fuse;
+
+        if (!isReadyForDGO(t_fuse))
+        {
+            if (last_rejected_fuse_time_ != t_fuse)
+            {
+                ++rejected_fuse_epoch_count_;
+                last_rejected_fuse_time_ = t_fuse;
+            }
+            return;
+        }
+
+        const bool published = RunDGO();
+
+        if (published)
+        {
+            last_fuse_time_ = t_fuse;
 
             // 重置新数据标记, 等待下一轮所有数据更新后再触发
             std::fill(has_new_com_.begin(), has_new_com_.end(), false);
         }
+        else
+        {
+            if (last_rejected_fuse_time_ != t_fuse)
+            {
+                ++rejected_fuse_epoch_count_;
+                last_rejected_fuse_time_ = t_fuse;
+            }
+        }
     }
 
-    void RunDGO()
+    bool RunDGO()
     {
         // 保留上一轮 DGO 优化的 P_opt_ 结果
         prev_P_opt_ = P_opt_;
         ins_delta_valid_ = prepareInsDelta();
+
+        bool published = false;
 
         geometry_msgs::Point predicted = prev_P_opt_;
         if (ins_delta_valid_)
@@ -429,6 +530,7 @@ public:
             writeSyncDiagCsv();
             writeCommDebugCsv();
             publishDgoEstimate();
+            published = true;
 
             ROS_INFO_THROTTLE(5.0,
                 "[iris_%d] cost: %.2f -> %.2f (%.1f%%), iter=%d | "
@@ -474,15 +576,27 @@ public:
                 P_opt_.y = prev_P_opt_.y + ins_delta_.y;
                 P_opt_.z = prev_P_opt_.z + ins_delta_.z;
                 commitInsDelta();
+
+                CostBreakdown fallback_cb = computeCostBreakdown();
+                updateCameraCounts();
+                writeResidualDebugCsv("fallback", fallback_cb.ins);
+                writeSyncDiagCsv();
+                writeCommDebugCsv();
                 publishDgoEstimate();
+                published = true;
+
                 ROS_WARN("[iris_%d] L-BFGS failed: %s; fallback to INS delta prediction",
                          uav_id_, e.what());
             }
             else
             {
-                ROS_WARN("[iris_%d] L-BFGS failed: %s", uav_id_, e.what());
+                ROS_WARN("[iris_%d] L-BFGS failed: %s; no DGO published",
+                         uav_id_, e.what());
+                published = false;
             }
         }
+
+        return published;
     }
 
 private:
@@ -493,7 +607,7 @@ private:
     double max_communication_age_ = 0.5;
     double max_communication_skew_ = 0.2;
     double max_gt_age_ = 0.1;
-    double max_extrapolation_dt_ = 0.2;
+    double max_extrapolation_dt_ = 0.30;
     double uwb_stddev_ = 0.05;
     double uwb_dynamic_stddev_ = 0.065;
     double ins_prior_stddev_xy_ = 0.25;
@@ -501,6 +615,14 @@ private:
     double max_dgo_step_xy_ = 0.30;
     double min_dgo_start_altitude_ = 0.35;
     bool require_airborne_initialization_ = true;
+    // 融合历元参数
+    double fusion_period_ = 0.1;
+    double fixed_lag_ = 0.20;
+    double max_fuse_retry_lag_ = 1.0;
+    double history_keep_time_ = 2.0;
+    bool stop_after_mission_complete_ = true;
+    int dgo_stop_stage_ = 7;
+    bool publish_hold_after_stop_ = false;
     
     ros::NodeHandle nh_;
     ros::NodeHandle pnh_;
@@ -559,12 +681,18 @@ private:
 
     
 
-    // INS 缓存
-    std::deque<std::pair<ros::Time, geometry_msgs::Point>> ins_history_;
-    nav_msgs::Odometry::ConstPtr latest_ins_msg_;
+    // INS 缓存 (完整 Odometry)
+    struct InsSample
+    {
+        ros::Time stamp;
+        nav_msgs::Odometry msg;
+    };
+    std::deque<InsSample> ins_history_;
+    InsSample best_ins_;
     geometry_msgs::Point best_ins_pos_;
     ros::Time best_ins_stamp_;
     geometry_msgs::Point prev_ins_pos_;
+    ros::Time prev_ins_stamp_;
     geometry_msgs::Point ins_delta_;    // 相邻 DGO 轮次间本机位移
     bool has_ins_ = false;
     bool ins_update_ = false;
@@ -600,6 +728,15 @@ private:
     bool use_gazebo_initial_offsets_ = true;
     bool oracle_mode_ = false;
     ros::Time sync_ref_time_;
+    // 融合历元状态
+    ros::Time last_fuse_time_;
+    ros::Time last_published_dgo_stamp_;
+    ros::Time last_rejected_fuse_time_;
+    size_t dropped_fuse_epoch_count_ = 0;
+    size_t rejected_fuse_epoch_count_ = 0;
+    bool dgo_stopped_by_stage_ = false;
+    ros::Time dgo_stop_time_;
+    size_t stopped_timer_count_ = 0;
     // 相机约束状态拆分 (替代旧 use_camera_in_cost_)
     bool camera_message_fresh_ = false;
     int camera_raw_count_ = 0;           // 相机消息中 count 字段原值
@@ -709,7 +846,8 @@ private:
             return;
         }
 
-        sync_diag_csv_ << "stamp,oracle";
+        sync_diag_csv_ << "stamp,last_fuse_time,fuse_step,fuse_backtrack,"
+                       << "dropped_fuse_count,rejected_fuse_count,oracle";
         for (int i = 0; i < uav_num_; ++i)
             if (i != uav_id_)
                 sync_diag_csv_ << ",com_dt_" << i << ",com_age_" << i;
@@ -732,7 +870,18 @@ private:
 
         const double ref = sync_ref_time_.isZero() ? ros::Time::now().toSec()
                                                     : sync_ref_time_.toSec();
-        sync_diag_csv_ << ref << ',' << (oracle_mode_ ? 1 : 0);
+        const double last_fuse = last_fuse_time_.toSec();
+        const double fuse_step = last_fuse_time_.isZero() ? 0.0
+                                 : ref - last_fuse_time_.toSec();
+        const int fuse_backtrack = (!last_published_dgo_stamp_.isZero() &&
+                                    sync_ref_time_ <= last_published_dgo_stamp_) ? 1 : 0;
+        sync_diag_csv_ << ref << ','
+                       << last_fuse << ','
+                       << fuse_step << ','
+                       << fuse_backtrack << ','
+                       << dropped_fuse_epoch_count_ << ','
+                       << rejected_fuse_epoch_count_ << ','
+                       << (oracle_mode_ ? 1 : 0);
 
         for (int i = 0; i < uav_num_; ++i)
         {
@@ -908,6 +1057,74 @@ private:
                             << com_dt << '\n';
         }
         comm_debug_csv_.flush();
+    }
+
+    // ── 融合历元生成 ──────────────────────────────────────────────
+    ros::Time floorToFusionGrid(const ros::Time &t) const
+    {
+        const double sec = t.toSec();
+        const double grid = std::floor(sec / fusion_period_) * fusion_period_;
+        return ros::Time(grid);
+    }
+
+    bool computeNextFuseTime(ros::Time &t_fuse)
+    {
+        const ros::Time now = ros::Time::now();
+        const ros::Time newest_allowed =
+            floorToFusionGrid(now - ros::Duration(fixed_lag_));
+
+        if (newest_allowed.isZero())
+            return false;
+
+        if (last_fuse_time_.isZero())
+        {
+            t_fuse = newest_allowed;
+            return true;
+        }
+
+        const ros::Time next =
+            last_fuse_time_ + ros::Duration(fusion_period_);
+
+        if (next > newest_allowed)
+            return false;
+
+        t_fuse = next;
+
+        const double retry_age = (now - t_fuse).toSec();
+        if (retry_age > max_fuse_retry_lag_)
+        {
+            ROS_WARN_THROTTLE(
+                5.0,
+                "[iris_%d] dropping old fuse epoch %.3f, age=%.3fs > %.3fs",
+                uav_id_, t_fuse.toSec(), retry_age, max_fuse_retry_lag_);
+
+            last_fuse_time_ = t_fuse;
+            ++dropped_fuse_epoch_count_;
+            return false;
+        }
+
+        return true;
+    }
+
+    // ── 时间窗口缓存裁剪 ──────────────────────────────────────────
+    template <typename DequeT>
+    void pruneStampedHistory(DequeT &history, const ros::Time &now)
+    {
+        while (!history.empty() &&
+               (now - history.front().stamp).toSec() > history_keep_time_)
+        {
+            history.pop_front();
+        }
+    }
+
+    template <typename PairDequeT>
+    void pruneTimeHistory(PairDequeT &history, const ros::Time &now)
+    {
+        while (!history.empty() &&
+               (now - history.front().first).toSec() > history_keep_time_)
+        {
+            history.pop_front();
+        }
     }
 
     static double nanValue()
@@ -1087,101 +1304,61 @@ private:
         residual_csv_.flush();
     }
 
-    bool isReadyForDGO()
+    // ── isReadyForDGO 子函数 ─────────────────────────────────────
+
+    bool checkPeerCommunicationReady(const ros::Time &t_fuse)
     {
-        // 1. 本机 INS 必须就绪
-        if (!latest_ins_msg_)
-            return false;
-
-        // 地面阶段 UWB 距离约束缺乏足够方向信息，且各节点尚未形成稳定
-        // 闭环。此时启动分布式优化会让整个编队沿欠约束方向共同漂移。
-        // 首次起飞后锁存启动状态，降落阶段仍保持 DGO 连续运行。
-        if (!dgo_started_)
-        {
-            if (use_gazebo_initial_offsets_ && !origin_locked_)
-                return false;
-
-            const double altitude =
-                latest_ins_msg_->pose.pose.position.z;
-            const bool mission_started = mission_stage_ >= 1;
-            const bool altitude_ready =
-                std::isfinite(altitude) &&
-                altitude >= min_dgo_start_altitude_;
-            if (require_airborne_initialization_ &&
-                (!mission_started || !altitude_ready))
-            {
-                ROS_INFO_THROTTLE(
-                    5.0,
-                    "[iris_%d] DGO waiting for airborne initialization: "
-                    "stage=%u altitude=%.3f required=%.3f origin_locked=%d",
-                    uav_id_, static_cast<unsigned int>(mission_stage_),
-                    altitude, min_dgo_start_altitude_,
-                    origin_locked_ ? 1 : 0);
-                return false;
-            }
-
-            P_opt_ = latest_ins_msg_->pose.pose.position;
-            prev_P_opt_ = P_opt_;
-            Pc[uav_id_] = P_opt_;
-            has_prev_ins_pos_ = false;
-            ins_delta_valid_ = false;
-            ins_update_ = false;
-            dgo_started_ = true;
-            ROS_INFO("[iris_%d] DGO initialized from airborne INS: "
-                     "stage=%u altitude=%.3f p=(%.3f %.3f %.3f)",
-                     uav_id_, static_cast<unsigned int>(mission_stage_),
-                     altitude, P_opt_.x, P_opt_.y, P_opt_.z);
-        }
-
-        // 2. 其他无人机通信要到齐且不能长期陈旧。不再要求每轮全员
-        // has_new_com_，但旧数据不能无限参与参考时间和速度外推。
-        const ros::Time now = ros::Time::now();
         for (int i = 0; i < uav_num_; ++i)
         {
             if (i == uav_id_)
                 continue;
+
             if (!has_com_[i] || data_timestamps_[i].isZero())
                 return false;
-            const double age = std::fabs((now - data_timestamps_[i]).toSec());
-            if (age > max_communication_age_)
+
+            const double dt_to_fuse = (t_fuse - data_timestamps_[i]).toSec();
+            const double abs_dt = std::fabs(dt_to_fuse);
+
+            if (abs_dt > max_communication_age_)
             {
                 ROS_WARN_THROTTLE(
                     10.0,
-                    "[iris_%d] skip update: communication from iris_%d stale, "
-                    "age=%.3fs > %.3fs",
-                    uav_id_, i, age, max_communication_age_);
+                    "[iris_%d] skip update: communication from iris_%d "
+                    "not aligned, t_fuse=%.3f com_stamp=%.3f "
+                    "dt=%.3fs > max_communication_age=%.3fs",
+                    uav_id_, i,
+                    t_fuse.toSec(),
+                    data_timestamps_[i].toSec(),
+                    dt_to_fuse,
+                    max_communication_age_);
                 return false;
             }
-        }
 
-        // 3. 计算同步参考时间 (其他机 data_timestamps_ 均值)
-        if (!updateReferenceTime(sync_ref_time_))
-            return false;
-
-        for (int i = 0; i < uav_num_; ++i)
-        {
-            if (i == uav_id_)
-                continue;
-            const double skew =
-                std::fabs((data_timestamps_[i] - sync_ref_time_).toSec());
-            if (skew > max_communication_skew_)
+            if (abs_dt > max_extrapolation_dt_)
             {
                 ROS_WARN_THROTTLE(
                     10.0,
-                    "[iris_%d] skip update: communication skew from iris_%d "
-                    "%.3fs > %.3fs",
-                    uav_id_, i, skew, max_communication_skew_);
+                    "[iris_%d] skip update: peer extrapolation too large, "
+                    "iris_%d dt=%.3fs > max_extrapolation_dt=%.3fs",
+                    uav_id_, i,
+                    dt_to_fuse,
+                    max_extrapolation_dt_);
                 return false;
             }
         }
+        return true;
+    }
 
-        // 4. GT 同样按参考时间对齐。正常模式用于诊断，Oracle 模式是硬门槛。
-        const bool has_aligned_gt = selectNearestGt(sync_ref_time_);
+    bool prepareAlignedGt(const ros::Time &t_fuse)
+    {
+        const bool has_aligned_gt = selectNearestGt(t_fuse);
+
         if (has_aligned_gt &&
-            !isFresh(best_gt_stamp_, sync_ref_time_, max_gt_age_))
+            !isFresh(best_gt_stamp_, t_fuse, max_gt_age_))
         {
             std::fill(best_gt_valid_.begin(), best_gt_valid_.end(), false);
         }
+
         if (oracle_mode_)
         {
             if (!origin_locked_ || !has_aligned_gt ||
@@ -1193,6 +1370,7 @@ private:
                     uav_id_);
                 return false;
             }
+
             for (int i = 0; i < uav_num_; ++i)
             {
                 if (i != uav_id_ && !best_gt_valid_[i])
@@ -1200,23 +1378,11 @@ private:
             }
         }
 
-        // 5. 用通信位置 + 速度外推，或用对齐后的 Oracle 真值位移得到 Pc
-        updatePredictedPeerPositions(sync_ref_time_);
+        return true;
+    }
 
-        // 6. 按 sync_ref_time_ 重新选 UWB, 必须新鲜
-        if (!selectNearestUwb(sync_ref_time_))
-            return false;
-        if (!isFresh(best_uwb_stamp_, sync_ref_time_))
-        {
-            ROS_WARN_THROTTLE(10.0,
-                              "[iris_%d] skip update: UWB stale, age=%.3fs > %.3fs", uav_id_,
-                              std::fabs((best_uwb_stamp_ - sync_ref_time_).toSec()),
-                              max_sensor_age_);
-            return false;
-        }
-
-        // 7. 相机可选: 选到且新鲜就用, 否则 UWB + INS
-        // 重置每轮统计 (避免残留)
+    void prepareOptionalCamera(const ros::Time &t_fuse)
+    {
         camera_message_fresh_ = false;
         camera_raw_count_ = 0;
         camera_valid_target_count_ = 0;
@@ -1226,21 +1392,136 @@ private:
         std::fill(camera_target_valid_.begin(), camera_target_valid_.end(), false);
 
         camera_message_fresh_ = has_camera_ &&
-                                selectNearestCamera(sync_ref_time_) &&
-                                isFresh(best_camera_stamp_, sync_ref_time_);
+                                selectNearestCamera(t_fuse) &&
+                                isFresh(best_camera_stamp_, t_fuse, max_sensor_age_);
+
         if (camera_message_fresh_)
             camera_raw_count_ = static_cast<int>(best_camera_.count);
+
         if (has_camera_ && !camera_message_fresh_)
         {
-            ROS_WARN_THROTTLE(10.0,
-                              "[iris_%d] camera stale, use UWB+INS only, age=%.3fs > %.3fs", uav_id_,
-                              std::fabs((best_camera_stamp_ - sync_ref_time_).toSec()),
-                              max_sensor_age_);
+            ROS_WARN_THROTTLE(
+                10.0,
+                "[iris_%d] camera stale, use UWB+INS only, age=%.3fs > %.3fs",
+                uav_id_,
+                std::fabs((best_camera_stamp_ - t_fuse).toSec()),
+                max_sensor_age_);
+        }
+    }
+
+    void initializeDgoFromAlignedIns(const ros::Time &t_fuse)
+    {
+        P_opt_ = best_ins_pos_;
+        prev_P_opt_ = P_opt_;
+        Pc[uav_id_] = P_opt_;
+
+        prev_ins_pos_ = best_ins_pos_;
+        prev_ins_stamp_ = best_ins_stamp_;
+        has_prev_ins_pos_ = true;
+
+        ins_delta_.x = 0.0;
+        ins_delta_.y = 0.0;
+        ins_delta_.z = 0.0;
+        ins_delta_valid_ = false;
+
+        dgo_started_ = true;
+
+        ROS_INFO("[iris_%d] DGO initialized from fully-ready aligned INS: "
+                 "t_fuse=%.3f ins_stamp=%.3f dt=%.3f "
+                 "stage=%u altitude=%.3f p=(%.3f %.3f %.3f)",
+                 uav_id_,
+                 t_fuse.toSec(),
+                 best_ins_stamp_.toSec(),
+                 (best_ins_stamp_ - t_fuse).toSec(),
+                 static_cast<unsigned int>(mission_stage_),
+                 best_ins_pos_.z,
+                 P_opt_.x, P_opt_.y, P_opt_.z);
+    }
+
+    bool isReadyForDGO(const ros::Time &t_fuse)
+    {
+        if (t_fuse.isZero())
+            return false;
+
+        sync_ref_time_ = t_fuse;
+
+        // 1. INS 必须就绪, 且对齐 t_fuse
+        if (!selectNearestIns(t_fuse))
+            return false;
+        if (!isFresh(best_ins_stamp_, t_fuse, max_sensor_age_))
+        {
+            ROS_WARN_THROTTLE(
+                10.0,
+                "[iris_%d] skip update: INS stale, age=%.3fs > %.3fs",
+                uav_id_,
+                std::fabs((best_ins_stamp_ - t_fuse).toSec()),
+                max_sensor_age_);
+            return false;
         }
 
-        // 8. 选本机 INS, 用于里程计约束 (Jo)
-        if (!selectNearestIns(sync_ref_time_))
+        const bool need_init = !dgo_started_;
+
+        // 2. 只检查初始化条件, 不修改状态 (初始化推迟到所有检查通过后)
+        if (need_init)
+        {
+            if (use_gazebo_initial_offsets_ && !origin_locked_)
+                return false;
+
+            const double altitude = best_ins_pos_.z;
+            const bool mission_started = mission_stage_ >= 1;
+            const bool altitude_ready =
+                std::isfinite(altitude) &&
+                altitude >= min_dgo_start_altitude_;
+            if (require_airborne_initialization_ &&
+                (!mission_started || !altitude_ready))
+            {
+                ROS_INFO_THROTTLE(
+                    5.0,
+                    "[iris_%d] DGO waiting for airborne initialization: "
+                    "stage=%u t_fuse=%.3f ins_stamp=%.3f ins_age=%.3f "
+                    "altitude=%.3f required=%.3f origin_locked=%d",
+                    uav_id_,
+                    static_cast<unsigned int>(mission_stage_),
+                    t_fuse.toSec(),
+                    best_ins_stamp_.toSec(),
+                    std::fabs((best_ins_stamp_ - t_fuse).toSec()),
+                    altitude,
+                    min_dgo_start_altitude_,
+                    origin_locked_ ? 1 : 0);
+                return false;
+            }
+        }
+
+        // 3. 邻机通信检查
+        if (!checkPeerCommunicationReady(t_fuse))
             return false;
+
+        // 4. GT 对齐 (Oracle / 诊断)
+        if (!prepareAlignedGt(t_fuse))
+            return false;
+
+        // 5. 邻机状态外推到 t_fuse
+        updatePredictedPeerPositions(t_fuse);
+
+        // 6. UWB 对齐 t_fuse, 必须新鲜
+        if (!selectNearestUwb(t_fuse))
+            return false;
+        if (!isFresh(best_uwb_stamp_, t_fuse, max_sensor_age_))
+        {
+            ROS_WARN_THROTTLE(10.0,
+                "[iris_%d] skip update: UWB stale, age=%.3fs > %.3fs", uav_id_,
+                std::fabs((best_uwb_stamp_ - t_fuse).toSec()),
+                max_sensor_age_);
+            return false;
+        }
+
+        // 7. 相机可选
+        prepareOptionalCamera(t_fuse);
+
+        // 8. 所有检查通过后, 最后才真正初始化 (避免 init 后 peer/UWB 失败导致 dgo_started_=true 但未发布)
+        if (need_init)
+            initializeDgoFromAlignedIns(t_fuse);
+
         return true;
     }
 
@@ -1259,23 +1540,9 @@ private:
 
     bool updateReferenceTime(ros::Time &ref) const
     {
-        double ref_sec = 0.0;
-        int count = 0;
-        for (int i = 0; i < uav_num_; ++i)
-        {
-            if (i == uav_id_)
-                continue;
-            const ros::Time &t = data_timestamps_[i];
-            if (!t.isZero())
-            {
-                ref_sec += t.toSec();
-                ++count;
-            }
-        }
-        if (count == 0)
-            return false;
-        ref = ros::Time(ref_sec / count);
-        return true;
+        ROS_ERROR("[iris_%d] updateReferenceTime() is deprecated and must not be called.",
+                  uav_id_);
+        return false;
     }
 
     bool isFresh(const ros::Time &stamp, const ros::Time &ref) const
@@ -1322,6 +1589,17 @@ private:
             Pc[i].x = com_positions_[i].x + com_velocities_[i].x * dt;
             Pc[i].y = com_positions_[i].y + com_velocities_[i].y * dt;
             Pc[i].z = com_positions_[i].z + com_velocities_[i].z * dt;
+
+            ROS_DEBUG_THROTTLE(
+                2.0,
+                "[iris_%d] peer iris_%d extrapolate: t_fuse=%.3f "
+                "com_stamp=%.3f raw_dt=%.3f clamp_dt=%.3f "
+                "Pc=(%.3f %.3f %.3f)",
+                uav_id_, i,
+                ref.toSec(),
+                data_timestamps_[i].toSec(),
+                raw_dt, dt,
+                Pc[i].x, Pc[i].y, Pc[i].z);
         }
     }
 
@@ -1394,7 +1672,7 @@ private:
         return found;
     }
 
-    // 按 ref 在 INS 缓存中选时间戳最近的样本, 命中则更新 best_ins_pos_, 返回 true
+    // 按 ref 在 INS 缓存中选时间戳最近的样本, 更新 best_ins_ / best_ins_pos_ / best_ins_stamp_
     bool selectNearestIns(const ros::Time &ref)
     {
         if (ref.isZero() || ins_history_.empty())
@@ -1403,19 +1681,19 @@ private:
         bool found = false;
         for (const auto &entry : ins_history_)
         {
-            const double dt = std::fabs((entry.first - ref).toSec());
+            const double dt = std::fabs((entry.stamp - ref).toSec());
             if (dt < min_dt)
             {
                 min_dt = dt;
-                best_ins_pos_ = entry.second;
-                best_ins_stamp_ = entry.first;
+                best_ins_ = entry;
+                best_ins_pos_ = entry.msg.pose.pose.position;
+                best_ins_stamp_ = entry.stamp;
                 found = true;
             }
         }
         if (found)
         {
             has_ins_ = true;
-            ins_update_ = true;
         }
         return found;
     }
@@ -1430,20 +1708,69 @@ private:
         return offset + delta;
     }
 
+    bool missionCompleteForDgo() const
+    {
+        return stop_after_mission_complete_ &&
+               static_cast<int>(mission_stage_) >= dgo_stop_stage_;
+    }
+
+    void publishHoldDgoEstimate()
+    {
+        if (last_published_dgo_stamp_.isZero())
+            return;
+
+        nav_msgs::Odometry msg;
+        msg.header.stamp = ros::Time::now();
+        msg.header.frame_id = uavs_[uav_id_].substr(1) + "/initial_enu";
+        msg.child_frame_id = uavs_[uav_id_].substr(1) + "/base_link";
+        msg.pose.pose.position = P_opt_;
+
+        if (has_ins_)
+        {
+            msg.pose.pose.orientation = best_ins_.msg.pose.pose.orientation;
+            msg.twist = best_ins_.msg.twist;
+            msg.pose.covariance = best_ins_.msg.pose.covariance;
+            msg.twist.covariance = best_ins_.msg.twist.covariance;
+        }
+        else
+        {
+            msg.pose.pose.orientation.w = 1.0;
+        }
+
+        dgo_pub_.publish(msg);
+    }
+
     void publishDgoEstimate()
     {
+        if (sync_ref_time_.isZero())
+        {
+            ROS_WARN("[iris_%d] skip publish: zero sync_ref_time_", uav_id_);
+            return;
+        }
+
+        // 单调性检查
+        if (!last_published_dgo_stamp_.isZero() &&
+            sync_ref_time_ <= last_published_dgo_stamp_)
+        {
+            ROS_ERROR("[iris_%d] non-monotonic DGO stamp: prev=%.3f curr=%.3f",
+                      uav_id_,
+                      last_published_dgo_stamp_.toSec(),
+                      sync_ref_time_.toSec());
+        }
+        last_published_dgo_stamp_ = sync_ref_time_;
+
         nav_msgs::Odometry msg;
-        msg.header.stamp = sync_ref_time_.isZero() ? ros::Time::now() : sync_ref_time_;
+        msg.header.stamp = sync_ref_time_;
         msg.header.frame_id = uavs_[uav_id_].substr(1) + "/initial_enu";
         msg.child_frame_id = uavs_[uav_id_].substr(1) + "/base_link";
 
         msg.pose.pose.position = P_opt_;
-        if (latest_ins_msg_)
+        if (has_ins_)
         {
-            msg.pose.pose.orientation = latest_ins_msg_->pose.pose.orientation;
-            msg.twist = latest_ins_msg_->twist;
-            msg.pose.covariance = latest_ins_msg_->pose.covariance;
-            msg.twist.covariance = latest_ins_msg_->twist.covariance;
+            msg.pose.pose.orientation = best_ins_.msg.pose.pose.orientation;
+            msg.twist = best_ins_.msg.twist;
+            msg.pose.covariance = best_ins_.msg.pose.covariance;
+            msg.twist.covariance = best_ins_.msg.twist.covariance;
         }
         else
         {
@@ -1461,20 +1788,54 @@ private:
         if (!has_prev_ins_pos_)
         {
             prev_ins_pos_ = best_ins_pos_;
+            prev_ins_stamp_ = best_ins_stamp_;
             has_prev_ins_pos_ = true;
+
             ins_delta_.x = 0.0;
             ins_delta_.y = 0.0;
             ins_delta_.z = 0.0;
-            ins_update_ = false;
             return false;
         }
 
-        if (!ins_update_)
+        const double dt = (best_ins_stamp_ - prev_ins_stamp_).toSec();
+
+        if (dt <= 1e-6)
+        {
+            ROS_DEBUG_THROTTLE(
+                5.0,
+                "[iris_%d] first/repeated INS sample for DGO delta: "
+                "prev=%.3f curr=%.3f dt=%.6f",
+                uav_id_,
+                prev_ins_stamp_.toSec(),
+                best_ins_stamp_.toSec(),
+                dt);
             return false;
+        }
+
+        if (dt > max_fuse_retry_lag_)
+        {
+            ROS_WARN_THROTTLE(
+                5.0,
+                "[iris_%d] large INS delta dt=%.3f, prev=%.3f curr=%.3f",
+                uav_id_,
+                dt,
+                prev_ins_stamp_.toSec(),
+                best_ins_stamp_.toSec());
+        }
 
         ins_delta_.x = best_ins_pos_.x - prev_ins_pos_.x;
         ins_delta_.y = best_ins_pos_.y - prev_ins_pos_.y;
         ins_delta_.z = best_ins_pos_.z - prev_ins_pos_.z;
+
+        ROS_DEBUG_THROTTLE(
+            2.0,
+            "[iris_%d] INS delta: prev_stamp=%.3f curr_stamp=%.3f "
+            "dt=%.3f delta=(%.3f %.3f %.3f)",
+            uav_id_,
+            prev_ins_stamp_.toSec(),
+            best_ins_stamp_.toSec(),
+            (best_ins_stamp_ - prev_ins_stamp_).toSec(),
+            ins_delta_.x, ins_delta_.y, ins_delta_.z);
         return true;
     }
 
@@ -1484,7 +1845,7 @@ private:
             return;
 
         prev_ins_pos_ = best_ins_pos_;
-        ins_update_ = false;
+        prev_ins_stamp_ = best_ins_stamp_;
     }
 
     double cal_ins_penalty()
