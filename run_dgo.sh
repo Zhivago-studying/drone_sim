@@ -1,1 +1,0 @@
-src/test/scripts/run_ekf_dgo_test.sh

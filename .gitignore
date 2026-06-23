@@ -1,56 +1,44 @@
-# Python virtual environment
-venv/
-.venv/
+# ── 白名单策略：只跟踪以下文件和目录 ───────────────────────────
+# （目录用 /* 全部忽略，再用 !/ 逐个放开）
+/*
+!/yolov7
+!/yolov7_result_files
+!/src
+!/sitl_config
+!/README.md
 
-# Build artifacts
-build/
-devel/
-logs/
+# 放开子目录内容（否则 git 不会进入已忽略的目录）
+!/yolov7/**
+!/yolov7_result_files/**
+!/src/**
+!/sitl_config/**
 
-# Catkin tools
-.catkin_tools/
+# ── 即使在跟踪目录内也要排除的内容 ────────────────────────────
 
-# ROS / catkin build outputs
-build/
-devel/
-install/
-log/
-.logs/
-.cache/
-
-# IDE
-.vscode/
-.idea/
-
-# Claude Code
-.claude/
-.codex
-
-# Python cache
+# Python 编译缓存
 __pycache__/
 *.pyc
 *.pyo
 
-# YOLOv7 training artifacts (large)
+# YOLOv7 训练产出（大文件，不提交）
 yolov7/runs/
-yolov7/utils/__pycache__/
-yolov7/models/__pycache__/
 
-# OS
+# IDE / 编辑器
+.vscode/
+.idea/
+
+# Claude Code 缓存
+.claude/
+.codex
+
+# 操作系统元文件
 .DS_Store
 Thumbs.db
 
-# MemPalace per-project files (issue #185)
+# 运行时日志（在跟踪目录 src/ 内，需显式排除）
+src/sensors/logs/
+src/test/logs/
+
+# MemPalace 项目配置（含本地路径）
 mempalace.yaml
 entities.json
-
-# CMake
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-Makefile
-
-# Large experiment raw data
-run_data/run_*/
-run_data/*.zip
-*.zip
