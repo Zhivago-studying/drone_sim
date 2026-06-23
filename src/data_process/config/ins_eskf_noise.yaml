@@ -10,8 +10,8 @@ tau_bg: 1000.0         # gyroscopeBiasCorrelationTime [s]
 # Artificial optical-flow velocity error:
 # sigma_v^2 = (flow_relative_noise_std * |V_raw|)^2 + flow_base_noise_std^2
 # V_meas = V_raw + N(0, sigma_v^2)
-flow_relative_noise_std: 0.1
-flow_base_noise_std: 0.02
+flow_relative_noise_std: 0.18
+flow_base_noise_std: 0.05
 
 # Artificial ToF range error: d_meas = d_raw + N(0, tof_noise_std^2)
 tof_noise_std: 0.05
@@ -38,7 +38,7 @@ initial_gyro_bias_std: 0.001
 # Robust update guards. Isolated large innovations are rejected. If prediction
 # remains outside the gate, a bounded velocity-only correction restores lock
 # without changing attitude or IMU biases.
-max_velocity_innovation: 0.75
+max_velocity_innovation: 1.20
 velocity_recovery_reject_count: 5
 max_recovery_velocity_correction: 0.10
 max_position_correction: 0.25

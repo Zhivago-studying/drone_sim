@@ -2334,3 +2334,5 @@ roslaunch sensors xtdrone_mission.launch run_id:=46
 
 run_46 通过运动控制与 DGO 验收。编队完整完成 EXPAND_SHRINK、TRANSLATE、CHASE_RESTORE 和降落流程；EXPAND_SHRINK RETURN 不再出现大幅过冲；最小机间距 1.376 m，高于 0.8 m 安全阈值；DGO 相对定位 RMSE 为 0.097~0.124 m。TRANSLATE 阶段控制指令达到 1.0 m/s，速度诊断差分速度最高约 1.15 m/s；Gazebo GT 速度峰值约 0.99 m/s，可视为工程意义上的 1 m/s 动态验收通过。
 run_46~run_56记录EKF-DGO算法数据
+
+run51~55回退至run_41的代码版本，更符合论文实际

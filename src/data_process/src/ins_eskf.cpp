@@ -1280,8 +1280,8 @@ private:
     double sigma_bg_;
     double tau_ba_;
     double tau_bg_;
-    double flow_relative_noise_std_ = 0.1;
-    double flow_base_noise_std_ = 0.02;
+    double flow_relative_noise_std_ = 0.18;
+    double flow_base_noise_std_ = 0.05;
     double tof_noise_std_ = 0.05;
     double tof_min_range_ = 0.20;
     double initial_attitude_std_deg_ = 3.0;
@@ -1289,7 +1289,7 @@ private:
     double attitude_update_max_innovation_ = 0.15;
     double attitude_update_max_correction_deg_ = 0.15;
     double initial_gyro_bias_std_ = 0.001;
-    double max_velocity_innovation_ = 0.75;
+    double max_velocity_innovation_ = 1.20;
     int velocity_recovery_reject_count_ = 5;
     double max_recovery_velocity_correction_ = 0.10;
     double max_position_correction_ = 0.25;
@@ -1309,8 +1309,8 @@ private:
     std::string imu_frame_param_;
     int min_flow_quality_ = 100;
     double max_innovation_sigma_ = 6.0;
-    double publish_pos_cov_scale_ = 15.0;
-    double publish_vel_cov_scale_ = 3.0;
+    double publish_pos_cov_scale_ = 2.0;
+    double publish_vel_cov_scale_ = 10.0;
     int consecutive_velocity_rejects_ = 0;
     bool velocity_recovery_active_ = false;
 
