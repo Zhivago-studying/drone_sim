@@ -2314,5 +2314,23 @@ run_36~38验收报告：
 | `settle_pos_tolerance` | 0.25 | 稳定判定位置阈值 (m) |
 | `settle_speed_tolerance` | 0.20 | 稳定判定速度阈值 (m/s)
 
+#### CSV 路径变更
+
+速度诊断 CSV 不再写入 `src/sensors/logs/formation_speed_diag.csv`（覆盖风险），改为写入 `run_data/run_{run_id}/speed/formation_speed_diag.csv`。两个 launch 文件均已支持 `run_id` 参数：
+
+- `dgo_full_mission.launch`：继承已有的 `run_id` 机制, `speed_csv_dir` 自动路由到 `$(arg log_base)/speed`
+- `xtdrone_mission.launch`：新增 `run_id` 参数, `speed_csv_dir` 自动路由到 `run_data/run_{run_id}/speed/`
+
+使用方式：
+```bash
+# 全链路启动（推荐）
+roslaunch algorithm dgo_full_mission.launch run_id:=46
+
+# 单独启动 formation 控制器
+roslaunch sensors xtdrone_mission.launch run_id:=46
+```
+
+不指定 `run_id` 时回退到 `src/sensors/logs/` 向后兼容。
+
 run_46 通过运动控制与 DGO 验收。编队完整完成 EXPAND_SHRINK、TRANSLATE、CHASE_RESTORE 和降落流程；EXPAND_SHRINK RETURN 不再出现大幅过冲；最小机间距 1.376 m，高于 0.8 m 安全阈值；DGO 相对定位 RMSE 为 0.097~0.124 m。TRANSLATE 阶段控制指令达到 1.0 m/s，速度诊断差分速度最高约 1.15 m/s；Gazebo GT 速度峰值约 0.99 m/s，可视为工程意义上的 1 m/s 动态验收通过。
 run_46~run_56记录EKF-DGO算法数据

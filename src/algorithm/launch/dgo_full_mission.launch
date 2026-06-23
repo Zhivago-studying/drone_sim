@@ -62,6 +62,10 @@
        unless="$(eval arg('run_id') != '')" />
   <arg name="ins_ekf_test_csv_dir"  value="$(arg log_base)/ins_eskf_test"
        if="$(eval arg('run_id') != '')" />
+  <arg name="speed_csv_dir"       value="/home/scott/swarm_localization/src/sensors/logs"
+       unless="$(eval arg('run_id') != '')" />
+  <arg name="speed_csv_dir"       value="$(arg log_base)/speed"
+       if="$(eval arg('run_id') != '')" />
 
   <include file="$(find sensors)/launch/uwb.launch" />
   <include file="$(find data_process)/launch/uwb_zero_score.launch">
@@ -306,7 +310,7 @@
     <param name="max_decel_xy" value="1.8" />
     <!-- 速度阻尼: 接近目标时抑制实际速度 -->
     <param name="velocity_damping_gain" value="0.6" />
-    <param name="speed_csv_dir" value="/home/scott/swarm_localization/src/sensors/logs" />
+    <param name="speed_csv_dir" value="$(arg speed_csv_dir)" />
   </node>
 
   <!-- EKF 评估节点: 监控全部 4 机 ins_estimate, 析构时写入 gt/est/vel/relative_error CSV -->

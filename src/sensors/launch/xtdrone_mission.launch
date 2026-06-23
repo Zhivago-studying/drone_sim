@@ -1,5 +1,14 @@
 <launch>
   <!-- XTDrone 四机编队控制器 -->
+  <!-- run_id 机制: 当 run_id 非空时, speed CSV 输出到 run_data/run_{run_id}/speed/ -->
+  <arg name="run_id" default="" />
+  <arg name="speed_csv_dir"
+       value="/home/scott/swarm_localization/src/sensors/logs"
+       unless="$(eval arg('run_id') != '')" />
+  <arg name="speed_csv_dir"
+       value="$(eval env('HOME') + '/swarm_localization/run_data/run_' + str(arg('run_id')) + '/speed')"
+       if="$(eval arg('run_id') != '')" />
+
   <node pkg="sensors" type="xtdrone_four_uav_formation" name="xtdrone_controller" output="screen">
     <param name="takeoff_timeout" value="12.0" />
     <param name="takeoff_climb_rate" value="0.45" />
@@ -36,7 +45,7 @@
     <param name="max_decel_xy" value="1.8" />
     <!-- 速度阻尼: 接近目标时抑制实际速度 -->
     <param name="velocity_damping_gain" value="0.6" />
-    <param name="speed_csv_dir" value="/home/scott/swarm_localization/src/sensors/logs" />
+    <param name="speed_csv_dir" value="$(arg speed_csv_dir)" />
   </node>
 
   <!-- 四台无人机图像录制 -->
