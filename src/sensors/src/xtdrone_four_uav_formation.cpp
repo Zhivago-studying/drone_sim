@@ -67,8 +67,13 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <fstream>
+#include <iomanip>
+#include <limits>
 #include <mutex>
 #include <string>
+
+#include <boost/filesystem.hpp>
 
 struct Vec3
 {
@@ -163,6 +168,7 @@ public:
       cached_pose_active_(false),
       cached_twist_active_(false),
       stage_(Stage::WAIT_FOR_GAZEBO),
+      motion_subphase_(MotionSubphase::OUTBOUND),
       landing_target_z_(kFlightZ),
       landing_start_z_(kFlightZ),
       landing_descent_rate_(0.45),
@@ -213,6 +219,102 @@ public:
     private_nh_.param("takeoff_climb_rate", takeoff_climb_rate_, 0.45);
     private_nh_.param("landing_descent_rate", landing_descent_rate_, 0.45);
     private_nh_.param("force_disarm_delay", force_disarm_delay_, 2.0);
+    // 论文 1 m/s 动态运动参数
+    private_nh_.param("horizontal_speed", horizontal_speed_, 1.0);
+    private_nh_.param("max_horizontal_speed", max_horizontal_speed_, 1.0);
+    private_nh_.param("slow_radius", slow_radius_, 0.80);
+    private_nh_.param("stage_target_tolerance", stage_target_tolerance_, 0.25);
+    private_nh_.param("min_pairwise_distance", min_pairwise_distance_, 0.8);
+    // 阶段缓冲参数
+    private_nh_.param("phase_settle_time", phase_settle_time_, 1.0);
+    private_nh_.param("stage_settle_time", stage_settle_time_, 1.0);
+    private_nh_.param("turnaround_settle_time", turnaround_settle_time_, 0.2);
+    // 加速度限制
+    private_nh_.param("max_accel_xy", max_accel_xy_, 0.6);
+    // 各阶段独立速度
+    private_nh_.param("translate_speed", translate_speed_, 0.8);
+    private_nh_.param("chase_speed", chase_speed_, 0.6);
+    private_nh_.param("chase_slow_radius", chase_slow_radius_, 1.0);
+    private_nh_.param("arrive_speed_threshold", arrive_speed_threshold_, 0.20);
+    // 低速保持控制
+    private_nh_.param("settle_p_gain", settle_p_gain_, 0.4);
+    private_nh_.param("settle_speed_max", settle_speed_max_, 0.25);
+    private_nh_.param("settle_pos_tolerance", settle_pos_tolerance_, 0.25);
+    private_nh_.param("settle_speed_tolerance", settle_speed_tolerance_, 0.20);
+    // Translate 整体平移控制
+    private_nh_.param("translate_shape_gain", translate_shape_gain_, 0.15);
+    // EXPAND_SHRINK 独立参数
+    private_nh_.param("expand_speed", expand_speed_, 0.8);
+    private_nh_.param("expand_return_speed", expand_return_speed_, 0.7);
+    private_nh_.param("expand_slow_radius", expand_slow_radius_, 1.4);
+    private_nh_.param("expand_return_slow_radius", expand_return_slow_radius_, 1.6);
+    private_nh_.param("expand_brake_accel_xy", expand_brake_accel_xy_, 0.8);
+    // 非对称加减速
+    private_nh_.param("max_decel_xy", max_decel_xy_, 1.8);
+    // 速度阻尼
+    private_nh_.param("velocity_damping_gain", velocity_damping_gain_, 0.6);
+    private_nh_.param("speed_csv_dir", speed_csv_dir_,
+                      std::string("/home/scott/swarm_localization/src/sensors/logs"));
+
+    if (horizontal_speed_ <= 0.0 ||
+        max_horizontal_speed_ <= 0.0 ||
+        slow_radius_ <= 0.0 ||
+        stage_target_tolerance_ <= 0.0 ||
+        min_pairwise_distance_ <= 0.0 ||
+        phase_settle_time_ <= 0.0 ||
+        stage_settle_time_ <= 0.0 ||
+        turnaround_settle_time_ < 0.0 ||
+        max_accel_xy_ <= 0.0 ||
+        translate_speed_ <= 0.0 ||
+        chase_speed_ <= 0.0 ||
+        chase_slow_radius_ <= 0.0 ||
+        arrive_speed_threshold_ <= 0.0 ||
+        settle_p_gain_ <= 0.0 ||
+        settle_speed_max_ <= 0.0 ||
+        settle_pos_tolerance_ <= 0.0 ||
+        settle_speed_tolerance_ <= 0.0 ||
+        translate_shape_gain_ < 0.0 ||
+        expand_speed_ <= 0.0 ||
+        expand_return_speed_ <= 0.0 ||
+        expand_slow_radius_ <= 0.0 ||
+        expand_return_slow_radius_ <= 0.0 ||
+        expand_brake_accel_xy_ <= 0.0 ||
+        max_decel_xy_ <= 0.0 ||
+        velocity_damping_gain_ < 0.0)
+    {
+      ROS_FATAL("[formation] invalid speed params: horizontal_speed=%.3f "
+                "max_horizontal_speed=%.3f slow_radius=%.3f "
+                "stage_target_tolerance=%.3f min_pairwise_distance=%.3f "
+                "phase_settle_time=%.3f stage_settle_time=%.3f max_accel_xy=%.3f "
+                "translate_speed=%.3f chase_speed=%.3f chase_slow_radius=%.3f "
+                "arrive_speed_threshold=%.3f settle_p_gain=%.3f "
+                "settle_speed_max=%.3f settle_pos_tolerance=%.3f "
+                "settle_speed_tolerance=%.3f translate_shape_gain=%.3f "
+                "turnaround_settle_time=%.3f "
+                "expand_speed=%.3f expand_return_speed=%.3f "
+                "expand_slow_radius=%.3f expand_return_slow_radius=%.3f "
+                "expand_brake_accel_xy=%.3f max_decel_xy=%.3f "
+                "velocity_damping_gain=%.3f",
+                horizontal_speed_, max_horizontal_speed_,
+                slow_radius_, stage_target_tolerance_,
+                min_pairwise_distance_,
+                phase_settle_time_, stage_settle_time_, max_accel_xy_,
+                translate_speed_, chase_speed_, chase_slow_radius_,
+                arrive_speed_threshold_,
+                settle_p_gain_, settle_speed_max_,
+                settle_pos_tolerance_, settle_speed_tolerance_,
+                translate_shape_gain_,
+                turnaround_settle_time_,
+                expand_speed_, expand_return_speed_,
+                expand_slow_radius_, expand_return_slow_radius_,
+                expand_brake_accel_xy_, max_decel_xy_,
+                velocity_damping_gain_);
+      ros::shutdown();
+      return;
+    }
+    horizontal_speed_ = std::min(horizontal_speed_, max_horizontal_speed_);
+
+    initSpeedCsv();
 
     // Service calls and DGO/vision load can delay the mission loop. Keep the
     // last commanded setpoint on an independent callback thread so PX4 never
@@ -320,6 +422,14 @@ private:
     DONE
   };
 
+  enum class MotionSubphase
+  {
+    OUTBOUND,
+    OUTBOUND_SETTLE,
+    RETURN,
+    RETURN_SETTLE
+  };
+
   void gazeboCb(const gazebo_msgs::ModelStates::ConstPtr& msg)
   {
     std::array<bool, kUavCount> seen = {false, false, false, false};
@@ -333,6 +443,13 @@ private:
           positions_[i] = {msg->pose[j].position.x,
                            msg->pose[j].position.y,
                            msg->pose[j].position.z};
+          // 从 Gazebo ModelStates 读取真值速度, 用于稳定判断
+          if (j < msg->twist.size())
+          {
+            velocities_[i].x = msg->twist[j].linear.x;
+            velocities_[i].y = msg->twist[j].linear.y;
+            velocities_[i].z = msg->twist[j].linear.z;
+          }
           seen[i] = true;
           break;
         }
@@ -702,13 +819,412 @@ private:
     publishTwistSetpoints(setpoints);
   }
 
+  // 恒速目标追踪: 在距目标 slow_radius 范围内线性减速, 避免冲过头。
+  // 论文 1 m/s 动态条件使用此函数, 替代 P 控制的 publishVelocityToTargets。
+  // 已集成 arrived_flags_ 到达锁存和 max_accel_xy 加速度限制。
+  void publishConstantSpeedToTargets(
+      const std::array<Vec3, kUavCount>& targets,
+      double speed = -1.0,
+      double slow_r = -1.0)
+  {
+    const double eff_speed = (speed > 0.0) ? speed : horizontal_speed_;
+    const double eff_slow_r = (slow_r > 0.0) ? slow_r : slow_radius_;
+
+    // 保存当前目标位置供 CSV 记录
+    current_targets_ = targets;
+
+    std::array<geometry_msgs::TwistStamped, kUavCount> setpoints;
+
+    for (int i = 0; i < kUavCount; ++i)
+    {
+      // 到达锁存: 先到的 UAV 改为低速保持目标, 不再硬发零速度。
+      // 避免 UAV 被锁死后漂离目标, 等齐其他 UAV 时位置误差已过大。
+      if (arrived_flags_[i])
+      {
+        Vec3 v = settleVelocityToTarget(i, targets[i]);
+        const double vz = clamp((kFlightZ - positions_[i].z) * 0.6, -0.4, 0.4);
+        setpoints[i] = toTwist(v.x, v.y, vz);
+        last_cmd_speed_xy_[i] = norm2d(v);
+        continue;
+      }
+
+      const Vec3 err = opSub(targets[i], positions_[i]);
+      const double dist_xy = norm2d(err);
+
+      Vec3 v{0.0, 0.0, 0.0};
+
+      if (dist_xy > 1.0e-3)
+      {
+        const Vec3 dir = normalize2d(err);
+        double cmd_speed = eff_speed;
+
+        if (dist_xy < eff_slow_r)
+        {
+          cmd_speed = eff_speed * dist_xy / eff_slow_r;
+        }
+        cmd_speed = std::min(cmd_speed, max_horizontal_speed_);
+
+        v.x = dir.x * cmd_speed;
+        v.y = dir.y * cmd_speed;
+      }
+
+      // 加速度限制后再记录真实发布速度到 CSV
+      v = limitAccel(i, v);
+
+      const double vz = clamp((kFlightZ - positions_[i].z) * 0.6, -0.4, 0.4);
+      setpoints[i] = toTwist(v.x, v.y, vz);
+      last_cmd_speed_xy_[i] = norm2d(v);
+    }
+
+    publishTwistSetpoints(setpoints);
+  }
+
+  // 非对称加速度限制: 将 desired_v 限制在当前 cmd_vel 的范围内。
+  // 加速时使用 max_accel_xy_, 减速/反向时使用 max_decel_xy_ (更大)。
+  // 避免接近目标时因加速限制导致命令速度无法快速降低, 造成过冲。
+  Vec3 limitAccel(int i, const Vec3& desired_v)
+  {
+    const ros::Time now = ros::Time::now();
+
+    // 每架 UAV 独立时间戳, 避免 for 循环内 4 机共享 dt 导致 iris_1/2/3 dt 被压缩
+    double dt = last_cmd_time_[i].isZero()
+                  ? 1.0 / kRateHz
+                  : (now - last_cmd_time_[i]).toSec();
+
+    dt = clamp(dt, 1.0 / 100.0, 0.2);
+
+    Vec3 dv = opSub(desired_v, last_cmd_vel_[i]);
+    const double dv_norm = norm2d(dv);
+
+    // 判断当前是加速还是减速/反向:
+    // 命令速度变小或方向反转 → 使用更大的减速限幅
+    const double current_speed = norm2d(last_cmd_vel_[i]);
+    const double desired_speed = norm2d(desired_v);
+    const double dot =
+        last_cmd_vel_[i].x * desired_v.x +
+        last_cmd_vel_[i].y * desired_v.y;
+
+    const bool braking = desired_speed < current_speed || dot < 0.0;
+    const double accel_limit = braking ? max_decel_xy_ : max_accel_xy_;
+    const double max_dv = accel_limit * dt;
+
+    Vec3 out = desired_v;
+    if (dv_norm > max_dv)
+    {
+      out = opAdd(last_cmd_vel_[i], opMul(dv, max_dv / dv_norm));
+    }
+
+    last_cmd_vel_[i] = out;
+    last_cmd_time_[i] = now;
+    return out;
+  }
+
+  double minPairwiseDistance(const std::array<Vec3, kUavCount>& pts) const
+  {
+    double min_d = std::numeric_limits<double>::max();
+    for (int i = 0; i < kUavCount; ++i)
+    {
+      for (int j = i + 1; j < kUavCount; ++j)
+      {
+        const Vec3 d = opSub(pts[i], pts[j]);
+        const double dd = norm2d(d);
+        if (dd < min_d) min_d = dd;
+      }
+    }
+    return min_d;
+  }
+
   void publishZeroVelocity()
   {
     std::array<geometry_msgs::TwistStamped, kUavCount> setpoints;
     for (int i = 0; i < kUavCount; ++i)
     {
       setpoints[i] = toTwist(0.0, 0.0, 0.0);
+      last_cmd_speed_xy_[i] = 0.0;
+      last_cmd_vel_[i] = {0.0, 0.0, 0.0};
+      last_cmd_time_[i] = ros::Time::now();
     }
+    publishTwistSetpoints(setpoints);
+  }
+
+  // 安全距离检查: 任意两机水平距离 < min_pairwise_distance_ 时急停
+  bool safetyStopIfTooClose(const std::string& stage_name)
+  {
+    const double d_min = minPairwiseDistance(positions_);
+    if (d_min < min_pairwise_distance_)
+    {
+      ROS_WARN_THROTTLE(
+          2.0,
+          "[formation] %s safety stop: min_pairwise=%.2f < %.2f",
+          stage_name.c_str(), d_min, min_pairwise_distance_);
+      publishZeroVelocity();
+      return true;
+    }
+    return false;
+  }
+
+  // 单机低速保持: 以 P 控制将单架 UAV 拉回目标, 限制最大速度 ≤ settle_speed_max_,
+  // 经过 limitAccel 加速度限制。
+  // 用于 arrived_flags_[i] == true 时的保持控制, 以及 SETTLE 阶段的全体修正。
+  Vec3 settleVelocityToTarget(int i, const Vec3& target)
+  {
+    const Vec3 err = opSub(target, positions_[i]);
+    Vec3 v = opMul({err.x, err.y, 0.0}, settle_p_gain_);
+
+    const double speed_xy = norm2d(v);
+    if (speed_xy > settle_speed_max_)
+    {
+      v = opMul(v, settle_speed_max_ / speed_xy);
+    }
+
+    return limitAccel(i, v);
+  }
+
+  // 从 Gazebo ModelStates twist 读取的真值速度
+  double actualSpeedXY(int i) const
+  {
+    return norm2d(velocities_[i]);
+  }
+
+  // 全队低速修正控制 (SETTLE / arrived 锁存期间):
+  // 调用 settleVelocityToTarget 逐机控制, 避免 UAV 被硬锁存后漂离目标。
+  void publishSettleToTargets(const std::array<Vec3, kUavCount>& targets)
+  {
+    // 保存当前目标供 CSV 记录
+    current_targets_ = targets;
+
+    std::array<geometry_msgs::TwistStamped, kUavCount> setpoints;
+
+    for (int i = 0; i < kUavCount; ++i)
+    {
+      Vec3 v = settleVelocityToTarget(i, targets[i]);
+
+      const double vz = clamp((kFlightZ - positions_[i].z) * 0.6, -0.4, 0.4);
+      setpoints[i] = toTwist(v.x, v.y, vz);
+      last_cmd_speed_xy_[i] = norm2d(v);
+    }
+
+    publishTwistSetpoints(setpoints);
+  }
+
+  // 全队是否已在目标位置稳定:
+  // target_dist_xy < settle_pos_tolerance_
+  // 且 cmd_speed < settle_speed_tolerance_
+  // 且实际真值速度 < settle_speed_tolerance_
+  bool allStableAtTargets(const std::array<Vec3, kUavCount>& targets)
+  {
+    for (int i = 0; i < kUavCount; ++i)
+    {
+      const double dist = norm2d(opSub(targets[i], positions_[i]));
+      const double cmd_speed = norm2d(last_cmd_vel_[i]);
+      const double actual_speed = actualSpeedXY(i);
+
+      if (dist > settle_pos_tolerance_ ||
+          cmd_speed > settle_speed_tolerance_ ||
+          actual_speed > settle_speed_tolerance_)
+      {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // 重置速度差分状态 (进入新动态阶段时调用)
+  void resetSpeedDiagState()
+  {
+    has_prev_positions_ = false;
+    last_speed_csv_stamp_ = ros::Time(0);
+  }
+
+  // 重置到达锁存状态 (进入新阶段时调用)
+  void resetArrivedFlags()
+  {
+    arrived_flags_.fill(false);
+  }
+
+  // 更新到达锁存: 每架 UAV 距离目标 < tolerance 且命令速度 < arrive_speed_threshold_
+  // 且实际真值速度 < arrive_speed_threshold_ 后才标记 arrived_flags_[i]=true。
+  // 先到的 UAV 以 settleVelocityToTarget 低速保持等待其他 UAV。
+  // 返回 true 表示全体到达。
+  bool updateArrivedFlags(const std::array<Vec3, kUavCount>& targets,
+                          double tolerance)
+  {
+    bool all_arrived = true;
+    for (int i = 0; i < kUavCount; ++i)
+    {
+      const Vec3 err = opSub(targets[i], positions_[i]);
+      const double cmd_speed = norm2d(last_cmd_vel_[i]);
+      const double actual_speed = actualSpeedXY(i);
+      // 位置误差 < tolerance 且命令速度和实际速度都降到接近零 → 标记到达
+      if (norm2d(err) < tolerance &&
+          cmd_speed < arrive_speed_threshold_ &&
+          actual_speed < arrive_speed_threshold_)
+      {
+        arrived_flags_[i] = true;
+      }
+      all_arrived = all_arrived && arrived_flags_[i];
+    }
+    return all_arrived;
+  }
+
+  // 编队整体平移控制 (Translate 阶段专用):
+  // 计算编队中心到目标中心的偏差决定整体速度,
+  // 每架 UAV 速度 = 整体速度 + 小的队形修正速度。
+  // 这样四架机更像一个刚体平移, 避免各自独立追点导致的不同步。
+  void publishTranslateVelocity(const std::array<Vec3, kUavCount>& targets,
+                                double speed = -1.0,
+                                double slow_r = -1.0)
+  {
+    const double eff_speed = (speed > 0.0) ? speed : translate_speed_;
+    const double eff_slow_r = (slow_r > 0.0) ? slow_r : slow_radius_;
+
+    // 保存当前目标位置供 CSV 记录
+    current_targets_ = targets;
+
+    Vec3 current_center = formationCenter(positions_);
+    Vec3 target_center = formationCenter(targets);
+
+    Vec3 center_err = opSub(target_center, current_center);
+    Vec3 center_dir = normalize2d(center_err);
+    double center_dist = norm2d(center_err);
+
+    // 编队中心速度: 距离远时巡航, 距离近时线性减速
+    double center_speed = eff_speed;
+    if (center_dist < eff_slow_r)
+    {
+      center_speed = eff_speed * center_dist / eff_slow_r;
+    }
+    center_speed = std::min(center_speed, max_horizontal_speed_);
+    Vec3 v_center = opMul(center_dir, center_speed);
+
+    std::array<geometry_msgs::TwistStamped, kUavCount> setpoints;
+
+    for (int i = 0; i < kUavCount; ++i)
+    {
+      // 到达锁存: 改用 settleVelocityToTarget 低速保持, 不发零速度
+      if (arrived_flags_[i])
+      {
+        Vec3 v = settleVelocityToTarget(i, targets[i]);
+        const double vz = clamp((kFlightZ - positions_[i].z) * 0.6, -0.4, 0.4);
+        setpoints[i] = toTwist(v.x, v.y, vz);
+        last_cmd_speed_xy_[i] = norm2d(v);
+        continue;
+      }
+
+      Vec3 shape_err = opSub(targets[i], positions_[i]);
+      // 队形修正: 单机位置偏差乘以 translate_shape_gain_ 加到整体速度上
+      // 使用较小增益避免左右两侧速度差过大导致 "不同频" 假象
+      Vec3 v_shape = opMul({shape_err.x, shape_err.y, 0.0}, translate_shape_gain_);
+      Vec3 v = opAdd(v_center, v_shape);
+
+      // 整体速度上限使用 eff_speed, 而非 max_horizontal_speed_
+      // 这样才能让 translate_speed=0.8 真正生效
+      const double speed_limit = std::min(eff_speed, max_horizontal_speed_);
+      if (norm2d(v) > speed_limit)
+      {
+        v = opMul(v, speed_limit / norm2d(v));
+      }
+
+      // 加速度限制后再记录真实发布速度到 CSV
+      v = limitAccel(i, v);
+
+      const double vz = clamp((kFlightZ - positions_[i].z) * 0.6, -0.4, 0.4);
+      setpoints[i] = toTwist(v.x, v.y, vz);
+      last_cmd_speed_xy_[i] = norm2d(v);
+    }
+
+    publishTwistSetpoints(setpoints);
+  }
+
+  // 制动感知速度规划:
+  // 在恒速追点基础上加入 (a) 制动距离限制 和 (b) 实际速度阻尼,
+  // 避免高速接近目标时因减速距离不足而过冲。
+  Vec3 brakingAwareVelocityToTarget(
+      int i,
+      const Vec3& target,
+      double max_speed,
+      double slow_radius,
+      double brake_accel)
+  {
+    const Vec3 err = opSub(target, positions_[i]);
+    const double dist = norm2d(err);
+
+    if (dist < 1.0e-3)
+    {
+      return {0.0, 0.0, 0.0};
+    }
+
+    const Vec3 dir = normalize2d(err);
+
+    // 真值速度 (用于速度阻尼)
+    const Vec3 actual_v{velocities_[i].x, velocities_[i].y, 0.0};
+
+    double cmd_speed = max_speed;
+
+    // 1. 原线性减速
+    if (dist < slow_radius)
+    {
+      cmd_speed = max_speed * dist / slow_radius;
+    }
+
+    // 2. 制动距离限制: 当前速度下需要多远才能刹停
+    const double stop_margin = stage_target_tolerance_;
+    const double brake_dist = std::max(0.0, dist - stop_margin);
+    const double brake_limited_speed =
+        std::sqrt(std::max(0.0, 2.0 * brake_accel * brake_dist));
+
+    cmd_speed = std::min(cmd_speed, brake_limited_speed);
+
+    // 3. 速度阻尼: 在减速区内加入反向阻尼抑制实际速度
+    Vec3 v_cmd = opMul(dir, cmd_speed);
+    if (dist < slow_radius)
+    {
+      v_cmd.x -= velocity_damping_gain_ * actual_v.x;
+      v_cmd.y -= velocity_damping_gain_ * actual_v.y;
+    }
+
+    // 4. 限幅
+    const double s = norm2d(v_cmd);
+    if (s > max_speed)
+    {
+      v_cmd = opMul(v_cmd, max_speed / s);
+    }
+
+    return v_cmd;
+  }
+
+  // 制动感知速度发布函数 (EXPAND_SHRINK RETURN 专用):
+  // 使用 brakingAwareVelocityToTarget 逐机规划 + 非对称 limitAccel。
+  void publishBrakeAwareSpeedToTargets(
+      const std::array<Vec3, kUavCount>& targets,
+      double speed,
+      double slow_r,
+      double brake_accel)
+  {
+    current_targets_ = targets;
+
+    std::array<geometry_msgs::TwistStamped, kUavCount> setpoints;
+
+    for (int i = 0; i < kUavCount; ++i)
+    {
+      Vec3 v;
+
+      if (arrived_flags_[i])
+      {
+        v = settleVelocityToTarget(i, targets[i]);
+      }
+      else
+      {
+        v = brakingAwareVelocityToTarget(i, targets[i],
+                                         speed, slow_r, brake_accel);
+        v = limitAccel(i, v);
+      }
+
+      const double vz = clamp((kFlightZ - positions_[i].z) * 0.6, -0.4, 0.4);
+      setpoints[i] = toTwist(v.x, v.y, vz);
+      last_cmd_speed_xy_[i] = norm2d(v);
+    }
+
     publishTwistSetpoints(setpoints);
   }
 
@@ -795,14 +1311,32 @@ private:
         ROS_INFO("[formation] Stage 1 Hovering: 2 seconds");
         break;
       case Stage::EXPAND_SHRINK:
-        ROS_INFO("[formation] Stage 2 Expanding & Shrinking: 2.0 m outward and back");
+        motion_subphase_ = MotionSubphase::OUTBOUND;
+        resetSpeedDiagState();
+        resetArrivedFlags();
+        std::fill(last_cmd_vel_.begin(), last_cmd_vel_.end(), Vec3{0.0, 0.0, 0.0});
+        for (int i = 0; i < kUavCount; ++i) last_cmd_time_[i] = ros::Time(0);
+        ROS_INFO("[formation] Stage 2 Expanding & Shrinking: 2.0 m outward and back at %.2f m/s",
+                 horizontal_speed_);
         break;
       case Stage::TRANSLATE:
-        ROS_INFO("[formation] Stage 3 Translating: +3.0 m ENU-Y and back");
+        motion_subphase_ = MotionSubphase::OUTBOUND;
+        resetSpeedDiagState();
+        resetArrivedFlags();
+        std::fill(last_cmd_vel_.begin(), last_cmd_vel_.end(), Vec3{0.0, 0.0, 0.0});
+        for (int i = 0; i < kUavCount; ++i) last_cmd_time_[i] = ros::Time(0);
+        ROS_INFO("[formation] Stage 3 Translating: +3.0 m ENU-Y and back at %.2f m/s",
+                 translate_speed_);
         break;
       case Stage::CHASE_RESTORE:
+        motion_subphase_ = MotionSubphase::OUTBOUND;
+        resetSpeedDiagState();
+        resetArrivedFlags();
+        std::fill(last_cmd_vel_.begin(), last_cmd_vel_.end(), Vec3{0.0, 0.0, 0.0});
+        for (int i = 0; i < kUavCount; ++i) last_cmd_time_[i] = ros::Time(0);
         captureChaseTargets();
-        ROS_INFO("[formation] Stage 4 Chase/Restore: cyclic position swap and return");
+        ROS_INFO("[formation] Stage 4 Chase/Restore: cyclic position swap and return at %.2f m/s",
+                 chase_speed_);
         break;
       case Stage::LAND:
         landing_start_z_ = local_positions_[0].z;
@@ -913,76 +1447,278 @@ private:
 
   void runExpandShrink()
   {
-    const double elapsed = stageElapsed();
-    std::array<Vec3, kUavCount> targets;
-    if (elapsed < 5.0)
+    if (safetyStopIfTooClose("EXPAND_SHRINK"))
     {
-      targets = interpolateTargets(home_, expand_targets_, clamp(elapsed / 5.0, 0.0, 1.0));
-    }
-    else
-    {
-      targets = interpolateTargets(expand_targets_, home_, clamp((elapsed - 5.0) / 5.0, 0.0, 1.0));
+      logSpeedDiag();
+      return;
     }
 
-    publishVelocityToTargets(targets);
-    ROS_DEBUG_THROTTLE(2.0, "[formation] Stage 2 Expand/Shrink t=%.1f/10.0", elapsed);
-
-    if (elapsed >= 10.0 && allAtTargets(home_, 0.6) &&
-        allAtAltitude(kFlightZ, kStageAltitudeTolerance))
+    if (motion_subphase_ == MotionSubphase::OUTBOUND)
     {
-      publishZeroVelocity();
-      enterStage(Stage::TRANSLATE);
+      // 向 expand 目标运动 (使用独立参数 expand_speed_ / expand_slow_radius_)
+      publishConstantSpeedToTargets(expand_targets_,
+                                    expand_speed_,
+                                    expand_slow_radius_);
+
+      if (updateArrivedFlags(expand_targets_, stage_target_tolerance_))
+      {
+        // 全队到达 → 进入 OUTBOUND_SETTLE, 不发送 publishZeroVelocity(),
+        // 让 publishSettleToTargets 平滑接管。
+        resetSpeedDiagState();
+        stable_since_ = ros::Time(0);
+        motion_subphase_ = MotionSubphase::OUTBOUND_SETTLE;
+        return;
+      }
     }
+    else if (motion_subphase_ == MotionSubphase::OUTBOUND_SETTLE)
+    {
+      // 低速修正到 expand_targets_, 短暂稳定后直接进入 RETURN (不掉头停顿)
+      publishSettleToTargets(expand_targets_);
+
+      if (allStableAtTargets(expand_targets_))
+      {
+        if (stable_since_.isZero())
+          stable_since_ = ros::Time::now();
+
+        if ((ros::Time::now() - stable_since_).toSec() >= turnaround_settle_time_)
+        {
+          resetArrivedFlags();
+          stable_since_ = ros::Time(0);
+          motion_subphase_ = MotionSubphase::RETURN;
+          return;
+        }
+      }
+      else
+      {
+        stable_since_ = ros::Time(0);
+      }
+    }
+    else if (motion_subphase_ == MotionSubphase::RETURN)
+    {
+      // 向 home 收缩, 使用制动感知控制避免高速过冲
+      publishBrakeAwareSpeedToTargets(home_,
+                                      expand_return_speed_,
+                                      expand_return_slow_radius_,
+                                      expand_brake_accel_xy_);
+
+      if (updateArrivedFlags(home_, stage_target_tolerance_) &&
+          allAtAltitude(kFlightZ, kStageAltitudeTolerance))
+      {
+        // 全队回到 home → 进入 RETURN_SETTLE, 不发送 publishZeroVelocity()
+        resetSpeedDiagState();
+        stable_since_ = ros::Time(0);
+        motion_subphase_ = MotionSubphase::RETURN_SETTLE;
+        return;
+      }
+    }
+    else  // RETURN_SETTLE
+    {
+      // 低速修正到 home_, 全队稳定后计时 1s 再进入 TRANSLATE
+      publishSettleToTargets(home_);
+
+      if (allStableAtTargets(home_))
+      {
+        if (stable_since_.isZero())
+          stable_since_ = ros::Time::now();
+
+        if ((ros::Time::now() - stable_since_).toSec() >= stage_settle_time_)
+        {
+          publishZeroVelocity();
+          enterStage(Stage::TRANSLATE);
+          stable_since_ = ros::Time(0);
+          return;
+        }
+      }
+      else
+      {
+        stable_since_ = ros::Time(0);
+      }
+    }
+
+    ROS_DEBUG_THROTTLE(2.0, "[formation] Stage 2 Expand/Shrink subphase=%d t=%.1f",
+                      static_cast<int>(motion_subphase_), stageElapsed());
+    logSpeedDiag();
   }
 
   void runTranslate()
   {
-    const double elapsed = stageElapsed();
-    std::array<Vec3, kUavCount> targets;
-    if (elapsed < 5.0)
+    if (safetyStopIfTooClose("TRANSLATE"))
     {
-      targets = interpolateTargets(home_, translate_targets_, clamp(elapsed / 5.0, 0.0, 1.0));
-    }
-    else
-    {
-      targets = interpolateTargets(translate_targets_, home_, clamp((elapsed - 5.0) / 5.0, 0.0, 1.0));
+      logSpeedDiag();
+      return;
     }
 
-    publishVelocityToTargets(targets);
-    ROS_DEBUG_THROTTLE(2.0, "[formation] Stage 3 Translating t=%.1f/10.0", elapsed);
-
-    if (elapsed >= 10.0 && allAtTargets(home_, 0.6) &&
-        allAtAltitude(kFlightZ, kStageAltitudeTolerance))
+    if (motion_subphase_ == MotionSubphase::OUTBOUND)
     {
-      publishZeroVelocity();
-      enterStage(Stage::CHASE_RESTORE);
+      // 编队整体平移控制 (formation-center based), 四机更像刚体
+      publishTranslateVelocity(translate_targets_);
+
+      if (updateArrivedFlags(translate_targets_, stage_target_tolerance_))
+      {
+        // 全队到达 → 进入 OUTBOUND_SETTLE, 不发送 publishZeroVelocity(),
+        // 让 publishSettleToTargets 平滑接管。
+        resetSpeedDiagState();
+        stable_since_ = ros::Time(0);
+        motion_subphase_ = MotionSubphase::OUTBOUND_SETTLE;
+        return;
+      }
     }
+    else if (motion_subphase_ == MotionSubphase::OUTBOUND_SETTLE)
+    {
+      // 低速修正到 translate_targets_, 短暂稳定后直接进入 RETURN (不掉头停顿)
+      publishSettleToTargets(translate_targets_);
+
+      if (allStableAtTargets(translate_targets_))
+      {
+        if (stable_since_.isZero())
+          stable_since_ = ros::Time::now();
+
+        if ((ros::Time::now() - stable_since_).toSec() >= turnaround_settle_time_)
+        {
+          resetArrivedFlags();
+          stable_since_ = ros::Time(0);
+          motion_subphase_ = MotionSubphase::RETURN;
+          return;
+        }
+      }
+      else
+      {
+        stable_since_ = ros::Time(0);
+      }
+    }
+    else if (motion_subphase_ == MotionSubphase::RETURN)
+    {
+      // 返回也使用编队整体平移控制, 保持一致
+      publishTranslateVelocity(home_, translate_speed_, slow_radius_);
+
+      if (updateArrivedFlags(home_, stage_target_tolerance_) &&
+          allAtAltitude(kFlightZ, kStageAltitudeTolerance))
+      {
+        // 全队返回 home → 进入 RETURN_SETTLE
+        resetSpeedDiagState();
+        stable_since_ = ros::Time(0);
+        motion_subphase_ = MotionSubphase::RETURN_SETTLE;
+        return;
+      }
+    }
+    else  // RETURN_SETTLE
+    {
+      // 低速修正到 home_, 全队稳定后计时 1s 再进入 CHASE_RESTORE
+      publishSettleToTargets(home_);
+
+      if (allStableAtTargets(home_))
+      {
+        if (stable_since_.isZero())
+          stable_since_ = ros::Time::now();
+
+        if ((ros::Time::now() - stable_since_).toSec() >= stage_settle_time_)
+        {
+          publishZeroVelocity();
+          enterStage(Stage::CHASE_RESTORE);
+          stable_since_ = ros::Time(0);
+          return;
+        }
+      }
+      else
+      {
+        stable_since_ = ros::Time(0);
+      }
+    }
+
+    ROS_DEBUG_THROTTLE(2.0, "[formation] Stage 3 Translate subphase=%d t=%.1f",
+                      static_cast<int>(motion_subphase_), stageElapsed());
+    logSpeedDiag();
   }
 
   void runChaseRestore()
   {
-    const double elapsed = stageElapsed();
-    std::array<Vec3, kUavCount> targets;
-    if (elapsed < 5.0)
+    if (safetyStopIfTooClose("CHASE_RESTORE"))
     {
-      targets = interpolateTargets(chase_start_positions_, chase_swap_targets_,
-                                   clamp(elapsed / 5.0, 0.0, 1.0));
-    }
-    else
-    {
-      targets = interpolateTargets(chase_swap_targets_, chase_start_positions_,
-                                   clamp((elapsed - 5.0) / 5.0, 0.0, 1.0));
+      logSpeedDiag();
+      return;
     }
 
-    publishWorldTargetsAsLocalPoseSetpoints(targets);
-    ROS_DEBUG_THROTTLE(2.0, "[formation] Stage 4 Chase/Restore t=%.1f/10.0", elapsed);
-
-    if (elapsed >= 10.0 && allAtTargets(chase_start_positions_, 0.6) &&
-        allAtAltitude(kFlightZ, kStageAltitudeTolerance))
+    if (motion_subphase_ == MotionSubphase::OUTBOUND)
     {
-      publishZeroVelocity();
-      enterStage(Stage::LAND);
+      // Chase 阶段使用独立 chase_speed_ 和更保守的 chase_slow_radius_
+      publishConstantSpeedToTargets(chase_swap_targets_,
+                                    chase_speed_, chase_slow_radius_);
+
+      if (updateArrivedFlags(chase_swap_targets_, stage_target_tolerance_))
+      {
+        // 全队到达交换目标 → 进入 OUTBOUND_SETTLE, 不发送 publishZeroVelocity()
+        resetSpeedDiagState();
+        stable_since_ = ros::Time(0);
+        motion_subphase_ = MotionSubphase::OUTBOUND_SETTLE;
+        return;
+      }
     }
+    else if (motion_subphase_ == MotionSubphase::OUTBOUND_SETTLE)
+    {
+      // 低速修正到 chase_swap_targets_, 短暂稳定后直接进入 RETURN (不掉头停顿)
+      publishSettleToTargets(chase_swap_targets_);
+
+      if (allStableAtTargets(chase_swap_targets_))
+      {
+        if (stable_since_.isZero())
+          stable_since_ = ros::Time::now();
+
+        if ((ros::Time::now() - stable_since_).toSec() >= turnaround_settle_time_)
+        {
+          resetArrivedFlags();
+          stable_since_ = ros::Time(0);
+          motion_subphase_ = MotionSubphase::RETURN;
+          return;
+        }
+      }
+      else
+      {
+        stable_since_ = ros::Time(0);
+      }
+    }
+    else if (motion_subphase_ == MotionSubphase::RETURN)
+    {
+      // 返回阶段使用 chase_speed_ 和 chase_slow_radius_, 避免回到 1.0 m/s
+      publishConstantSpeedToTargets(chase_start_positions_,
+                                    chase_speed_, chase_slow_radius_);
+
+      if (updateArrivedFlags(chase_start_positions_, stage_target_tolerance_) &&
+          allAtAltitude(kFlightZ, kStageAltitudeTolerance))
+      {
+        // 全队返回初始位置 → 进入 RETURN_SETTLE
+        resetSpeedDiagState();
+        stable_since_ = ros::Time(0);
+        motion_subphase_ = MotionSubphase::RETURN_SETTLE;
+        return;
+      }
+    }
+    else  // RETURN_SETTLE
+    {
+      // 低速修正到 chase_start_positions_, 全队稳定后计时 1s 再进入 LAND
+      publishSettleToTargets(chase_start_positions_);
+
+      if (allStableAtTargets(chase_start_positions_))
+      {
+        if (stable_since_.isZero())
+          stable_since_ = ros::Time::now();
+
+        if ((ros::Time::now() - stable_since_).toSec() >= stage_settle_time_)
+        {
+          publishZeroVelocity();
+          enterStage(Stage::LAND);
+          stable_since_ = ros::Time(0);
+          return;
+        }
+      }
+      else
+      {
+        stable_since_ = ros::Time(0);
+      }
+    }
+
+    ROS_DEBUG_THROTTLE(2.0, "[formation] Stage 4 Chase/Restore subphase=%d t=%.1f",
+                      static_cast<int>(motion_subphase_), stageElapsed());
+    logSpeedDiag();
   }
 
   void runLand()
@@ -1178,6 +1914,94 @@ private:
     }
   }
 
+  // 速度诊断 CSV ─────────────────────────────────────────────
+  void initSpeedCsv()
+  {
+    boost::filesystem::create_directories(speed_csv_dir_);
+    const std::string path = speed_csv_dir_ + "/formation_speed_diag.csv";
+    speed_csv_.open(path.c_str(), std::ios::out | std::ios::trunc);
+    if (!speed_csv_.is_open())
+    {
+      ROS_WARN("[formation] cannot open speed diag CSV: %s", path.c_str());
+      return;
+    }
+    speed_csv_ << std::fixed << std::setprecision(6);
+    speed_csv_ << "stamp,stage,subphase,"
+               << "uav_id,"
+               << "gt_x,gt_y,gt_z,"
+               << "gt_vx,gt_vy,gt_vz,gt_speed_xy,"
+               << "cmd_speed_xy,"
+               << "target_dist_xy,arrived_flag,min_pairwise_distance,"
+               << "target_x,target_y,target_z\n";
+    ROS_INFO("[formation] speed diag CSV: %s", path.c_str());
+  }
+
+  void logSpeedDiag()
+  {
+    if (!speed_csv_.is_open())
+      return;
+
+    // 每 100ms (10 Hz) 写一次避免文件过大
+    const ros::Time now = ros::Time::now();
+    if (!last_speed_csv_stamp_.isZero() &&
+        (now - last_speed_csv_stamp_).toSec() < 0.1)
+      return;
+
+    // 先计算 dt, 再更新 last_speed_csv_stamp_, 避免 dt ≈ 0 的 bug
+    double dt = 0.0;
+    if (has_prev_positions_ && !last_speed_csv_stamp_.isZero())
+    {
+      dt = (now - last_speed_csv_stamp_).toSec();
+    }
+    if (dt <= 1.0e-6)
+      dt = 0.1;
+
+    last_speed_csv_stamp_ = now;
+
+    const int s = static_cast<int>(stage_);
+    const int sp = static_cast<int>(motion_subphase_);
+    const double stamp = now.toSec();
+
+    // 当前时刻全队最小机间距 (每帧统一值, 写给所有 4 行)
+    const double frame_min_pairwise = minPairwiseDistance(positions_);
+
+    for (int i = 0; i < kUavCount; ++i)
+    {
+      double gt_vx = 0.0, gt_vy = 0.0, gt_speed_xy = 0.0;
+      if (has_prev_positions_)
+      {
+        gt_vx = (positions_[i].x - prev_positions_[i].x) / dt;
+        gt_vy = (positions_[i].y - prev_positions_[i].y) / dt;
+        gt_speed_xy = std::sqrt(gt_vx * gt_vx + gt_vy * gt_vy);
+      }
+
+      const Vec3 err = opSub(current_targets_[i], positions_[i]);
+      const double td_xy = norm2d(err);
+
+      speed_csv_ << stamp << ','
+                 << s << ',' << sp << ','
+                 << i << ','
+                 << positions_[i].x << ','
+                 << positions_[i].y << ','
+                 << positions_[i].z << ','
+                 << gt_vx << ',' << gt_vy << ',' << 0.0 << ','
+                 << gt_speed_xy << ','
+                 << last_cmd_speed_xy_[i] << ','
+                 << td_xy << ','
+                 << (arrived_flags_[i] ? 1 : 0) << ','
+                 << frame_min_pairwise << ','
+                 << current_targets_[i].x << ','
+                 << current_targets_[i].y << ','
+                 << current_targets_[i].z << '\n';
+    }
+    speed_csv_.flush();
+
+    // 保存前帧位置用于下一帧差分
+    for (int i = 0; i < kUavCount; ++i)
+      prev_positions_[i] = positions_[i];
+    has_prev_positions_ = true;
+  }
+
   Vec3 formationCenter(const std::array<Vec3, kUavCount>& points) const
   {
     Vec3 center{0.0, 0.0, 0.0};
@@ -1265,6 +2089,8 @@ private:
   ros::Timer setpoint_timer_;
 
   std::array<Vec3, kUavCount> positions_;
+  // Gazebo 真值速度 (从 ModelStates twist 读取, 用于稳定判断)
+  std::array<Vec3, kUavCount> velocities_{};
   std::array<Vec3, kUavCount> local_positions_;
   std::array<Vec3, kUavCount> home_;
   std::array<Vec3, kUavCount> local_home_;
@@ -1285,6 +2111,7 @@ private:
   bool cached_pose_active_;
   bool cached_twist_active_;
   Stage stage_;
+  MotionSubphase motion_subphase_;
   ros::Time stage_start_;
   ros::Time takeoff_altitude_ready_since_;
   ros::Time last_ready_retry_;
@@ -1299,6 +2126,57 @@ private:
   double takeoff_climb_rate_;
   double takeoff_timeout_;
   double landing_timeout_;
+  // 1 m/s 动态运动参数
+  double horizontal_speed_ = 1.0;
+  double max_horizontal_speed_ = 1.0;
+  double slow_radius_ = 0.80;
+  double stage_target_tolerance_ = 0.25;
+  double min_pairwise_distance_ = 0.8;
+  // 阶段缓冲参数
+  double phase_settle_time_ = 1.0;
+  double stage_settle_time_ = 1.0;
+  // 掉头缓冲: OUTBOUND→RETURN 子阶段内的短暂停顿 (默认 0.2s, 可设为 0 直接连续)
+  double turnaround_settle_time_ = 0.2;
+  ros::Time settle_start_;
+  // 到达锁存
+  std::array<bool, kUavCount> arrived_flags_{};
+  // 当前阶段目标位置 (供 CSV 记录)
+  std::array<Vec3, kUavCount> current_targets_{};
+  // 加速度限制
+  double max_accel_xy_ = 0.6;
+  // 非对称减速限制: 允许快速制动, 避免低速距离内速度降不下来
+  double max_decel_xy_ = 1.8;
+  std::array<Vec3, kUavCount> last_cmd_vel_{};
+  std::array<ros::Time, kUavCount> last_cmd_time_{};
+  // EXPAND_SHRINK 独立参数 (避免全局 slow_radius 影响 TRANSLATE/CHASE)
+  double expand_speed_ = 0.8;
+  double expand_return_speed_ = 0.7;
+  double expand_slow_radius_ = 1.4;
+  double expand_return_slow_radius_ = 1.6;
+  double expand_brake_accel_xy_ = 0.8;
+  // 速度阻尼: 接近目标时抑制实际速度, 减少过冲
+  double velocity_damping_gain_ = 0.6;
+  // 各阶段独立速度参数 (可覆盖默认 horizontal_speed_)
+  double translate_speed_ = 0.8;
+  double chase_speed_ = 0.6;
+  double chase_slow_radius_ = 1.0;
+  // 到达判定: 位置误差 < tolerance 且命令速度 < 此阈值才标记 arrived
+  double arrive_speed_threshold_ = 0.20;
+  // 低速保持控制 (SETTLE / arrived 锁存期间)
+  double settle_p_gain_ = 0.4;
+  double settle_speed_max_ = 0.25;
+  double settle_pos_tolerance_ = 0.25;
+  double settle_speed_tolerance_ = 0.20;
+  // SETTLE 稳定计时 (allStableAtTargets 持续为 true 后开始计时)
+  ros::Time stable_since_;
+  // Translate 整体平移控制
+  double translate_shape_gain_ = 0.15;
+  std::string speed_csv_dir_;
+  std::array<double, kUavCount> last_cmd_speed_xy_{};
+  std::ofstream speed_csv_;
+  Vec3 prev_positions_[kUavCount]{};
+  bool has_prev_positions_ = false;
+  ros::Time last_speed_csv_stamp_;
 };
 
 int main(int argc, char** argv)

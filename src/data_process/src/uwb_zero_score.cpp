@@ -15,6 +15,30 @@
 #include <sys/types.h>
 #include <ros/package.h>
 
+// 距离 + 时间戳样本。
+// UWB zero-score 滤波的窗口内保存原始距离和采样时刻，
+// 用于在窗口填满后计算窗口中心时间作为 filtered_msg 的有效 stamp。
+struct RangeSample
+{
+    double distance = 0.0;
+    ros::Time stamp;
+    double gt_distance = std::numeric_limits<double>::quiet_NaN();
+};
+
+// per-target 已接受样本的诊断信息。
+struct AcceptedDebug
+{
+    int target_id = -1;
+    double filtered_distance = 0.0;
+    double latest_raw_distance = 0.0;
+    double gt_distance_latest = 0.0;
+    ros::Time effective_stamp;
+    double window_span = 0.0;
+    double window_lag = 0.0;
+    size_t window_size = 0;
+    int reject_count = 0;
+};
+
 class UwbProcess
 {
 public:
@@ -53,6 +77,10 @@ public:
 
         initCsvLog();
 
+        ROS_INFO("[%s][UWB zero_score] timestamp_mode=window_mean_stamp window_size=%zu "
+                 "publish_once_per_raw=1",
+                 ns_.c_str(), queue_size_);
+
         ROS_INFO("[%s][UWB zero_score] params: uav_num=%d window=%zu z=%.2f min_std=%.3f min_dist=%.2f "
                  "max_rejects=%d warmup_std=%.3f publish_rate=%.1fHz",
                  ns_.c_str(), uav_num_, queue_size_, z_score_threshold_,
@@ -70,11 +98,16 @@ public:
     void sub_callback(const sensors::UwbRange::ConstPtr &msg)
     {
         const size_t n = std::min(msg->distances.size(), msg->target_ids.size());
+
+        const ros::Time input_stamp =
+            msg->header.stamp.isZero() ? ros::Time::now() : msg->header.stamp;
+
         data_process::UwbProcessed filtered_msg;
         filtered_msg.header = msg->header;
-        if (filtered_msg.header.stamp.isZero())
-            filtered_msg.header.stamp = ros::Time::now();
-        filtered_msg.header.frame_id = msg->header.frame_id.empty() ? "uwb_link" : msg->header.frame_id;
+        filtered_msg.header.stamp = input_stamp;
+        filtered_msg.header.frame_id = msg->header.frame_id.empty()
+                                          ? "uwb_link"
+                                          : msg->header.frame_id;
 
         if (msg->distances.size() != msg->target_ids.size())
         {
@@ -84,6 +117,9 @@ public:
         }
 
         std::vector<bool> included(uav_num_, false);
+        std::vector<ros::Time> accepted_effective_stamps;
+        std::vector<AcceptedDebug> accepted_debug;
+
         for (size_t i = 0; i < n; i++)
         {
             const int target_id = static_cast<int>(msg->target_ids[i]);
@@ -106,23 +142,29 @@ public:
 
             auto &window = dq_[target_id];
             bool accepted = false;
+
+            RangeSample sample;
+            sample.distance = distance;
+            sample.stamp = input_stamp;
+            sample.gt_distance = gt_distance;
+
             if (window.size() < queue_size_)
             {
                 // 队列未满时直接接受，用于初始化统计量
-                window.push_back(static_cast<float>(distance));
+                window.push_back(sample);
                 accepted = true;
 
                 // 冷启动检测: 窗口首次填满时检查标准差是否过低
                 if (window.size() == queue_size_ && !warmup_checked_[target_id])
                 {
-                    float init_stddev = cal_stddev(window);
+                    double init_stddev = calStddevDistance(window);
                     if (init_stddev < warmup_stddev_threshold_)
                     {
                         ROS_WARN("[%s][UWB zero_score] target=%d cold-start detected (stddev=%.4f < %.4f), "
                                  "clearing window",
                                  ns_.c_str(), target_id, init_stddev, warmup_stddev_threshold_);
                         window.clear();
-                        window.push_back(static_cast<float>(distance));
+                        window.push_back(sample);
                         warmup_checked_[target_id] = false;
                     }
                     else
@@ -134,14 +176,13 @@ public:
             else
             {
                 // Zero-score 检验: 先将新值排除在队列之外计算统计量
-                float mean = cal_u(window);
-                float stddev = std::max(cal_stddev(window), static_cast<float>(min_stddev_));
+                double mean = calMeanDistance(window);
+                double stddev = std::max(calStddevDistance(window), min_stddev_);
 
-                if (std::abs(static_cast<float>(distance) - mean) <=
-                    z_score_threshold_ * stddev)
+                if (std::abs(distance - mean) <= z_score_threshold_ * stddev)
                 {
                     window.pop_front();
-                    window.push_back(static_cast<float>(distance));
+                    window.push_back(sample);
                     accepted = true;
                 }
                 else
@@ -154,7 +195,7 @@ public:
                     if (reject_count_[target_id] >= max_consecutive_rejects_)
                     {
                         window.clear();
-                        window.push_back(static_cast<float>(distance));
+                        window.push_back(sample);
                         reject_count_[target_id] = 0;
                         warmup_checked_[target_id] = false;
                         accepted = true;
@@ -164,20 +205,54 @@ public:
                 }
             }
 
-            if (accepted)
-            {
-                reject_count_[target_id] = 0;
-                included[target_id] = true;
-                filtered_msg.target_ids.push_back(static_cast<uint8_t>(target_id));
-                filtered_msg.distances.push_back(cal_u(window));
-                filtered_msg.gt_distances.push_back(gt_distance);
-            }
+            if (!accepted)
+                continue;
+
+            reject_count_[target_id] = 0;
+            included[target_id] = true;
+
+            const double filtered_distance = calMeanDistance(window);
+            const ros::Time effective_stamp = calMeanStamp(window);
+            const double window_span = calWindowSpan(window);
+            const double window_lag = calWindowLag(window, input_stamp);
+
+            filtered_msg.target_ids.push_back(static_cast<uint8_t>(target_id));
+            filtered_msg.distances.push_back(filtered_distance);
+            filtered_msg.gt_distances.push_back(gt_distance);
+            accepted_effective_stamps.push_back(effective_stamp);
+
+            AcceptedDebug dbg;
+            dbg.target_id = target_id;
+            dbg.filtered_distance = filtered_distance;
+            dbg.latest_raw_distance = distance;
+            dbg.gt_distance_latest = gt_distance;
+            dbg.effective_stamp = effective_stamp;
+            dbg.window_span = window_span;
+            dbg.window_lag = window_lag;
+            dbg.window_size = window.size();
+            dbg.reject_count = reject_count_[target_id];
+            accepted_debug.push_back(dbg);
         }
 
         if (!filtered_msg.target_ids.empty())
         {
+            filtered_msg.header.stamp = meanStamp(accepted_effective_stamps);
             latest_filtered_msg_ = filtered_msg;
             has_latest_filtered_msg_ = true;
+
+            // 一帧原始 UWB → 一帧 processed UWB (与 spin() 重复发布分离)
+            uwb_process_pub_.publish(filtered_msg);
+
+            ROS_INFO_THROTTLE(
+                3.0,
+                "[%s][UWB zero_score] pub: raw_stamp=%.3f eff_stamp=%.3f shift=%.3f n=%zu%s",
+                ns_.c_str(),
+                input_stamp.toSec(),
+                filtered_msg.header.stamp.toSec(),
+                (filtered_msg.header.stamp - input_stamp).toSec(),
+                filtered_msg.target_ids.size(),
+                formatRanges(filtered_msg.target_ids,
+                             filtered_msg.distances).c_str());
         }
 
         // CSV: 原始数据
@@ -186,7 +261,7 @@ public:
             for (size_t i = 0; i < n; i++)
             {
                 raw_csv_ << seq_ << ","
-                         << msg->header.stamp.toSec() << ","
+                         << input_stamp.toSec() << ","
                          << self_id_ << ","
                          << static_cast<int>(msg->target_ids[i]) << ","
                          << msg->distances[i] << ","
@@ -198,77 +273,98 @@ public:
         // CSV: 滤波后数据
         if (proc_csv_.is_open())
         {
-            for (size_t i = 0; i < filtered_msg.target_ids.size(); i++)
+            for (const auto &dbg : accepted_debug)
             {
                 proc_csv_ << seq_ << ","
-                          << filtered_msg.header.stamp.toSec() << ","
+                          << input_stamp.toSec() << ","
+                          << dbg.effective_stamp.toSec() << ","
+                          << (dbg.effective_stamp - input_stamp).toSec() << ","
                           << self_id_ << ","
-                          << static_cast<int>(filtered_msg.target_ids[i]) << ","
-                          << filtered_msg.distances[i] << ","
-                          << getGtDistance(filtered_msg, i) << "\n";
+                          << dbg.target_id << ","
+                          << dbg.filtered_distance << ","
+                          << dbg.latest_raw_distance << ","
+                          << dbg.gt_distance_latest << ","
+                          << dbg.window_size << ","
+                          << dbg.window_span << ","
+                          << dbg.window_lag << ","
+                          << dbg.reject_count << "\n";
             }
             proc_csv_.flush();
         }
         ++seq_;
-        /*
-        ROS_INFO_THROTTLE(3.0, "[%s][UWB zero_score] raw: stamp=%.3f n=%zu%s",
-                          ns_.c_str(), msg->header.stamp.toSec(), n,
-                          formatRanges(msg->target_ids, msg->distances).c_str());
-        ROS_INFO_THROTTLE(3.0, "[%s][UWB zero_score] filtered: stamp=%.3f n=%zu%s",
-                          ns_.c_str(), filtered_msg.header.stamp.toSec(),
-                          filtered_msg.target_ids.size(),
-                          formatRanges(filtered_msg.target_ids, filtered_msg.distances).c_str());
-                          */
-    }
-
-    float cal_u(const std::deque<float> &dq)
-    {
-        if (dq.empty()) return 0.0f;
-        float sum = 0.0f;
-        for (const auto &val : dq)
-            sum += val;
-        return sum / dq.size();
-    }
-
-    float cal_stddev(const std::deque<float> &dq)
-    {
-        if (dq.empty()) return 0.0f;
-        float u = cal_u(dq);
-        float temp = 0.0f;
-        for (const auto &val : dq)
-            temp += (val - u) * (val - u);
-        return std::sqrt(temp / dq.size());
     }
 
     void spin()
     {
-        ros::Rate rate(publish_rate_hz_);
-        while (ros::ok())
-        {
-            ros::spinOnce();
-
-            if (!has_latest_filtered_msg_)
-            {
-                rate.sleep();
-                continue;
-            }
-
-            uwb_process_pub_.publish(latest_filtered_msg_);
-
-            ROS_INFO_THROTTLE(3.0, "[%s][UWB zero_score] pub: stamp=%.3f n=%zu%s",
-                              ns_.c_str(), latest_filtered_msg_.header.stamp.toSec(),
-                              latest_filtered_msg_.target_ids.size(),
-                              formatRanges(latest_filtered_msg_.target_ids,
-                                           latest_filtered_msg_.distances).c_str());
-
-            rate.sleep();
-        }
+        // 已改为收到一帧原始 UWB 即发布一帧 processed。
+        // 此处仅保持 ROS 主循环不退出。
+        ros::spin();
     }
 
 private:
+    // ── 窗口统计 ──────────────────────────────────────────
+    double calMeanDistance(const std::deque<RangeSample> &dq) const
+    {
+        if (dq.empty()) return 0.0;
+        double sum = 0.0;
+        for (const auto &s : dq)
+            sum += s.distance;
+        return sum / static_cast<double>(dq.size());
+    }
+
+    double calStddevDistance(const std::deque<RangeSample> &dq) const
+    {
+        if (dq.empty()) return 0.0;
+        const double u = calMeanDistance(dq);
+        double temp = 0.0;
+        for (const auto &s : dq)
+        {
+            const double e = s.distance - u;
+            temp += e * e;
+        }
+        return std::sqrt(temp / static_cast<double>(dq.size()));
+    }
+
+    ros::Time calMeanStamp(const std::deque<RangeSample> &dq) const
+    {
+        if (dq.empty()) return ros::Time(0);
+        double sum = 0.0;
+        for (const auto &s : dq)
+            sum += s.stamp.toSec();
+        return ros::Time(sum / static_cast<double>(dq.size()));
+    }
+
+    double calWindowSpan(const std::deque<RangeSample> &dq) const
+    {
+        if (dq.size() < 2) return 0.0;
+        return (dq.back().stamp - dq.front().stamp).toSec();
+    }
+
+    double calWindowLag(const std::deque<RangeSample> &dq,
+                        const ros::Time &current_stamp) const
+    {
+        const ros::Time center = calMeanStamp(dq);
+        if (center.isZero()) return std::numeric_limits<double>::quiet_NaN();
+        return (current_stamp - center).toSec();
+    }
+
+    ros::Time meanStamp(const std::vector<ros::Time> &stamps) const
+    {
+        if (stamps.empty()) return ros::Time(0);
+        double sum = 0.0;
+        int count = 0;
+        for (const auto &t : stamps)
+        {
+            if (t.isZero()) continue;
+            sum += t.toSec();
+            ++count;
+        }
+        if (count == 0) return ros::Time(0);
+        return ros::Time(sum / static_cast<double>(count));
+    }
+
     void initCsvLog()
     {
-        // csv_dir_ 已由构造函数从 ROS 参数读取; 为空时回退到 test/logs/uwb_test
         if (csv_dir_.empty())
         {
             std::string pkg_path;
@@ -300,7 +396,10 @@ private:
         if (proc_csv_.is_open())
         {
             proc_csv_ << std::fixed << std::setprecision(6);
-            proc_csv_ << "seq,timestamp,self_id,target_id,filtered_distance,gt_distance\n";
+            proc_csv_ << "seq,raw_timestamp,effective_timestamp,stamp_shift,"
+                      << "self_id,target_id,filtered_distance,latest_raw_distance,"
+                      << "gt_distance_latest,window_size,window_span,window_lag,"
+                      << "reject_count\n";
         }
 
         ROS_INFO("[%s][UWB zero_score] CSV logging to %s", ns_.c_str(), csv_dir_.c_str());
@@ -347,7 +446,7 @@ private:
     std::ofstream raw_csv_;
     std::ofstream proc_csv_;
 
-    std::vector<std::deque<float>> dq_;
+    std::vector<std::deque<RangeSample>> dq_;
     std::vector<int> reject_count_;
     std::vector<bool> warmup_checked_;
     data_process::UwbProcessed latest_filtered_msg_;

@@ -4,6 +4,39 @@
     <param name="takeoff_timeout" value="12.0" />
     <param name="takeoff_climb_rate" value="0.45" />
     <param name="landing_timeout" value="20.0" />
+    <!-- 论文 1 m/s 动态运动参数 -->
+    <param name="horizontal_speed" value="1.0" />
+    <param name="max_horizontal_speed" value="1.0" />
+    <param name="slow_radius" value="0.80" />
+    <param name="stage_target_tolerance" value="0.25" />
+    <param name="min_pairwise_distance" value="0.8" />
+    <!-- 阶段缓冲与加速度限制 -->
+    <param name="phase_settle_time" value="1.0" />
+    <param name="stage_settle_time" value="1.0" />
+    <param name="turnaround_settle_time" value="0.2" />
+    <param name="max_accel_xy" value="0.6" />
+    <param name="translate_speed" value="1.0" />
+    <param name="chase_speed" value="0.6" />
+    <param name="chase_slow_radius" value="1.0" />
+    <param name="arrive_speed_threshold" value="0.20" />
+    <!-- 低速保持控制 (SETTLE / arrived 锁存期间) -->
+    <param name="settle_p_gain" value="0.4" />
+    <param name="settle_speed_max" value="0.25" />
+    <param name="settle_pos_tolerance" value="0.25" />
+    <param name="settle_speed_tolerance" value="0.20" />
+    <!-- Translate 整体平移控制 -->
+    <param name="translate_shape_gain" value="0.15" />
+    <!-- EXPAND_SHRINK 独立参数 (避免全局 slow_radius 影响其他阶段) -->
+    <param name="expand_speed" value="1.0" />
+    <param name="expand_return_speed" value="0.7" />
+    <param name="expand_slow_radius" value="1.4" />
+    <param name="expand_return_slow_radius" value="1.6" />
+    <param name="expand_brake_accel_xy" value="0.8" />
+    <!-- 非对称加减速 (起步缓, 制动快) -->
+    <param name="max_decel_xy" value="1.8" />
+    <!-- 速度阻尼: 接近目标时抑制实际速度 -->
+    <param name="velocity_damping_gain" value="0.6" />
+    <param name="speed_csv_dir" value="/home/scott/swarm_localization/src/sensors/logs" />
   </node>
 
   <!-- 四台无人机图像录制 -->
