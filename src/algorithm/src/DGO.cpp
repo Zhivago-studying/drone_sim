@@ -63,6 +63,27 @@ public:
         pnh_.param("dgo_stop_stage", dgo_stop_stage_, 7);
         pnh_.param("publish_hold_after_stop",
                    publish_hold_after_stop_, false);
+        // camera robust gates & huber (stage 1)
+        pnh_.param("enable_camera_residual_gate",
+                   enable_camera_residual_gate_, true);
+        pnh_.param("camera_alpha_gate",
+                   camera_alpha_gate_, 0.15);
+        pnh_.param("camera_theta_gate",
+                   camera_theta_gate_, 0.12);
+        pnh_.param("camera_xy_gate",
+                   camera_xy_gate_, 0.30);
+        pnh_.param("enable_camera_huber",
+                   enable_camera_huber_, true);
+        pnh_.param("camera_angle_huber_delta",
+                   camera_angle_huber_delta_, 3.0);
+        pnh_.param("camera_xy_huber_delta",
+                   camera_xy_huber_delta_, 3.0);
+        pnh_.param("max_camera_age_static",
+                   max_camera_age_static_, 0.30);
+        pnh_.param("max_camera_age_dynamic",
+                   max_camera_age_dynamic_, 0.18);
+        pnh_.param("max_camera_age_chase",
+                   max_camera_age_chase_, 0.15);
         if (min_dgo_start_altitude_ < 0.0 ||
             uwb_stddev_ <= 0.0 ||
             uwb_dynamic_stddev_ <= 0.0 ||
@@ -74,7 +95,15 @@ public:
             max_fuse_retry_lag_ <= fixed_lag_ ||
             history_keep_time_ < fixed_lag_ + 0.5 ||
             dgo_stop_stage_ < 0 ||
-            dgo_stop_stage_ > 255)
+            dgo_stop_stage_ > 255 ||
+            camera_alpha_gate_ <= 0.0 ||
+            camera_theta_gate_ <= 0.0 ||
+            camera_xy_gate_ <= 0.0 ||
+            camera_angle_huber_delta_ <= 0.0 ||
+            camera_xy_huber_delta_ <= 0.0 ||
+            max_camera_age_static_ <= 0.0 ||
+            max_camera_age_dynamic_ <= 0.0 ||
+            max_camera_age_chase_ <= 0.0)
         {
             ROS_FATAL("[DGO] invalid parameter: min_start_altitude=%.3f "
                       "uwb_stddev=%.3f uwb_dynamic_stddev=%.3f "
@@ -82,13 +111,23 @@ public:
                       "max_step_xy=%.3f "
                       "fusion_period=%.3f fixed_lag=%.3f "
                       "max_fuse_retry_lag=%.3f history_keep_time=%.3f "
-                      "dgo_stop_stage=%d",
+                      "dgo_stop_stage=%d "
+                      "camera_alpha_gate=%.3f camera_theta_gate=%.3f "
+                      "camera_xy_gate=%.3f "
+                      "huber_delta_angle=%.1f huber_delta_xy=%.1f "
+                      "max_camera_age(s/d/c)=%.2f/%.2f/%.2f",
                       min_dgo_start_altitude_, uwb_stddev_,
                       uwb_dynamic_stddev_, ins_prior_stddev_xy_,
                       max_dgo_correction_xy_, max_dgo_step_xy_,
                       fusion_period_, fixed_lag_,
                       max_fuse_retry_lag_, history_keep_time_,
-                      dgo_stop_stage_);
+                      dgo_stop_stage_,
+                      camera_alpha_gate_, camera_theta_gate_,
+                      camera_xy_gate_,
+                      camera_angle_huber_delta_, camera_xy_huber_delta_,
+                      max_camera_age_static_,
+                      max_camera_age_dynamic_,
+                      max_camera_age_chase_);
             ros::shutdown();
             return;
         }
@@ -106,6 +145,10 @@ public:
         angle_err_.resize(uav_num_);
         angle_error_valid_.resize(uav_num_, false);
         camera_target_valid_.resize(uav_num_, false);
+        angle_gate_pass_.resize(uav_num_, false);
+        xy_gate_pass_.resize(uav_num_, false);
+        angle_reject_reason_.resize(uav_num_, "not_evaluated");
+        xy_reject_reason_.resize(uav_num_, "not_evaluated");
         gt_positions_.resize(uav_num_);
         has_gt_.resize(uav_num_, false);
         best_gt_positions_.resize(uav_num_);
@@ -198,6 +241,18 @@ public:
                  stop_after_mission_complete_ ? 1 : 0,
                  dgo_stop_stage_,
                  publish_hold_after_stop_ ? 1 : 0);
+
+        ROS_INFO("[DGO] camera robust: residual_gate=%d "
+                 "alpha_gate=%.3f theta_gate=%.3f xy_gate=%.3f "
+                 "huber=%d angle_delta=%.2f xy_delta=%.2f "
+                 "camera_age(s/d/c)=%.2f/%.2f/%.2f",
+                 enable_camera_residual_gate_ ? 1 : 0,
+                 camera_alpha_gate_, camera_theta_gate_, camera_xy_gate_,
+                 enable_camera_huber_ ? 1 : 0,
+                 camera_angle_huber_delta_, camera_xy_huber_delta_,
+                 max_camera_age_static_,
+                 max_camera_age_dynamic_,
+                 max_camera_age_chase_);
     }
 
     ~DGO()
@@ -458,6 +513,9 @@ public:
         P_opt_ = predicted;
         Eigen::VectorXd x(2);
         x << predicted.x, predicted.y;
+
+        // freeze camera gate masks based on predicted state before L-BFGS
+        buildCameraGateMasks();
 
         LBFGSpp::LBFGSParam<double> param;
         param.epsilon = 1e-5;
@@ -748,6 +806,28 @@ private:
     uint8_t mission_stage_ = 0;
     bool dgo_started_ = false;
 
+    // camera residual gate (stage 1 robustification)
+    bool enable_camera_residual_gate_ = true;
+    double camera_alpha_gate_ = 0.15;   // rad
+    double camera_theta_gate_ = 0.12;   // rad
+    double camera_xy_gate_ = 0.30;      // m
+
+    // Huber robust loss
+    bool enable_camera_huber_ = true;
+    double camera_angle_huber_delta_ = 3.0;  // normalized sigma
+    double camera_xy_huber_delta_ = 3.0;     // normalized sigma
+
+    // camera age by mission stage
+    double max_camera_age_static_ = 0.30;
+    double max_camera_age_dynamic_ = 0.18;
+    double max_camera_age_chase_ = 0.15;
+
+    // per-epoch frozen gate results
+    std::vector<bool> angle_gate_pass_;
+    std::vector<bool> xy_gate_pass_;
+    std::vector<std::string> angle_reject_reason_;
+    std::vector<std::string> xy_reject_reason_;
+
     struct CostBreakdown
     {
         double angle = 0.0;
@@ -756,6 +836,232 @@ private:
         double ins   = 0.0;
         double total() const { return angle + dist + xy + ins; }
     };
+
+    // ── camera robust: gate + huber ───────────────────────────────
+
+    static double huberCost(double r, double delta)
+    {
+        const double a = std::fabs(r);
+        if (a <= delta)
+            return r * r;
+        return 2.0 * delta * a - delta * delta;
+    }
+
+    double robustCost(double r, double delta, bool enable) const
+    {
+        if (!enable)
+            return r * r;
+        return huberCost(r, delta);
+    }
+
+    void resetCameraGateState()
+    {
+        std::fill(angle_gate_pass_.begin(), angle_gate_pass_.end(), false);
+        std::fill(xy_gate_pass_.begin(), xy_gate_pass_.end(), false);
+        std::fill(angle_reject_reason_.begin(), angle_reject_reason_.end(), "not_evaluated");
+        std::fill(xy_reject_reason_.begin(), xy_reject_reason_.end(), "not_evaluated");
+    }
+
+    double maxCameraAgeForStage() const
+    {
+        // mission_stage_ encoding:
+        // 3: EXPAND_SHRINK, 4: TRANSLATE, 5: CHASE_RESTORE
+        if (mission_stage_ == 5)
+            return max_camera_age_chase_;
+        if (mission_stage_ == 3 || mission_stage_ == 4)
+            return max_camera_age_dynamic_;
+        return max_camera_age_static_;
+    }
+
+    bool computeCameraAngleResidualForIndex(
+        size_t camera_index,
+        int &target_id,
+        double &alpha_error,
+        double &theta_error) const
+    {
+        target_id = -1;
+        alpha_error = 0.0;
+        theta_error = 0.0;
+
+        if (!isValidCameraTarget(camera_index, target_id))
+            return false;
+
+        Eigen::Vector3d rel = relativeToTarget(target_id);
+        const double dx = rel.x();
+        const double dy = rel.y();
+        const double dz = rel.z();
+
+        const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist < 1e-6)
+            return false;
+
+        const double ratio = std::max(-1.0, std::min(1.0, dz / dist));
+        alpha_error = normalizeAngle(best_camera_.alpha[camera_index] -
+                                      std::atan2(dy, dx));
+        theta_error = best_camera_.theta[camera_index] -
+                      std::asin(ratio);
+
+        return std::isfinite(alpha_error) && std::isfinite(theta_error);
+    }
+
+    bool computeCameraXyResidualForIndex(
+        size_t camera_index,
+        int &target_id,
+        double &xy_x,
+        double &xy_y,
+        double &sigma_x2,
+        double &sigma_y2) const
+    {
+        target_id = -1;
+        xy_x = xy_y = 0.0;
+        sigma_x2 = sigma_y2 = 0.05 * 0.05;
+
+        if (!isValidCameraTarget(camera_index, target_id))
+            return false;
+
+        // find UWB for this target
+        int uwb_idx = -1;
+        for (size_t ui = 0; ui < best_uwb_.target_ids.size(); ++ui)
+        {
+            if (best_uwb_.target_ids[ui] == target_id)
+            {
+                uwb_idx = static_cast<int>(ui);
+                break;
+            }
+        }
+        if (uwb_idx < 0 || uwb_idx >= static_cast<int>(best_uwb_.distances.size()))
+            return false;
+
+        const double d_uwb = best_uwb_.distances[uwb_idx];
+        if (!std::isfinite(d_uwb) || d_uwb < 0.1)
+            return false;
+
+        const double alpha = best_camera_.alpha[camera_index];
+        const double theta = best_camera_.theta[camera_index];
+
+        const double ca = std::cos(alpha);
+        const double sa = std::sin(alpha);
+        const double ct = std::cos(theta);
+        const double st = std::sin(theta);
+        const double proj = d_uwb * ct;
+
+        Eigen::Vector3d rel = relativeToTarget(target_id);
+
+        xy_x = proj * ca - rel.x();
+        xy_y = proj * sa - rel.y();
+
+        const double uwb_std = currentUwbStddev();
+        sigma_x2 =
+            std::pow(ct * ca * uwb_std, 2) +
+            std::pow(-d_uwb * ct * sa * ANGLE_ALPHA_STDDEV, 2) +
+            std::pow(-d_uwb * st * ca * ANGLE_THETA_STDDEV, 2);
+
+        sigma_y2 =
+            std::pow(ct * sa * uwb_std, 2) +
+            std::pow(d_uwb * ct * ca * ANGLE_ALPHA_STDDEV, 2) +
+            std::pow(-d_uwb * st * sa * ANGLE_THETA_STDDEV, 2);
+
+        sigma_x2 = std::max(sigma_x2, 0.05 * 0.05);
+        sigma_y2 = std::max(sigma_y2, 0.05 * 0.05);
+
+        return std::isfinite(xy_x) && std::isfinite(xy_y);
+    }
+
+    void buildCameraGateMasks()
+    {
+        resetCameraGateState();
+
+        if (!camera_message_fresh_)
+            return;
+
+        const size_t n = std::min({static_cast<size_t>(best_camera_.count),
+                                   best_camera_.id.size(),
+                                   best_camera_.alpha.size(),
+                                   best_camera_.theta.size()});
+
+        std::vector<bool> seen_target(uav_num_, false);
+
+        for (size_t j = 0; j < n; ++j)
+        {
+            int target_id = -1;
+            double alpha_error = 0.0;
+            double theta_error = 0.0;
+
+            if (!computeCameraAngleResidualForIndex(j, target_id,
+                                                    alpha_error, theta_error))
+                continue;
+
+            if (target_id < 0 || target_id >= uav_num_)
+                continue;
+            if (seen_target[target_id])
+            {
+                // 不覆盖已有 target 的 pass/reason, 避免 CSV 诊断矛盾:
+                // 第一个 target 过了 gate 而后续重复 target 写入 reject_reason
+                continue;
+            }
+            seen_target[target_id] = true;
+
+            camera_target_valid_[target_id] = true;
+
+            bool angle_ok = true;
+            std::string angle_reason = "pass";
+
+            if (enable_camera_residual_gate_)
+            {
+                if (std::fabs(alpha_error) > camera_alpha_gate_)
+                {
+                    angle_ok = false;
+                    angle_reason = "alpha_gate";
+                }
+                else if (std::fabs(theta_error) > camera_theta_gate_)
+                {
+                    angle_ok = false;
+                    angle_reason = "theta_gate";
+                }
+            }
+
+            angle_gate_pass_[target_id] = angle_ok;
+            angle_reject_reason_[target_id] = angle_reason;
+
+            // XY gate
+            int xy_target = -1;
+            double xy_x = 0.0, xy_y = 0.0;
+            double sx2 = 0.0, sy2 = 0.0;
+
+            bool xy_ok = false;
+            std::string xy_reason = "not_evaluated";
+
+            if (!has_uwb_)
+            {
+                xy_reason = "no_uwb";
+            }
+            else if (!computeCameraXyResidualForIndex(j, xy_target,
+                                                      xy_x, xy_y,
+                                                      sx2, sy2))
+            {
+                xy_reason = "xy_compute_fail";
+            }
+            else
+            {
+                const double xy_norm = std::hypot(xy_x, xy_y);
+
+                if (enable_camera_residual_gate_ &&
+                    xy_norm > camera_xy_gate_)
+                {
+                    xy_ok = false;
+                    xy_reason = "xy_gate";
+                }
+                else
+                {
+                    xy_ok = true;
+                    xy_reason = "pass";
+                }
+            }
+
+            xy_gate_pass_[target_id] = xy_ok;
+            xy_reject_reason_[target_id] = xy_reason;
+        }
+    }
 
     std::string defaultCsvDir() const
     {
@@ -800,9 +1106,15 @@ private:
                       << "alpha_meas,alpha_pred,alpha_residual,"
                       << "theta_meas,theta_pred,theta_residual,"
                       << "xy_residual_x,xy_residual_y,"
-                      << "cost_uwb,cost_angle,cost_xy,cost_ins,"
+                      << "cost_uwb,"
+                      << "cost_angle_raw,cost_angle_used,"
+                      << "cost_xy_raw,cost_xy_used,cost_ins,"
                       << "cam_target_valid,angle_constraint_valid,"
-                      << "xy_constraint_valid\n";
+                      << "xy_constraint_valid,"
+                      << "angle_gate_pass,xy_gate_pass,"
+                      << "angle_reject_reason,xy_reject_reason,"
+                      << "camera_age_abs,camera_max_age,"
+                      << "camera_alpha_gate,camera_theta_gate,camera_xy_gate\n";
         residual_csv_ << std::fixed << std::setprecision(9);
         ROS_INFO("[iris_%d] residual debug CSV: %s", uav_id_, path.c_str());
     }
@@ -1236,13 +1548,29 @@ private:
                 theta_pred = std::asin(std::max(-1.0, std::min(1.0, rel_pred.z() / rel_norm)));
                 alpha_residual = normalizeAngle(alpha_meas - alpha_pred);
                 theta_residual = theta_meas - theta_pred;
-                cost_angle = sqr(alpha_residual / ANGLE_ALPHA_STDDEV) +
-                             sqr(theta_residual / ANGLE_THETA_STDDEV);
+            }
+
+            // raw (quadratic) vs used (Huber) angle cost
+            double cost_angle_raw = nanValue();
+            double cost_angle_used = nanValue();
+            if (camera_idx >= 0 && rel_norm > 1e-6)
+            {
+                const double ra = alpha_residual / ANGLE_ALPHA_STDDEV;
+                const double rt = theta_residual / ANGLE_THETA_STDDEV;
+                cost_angle_raw = sqr(ra) + sqr(rt);
+                if (angle_error_valid_[target_id])
+                {
+                    cost_angle_used =
+                        robustCost(ra, camera_angle_huber_delta_, enable_camera_huber_) +
+                        robustCost(rt, camera_angle_huber_delta_, enable_camera_huber_);
+                }
             }
 
             double xy_residual_x = nanValue();
             double xy_residual_y = nanValue();
-            double cost_xy = nanValue();
+            // raw (quadratic) vs used (Huber) XY cost
+            double cost_xy_raw = nanValue();
+            double cost_xy_used = nanValue();
             if (uwb_idx >= 0 && camera_idx >= 0)
             {
                 const double ca = std::cos(alpha_meas);
@@ -1265,9 +1593,39 @@ private:
                     sqr(-uwb_meas * st * sa * ANGLE_THETA_STDDEV),
                     0.05 * 0.05);
 
-                cost_xy = xy_residual_x * xy_residual_x / sigma_x2 +
-                          xy_residual_y * xy_residual_y / sigma_y2;
+                const double rx = xy_residual_x / std::sqrt(sigma_x2);
+                const double ry = xy_residual_y / std::sqrt(sigma_y2);
+                cost_xy_raw = sqr(rx) + sqr(ry);
+                if (dist_xy_error_valid_[target_id])
+                {
+                    cost_xy_used =
+                        robustCost(rx, camera_xy_huber_delta_, enable_camera_huber_) +
+                        robustCost(ry, camera_xy_huber_delta_, enable_camera_huber_);
+                }
             }
+
+            const double camera_age_abs =
+                (!best_camera_stamp_.isZero() && !sync_ref_time_.isZero())
+                    ? std::fabs((best_camera_stamp_ - sync_ref_time_).toSec())
+                    : nanValue();
+            const double camera_max_age = maxCameraAgeForStage();
+
+            const int angle_gate =
+                (target_id >= 0 && target_id < static_cast<int>(angle_gate_pass_.size()))
+                    ? (angle_gate_pass_[target_id] ? 1 : 0)
+                    : 0;
+            const int xy_gate =
+                (target_id >= 0 && target_id < static_cast<int>(xy_gate_pass_.size()))
+                    ? (xy_gate_pass_[target_id] ? 1 : 0)
+                    : 0;
+            const std::string angle_reason =
+                (target_id >= 0 && target_id < static_cast<int>(angle_reject_reason_.size()))
+                    ? angle_reject_reason_[target_id]
+                    : "invalid_target";
+            const std::string xy_reason =
+                (target_id >= 0 && target_id < static_cast<int>(xy_reject_reason_.size()))
+                    ? xy_reject_reason_[target_id]
+                    : "invalid_target";
 
             residual_csv_ << stamp << ','
                           << phase << ','
@@ -1294,12 +1652,24 @@ private:
                           << xy_residual_x << ','
                           << xy_residual_y << ','
                           << cost_uwb << ','
-                          << cost_angle << ','
-                          << cost_xy << ','
+                          << cost_angle_raw << ','
+                          << cost_angle_used << ','
+                          << cost_xy_raw << ','
+                          << cost_xy_used << ','
                           << cost_ins << ','
                           << (camera_target_valid_[target_id] ? 1 : 0) << ','
                           << (angle_error_valid_[target_id] ? 1 : 0) << ','
-                          << (dist_xy_error_valid_[target_id] ? 1 : 0) << '\n';
+                          << (dist_xy_error_valid_[target_id] ? 1 : 0) << ','
+                          << angle_gate << ','
+                          << xy_gate << ','
+                          << angle_reason << ','
+                          << xy_reason << ','
+                          << camera_age_abs << ','
+                          << camera_max_age << ','
+                          << camera_alpha_gate_ << ','
+                          << camera_theta_gate_ << ','
+                          << camera_xy_gate_
+                          << '\n';
         }
         residual_csv_.flush();
     }
@@ -1391,9 +1761,11 @@ private:
         camera_used_in_cost_ = false;
         std::fill(camera_target_valid_.begin(), camera_target_valid_.end(), false);
 
+        const double max_cam_age = maxCameraAgeForStage();
+
         camera_message_fresh_ = has_camera_ &&
                                 selectNearestCamera(t_fuse) &&
-                                isFresh(best_camera_stamp_, t_fuse, max_sensor_age_);
+                                isFresh(best_camera_stamp_, t_fuse, max_cam_age);
 
         if (camera_message_fresh_)
             camera_raw_count_ = static_cast<int>(best_camera_.count);
@@ -1402,10 +1774,11 @@ private:
         {
             ROS_WARN_THROTTLE(
                 10.0,
-                "[iris_%d] camera stale, use UWB+INS only, age=%.3fs > %.3fs",
+                "[iris_%d] camera stale, use UWB+INS only, age=%.3fs > %.3fs stage=%u",
                 uav_id_,
                 std::fabs((best_camera_stamp_ - t_fuse).toSec()),
-                max_sensor_age_);
+                max_cam_age,
+                static_cast<unsigned int>(mission_stage_));
         }
     }
 
@@ -1913,47 +2286,45 @@ private:
         // 每次重算前清空 valid 标记, 避免残留值污染本轮 penalty
         std::fill(angle_error_valid_.begin(), angle_error_valid_.end(), false);
 
-        if(camera_message_fresh_)
+        if (!camera_message_fresh_)
+            return;
+
+        const size_t n = std::min({static_cast<size_t>(best_camera_.count),
+                                   best_camera_.id.size(),
+                                   best_camera_.alpha.size(),
+                                   best_camera_.theta.size()});
+        std::vector<bool> seen_target(uav_num_, false);
+        for (size_t j = 0; j < n; ++j)
         {
-            const size_t n = std::min({static_cast<size_t>(best_camera_.count),
-                                       best_camera_.id.size(),
-                                       best_camera_.alpha.size(),
-                                       best_camera_.theta.size()});
-            std::vector<bool> seen_target(uav_num_, false);
-            for(size_t j = 0; j < n; ++j)
+            int target_id = -1;
+            double alpha_error = 0.0;
+            double theta_error = 0.0;
+
+            if (!computeCameraAngleResidualForIndex(j, target_id,
+                                                    alpha_error, theta_error))
+                continue;
+            if (seen_target[target_id])
+                continue;
+            seen_target[target_id] = true;
+            camera_target_valid_[target_id] = true;
+
+            // 使用冻结的 gate mask
+            if (enable_camera_residual_gate_ &&
+                !angle_gate_pass_[target_id])
             {
-                int target_id = -1;
-                if (!isValidCameraTarget(j, target_id))
-                    continue;
-                if (seen_target[target_id])
-                    continue;
-                seen_target[target_id] = true;
-                camera_target_valid_[target_id] = true;
-
-                // 根据初始相对偏移 + 当前位移差计算相对角度
-                Eigen::Vector3d rel = relativeToTarget(target_id);
-                double dx = rel.x();
-                double dy = rel.y();
-                double dz = rel.z();
-
-                double dist = sqrt(dx*dx + dy*dy + dz*dz);
-                if (dist < 1e-6)
-                    continue;
-
-                double ratio = std::max(-1.0, std::min(1.0, dz / dist));
-                double alpha_error = normalizeAngle(best_camera_.alpha[j] - std::atan2(dy,dx));
-                double theta_error = best_camera_.theta[j] - std::asin(ratio);
-
-                angle_err_[target_id].alpha = alpha_error;
-                angle_err_[target_id].theta = theta_error;
-                angle_error_valid_[target_id] = true;
+                angle_error_valid_[target_id] = false;
+                continue;
             }
+
+            angle_err_[target_id].alpha = alpha_error;
+            angle_err_[target_id].theta = theta_error;
+            angle_error_valid_[target_id] = true;
         }
     }
 
     double cal_angle_penalty()
     {
-        if(!camera_message_fresh_)
+        if (!camera_message_fresh_)
             return 0.0;
 
         double penalty = 0.0;
@@ -1961,8 +2332,14 @@ private:
         {
             if (!angle_error_valid_[target_id])
                 continue;
-            penalty += (angle_err_[target_id].alpha / ANGLE_ALPHA_STDDEV)*(angle_err_[target_id].alpha / ANGLE_ALPHA_STDDEV)
-                        + (angle_err_[target_id].theta / ANGLE_THETA_STDDEV)*(angle_err_[target_id].theta / ANGLE_THETA_STDDEV);
+
+            const double ra = angle_err_[target_id].alpha / ANGLE_ALPHA_STDDEV;
+            const double rt = angle_err_[target_id].theta / ANGLE_THETA_STDDEV;
+
+            penalty += robustCost(ra, camera_angle_huber_delta_,
+                                  enable_camera_huber_);
+            penalty += robustCost(rt, camera_angle_huber_delta_,
+                                  enable_camera_huber_);
         }
         return penalty;
     }
@@ -1971,7 +2348,7 @@ private:
     {
         std::fill(dist_xy_error_valid_.begin(), dist_xy_error_valid_.end(), false);
 
-        if(!has_uwb_ || !camera_message_fresh_)
+        if (!has_uwb_ || !camera_message_fresh_)
             return;
 
         const size_t n = std::min({static_cast<size_t>(best_camera_.count),
@@ -1979,55 +2356,33 @@ private:
                                    best_camera_.alpha.size(),
                                    best_camera_.theta.size()});
         std::vector<bool> seen_target(uav_num_, false);
-        for(size_t j = 0; j < n; ++j)
+        for (size_t j = 0; j < n; ++j)
         {
             int target = -1;
-            if (!isValidCameraTarget(j, target))
+            double xy_x = 0.0, xy_y = 0.0;
+            double sx2 = 0.0, sy2 = 0.0;
+
+            if (!computeCameraXyResidualForIndex(j, target,
+                                                 xy_x, xy_y,
+                                                 sx2, sy2))
                 continue;
             if (seen_target[target])
                 continue;
             seen_target[target] = true;
             camera_target_valid_[target] = true;
 
-            auto it = std::find(best_uwb_.target_ids.begin(), best_uwb_.target_ids.end(), target);
-            if(it == best_uwb_.target_ids.end())
+            // 使用冻结的 xy gate mask
+            if (enable_camera_residual_gate_ &&
+                !xy_gate_pass_[target])
+            {
+                dist_xy_error_valid_[target] = false;
                 continue;
-            size_t idx = std::distance(best_uwb_.target_ids.begin(), it);
-            if(idx >= best_uwb_.distances.size())
-                continue;
-            double d_uwb = best_uwb_.distances[idx];
+            }
 
-            double alpha = best_camera_.alpha[j];
-            double theta = best_camera_.theta[j];
-
-            // 保护: 非有限值或距离太小 (<0.1m) 时跳过,
-            //   proj = d * cos(theta) 在 distance 极小或方位角极大时投影不可靠
-            if (!std::isfinite(d_uwb) || d_uwb < 0.1)
-                continue;
-            double ca = std::cos(alpha);
-            double sa = std::sin(alpha);
-            double ct = std::cos(theta);
-            double st = std::sin(theta);
-
-            double proj = d_uwb * ct;
-            Eigen::Vector3d rel = relativeToTarget(target);
-            dist_xy_error_[target].x = (proj * ca)
-                                     - rel.x();
-            dist_xy_error_[target].y = (proj * sa)
-                                     - rel.y();
-
-            double sigma_x2 =
-                std::pow(ct * ca * currentUwbStddev(), 2) +
-                std::pow(-d_uwb * ct * sa * ANGLE_ALPHA_STDDEV, 2) +
-                std::pow(-d_uwb * st * ca * ANGLE_THETA_STDDEV, 2);
-
-            double sigma_y2 =
-                std::pow(ct * sa * currentUwbStddev(), 2) +
-                std::pow(d_uwb * ct * ca * ANGLE_ALPHA_STDDEV, 2) +
-                std::pow(-d_uwb * st * sa * ANGLE_THETA_STDDEV, 2);
-
-            dist_xy_error_[target].sigma_x2 = std::max(sigma_x2, 0.05 * 0.05);
-            dist_xy_error_[target].sigma_y2 = std::max(sigma_y2, 0.05 * 0.05);
+            dist_xy_error_[target].x = xy_x;
+            dist_xy_error_[target].y = xy_y;
+            dist_xy_error_[target].sigma_x2 = sx2;
+            dist_xy_error_[target].sigma_y2 = sy2;
             dist_xy_error_valid_[target] = true;
         }
     }
@@ -2035,19 +2390,23 @@ private:
     double cal_dist_XY_penalty()
     {
         double penalty = 0.0;
-        for(size_t j = 0; j < dist_xy_error_.size(); j++)
+        for (size_t j = 0; j < dist_xy_error_.size(); ++j)
         {
-            if(!dist_xy_error_valid_[j])
-            {
+            if (!dist_xy_error_valid_[j])
                 continue;
-            }
 
-            penalty += dist_xy_error_[j].x * dist_xy_error_[j].x / dist_xy_error_[j].sigma_x2
-                     + dist_xy_error_[j].y * dist_xy_error_[j].y / dist_xy_error_[j].sigma_y2;
+            const double rx =
+                dist_xy_error_[j].x / std::sqrt(dist_xy_error_[j].sigma_x2);
+            const double ry =
+                dist_xy_error_[j].y / std::sqrt(dist_xy_error_[j].sigma_y2);
+
+            penalty += robustCost(rx, camera_xy_huber_delta_,
+                                  enable_camera_huber_);
+            penalty += robustCost(ry, camera_xy_huber_delta_,
+                                  enable_camera_huber_);
         }
-
         return penalty;
-    }  
+    }
 
     CostBreakdown computeCostBreakdown()
     {

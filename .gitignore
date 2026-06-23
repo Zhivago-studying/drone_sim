@@ -10,6 +10,14 @@ logs/
 # Catkin tools
 .catkin_tools/
 
+# ROS / catkin build outputs
+build/
+devel/
+install/
+log/
+.logs/
+.cache/
+
 # IDE
 .vscode/
 .idea/
@@ -35,3 +43,14 @@ Thumbs.db
 # MemPalace per-project files (issue #185)
 mempalace.yaml
 entities.json
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Large experiment raw data
+run_data/run_*/
+run_data/*.zip
+*.zip

@@ -2200,7 +2200,6 @@ recording_enabled=0, stopped_by_stage=1, has_stage=1, mission_stage=7, eval_stop
 ```
 </details>
 
-run_36~38验收报告：
 ## UWB 时间戳修复验收报告
 
 **结论：通过验收。**
@@ -2312,7 +2311,7 @@ run_36~38验收报告：
 | `stage_settle_time` | 1.0 | 大阶段切换缓冲 (s) |
 | `arrive_speed_threshold` | 0.20 | 到达判定速度阈值 (m/s) |
 | `settle_pos_tolerance` | 0.25 | 稳定判定位置阈值 (m) |
-| `settle_speed_tolerance` | 0.20 | 稳定判定速度阈值 (m/s)
+| `settle_speed_tolerance` | 0.20 | 稳定判定速度阈值 (m/s) |
 
 #### CSV 路径变更
 
@@ -2338,7 +2337,8 @@ run_46~run_56记录EKF-DGO算法数据
 run51~55回退至run_41的代码版本，更符合论文实际
 
 run_56修改如下：
-  主要问题：
+
+主要问题：
 
   - run_56 iris_0 有 27 次高度更新被拒绝，造成 Z 位置/速度误差约 0.20/0.15，NEES 升至 4.18/1.88。
   - 其余三机 publish_vel_cov_scale=10 过于保守，速度 NEES 仅 0.30–0.51。
@@ -2363,3 +2363,10 @@ run_56修改如下：
   - src/test/launch/ekf_dgo_test.launch:24
 
 run_57~run_61
+
+ESKF NEES 调参已经有效，run_60/run_61 的 NEES pos 和 NEES vel 已经接近可接受区间；
+run_61 的 DGO 结果非常好，动态 RMSE 约 0.119 m，已经接近甚至优于你之前 run_41 的论文量级；
+run_58–run_60 的不稳定主要不是 UWB 时间戳问题，而是视觉角度/XY 约束偶发异常
+
+修改内容：
+...
