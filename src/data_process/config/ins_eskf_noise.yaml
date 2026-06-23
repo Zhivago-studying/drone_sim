@@ -10,8 +10,8 @@ tau_bg: 1000.0         # gyroscopeBiasCorrelationTime [s]
 # Artificial optical-flow velocity error:
 # sigma_v^2 = (flow_relative_noise_std * |V_raw|)^2 + flow_base_noise_std^2
 # V_meas = V_raw + N(0, sigma_v^2)
-flow_relative_noise_std: 0.18
-flow_base_noise_std: 0.05
+flow_relative_noise_std: 0.10
+flow_base_noise_std: 0.02
 
 # Artificial ToF range error: d_meas = d_raw + N(0, tof_noise_std^2)
 tof_noise_std: 0.05
@@ -38,7 +38,11 @@ initial_gyro_bias_std: 0.001
 # Robust update guards. Isolated large innovations are rejected. If prediction
 # remains outside the gate, a bounded velocity-only correction restores lock
 # without changing attitude or IMU biases.
-max_velocity_innovation: 1.20
+max_velocity_innovation: 0.75
+# ToF transitions near takeoff and landing need an independent gate. State
+# correction limits remain active, so accepting these updates cannot inject an
+# unbounded height jump.
+max_height_innovation_sigma: 8.0
 velocity_recovery_reject_count: 5
 max_recovery_velocity_correction: 0.10
 max_position_correction: 0.25
@@ -51,8 +55,8 @@ max_gyro_bias_norm: 0.003
 # Published covariance inflation for unmodelled flow correlation and controller
 # transients. This does not alter the internal Kalman update; it calibrates the
 # reported covariance used by NEES and downstream consumers.
-publish_pos_cov_scale: 15.0
-publish_vel_cov_scale: 3.0
+publish_pos_cov_scale: 2.0
+publish_vel_cov_scale: 6.0
 
 # Non-negative values make artificial flow/ToF noise reproducible. Each UAV
 # receives an independent namespace-derived sequence.

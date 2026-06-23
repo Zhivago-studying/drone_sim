@@ -2336,3 +2336,30 @@ run_46 通过运动控制与 DGO 验收。编队完整完成 EXPAND_SHRINK、TRA
 run_46~run_56记录EKF-DGO算法数据
 
 run51~55回退至run_41的代码版本，更符合论文实际
+
+run_56修改如下：
+  主要问题：
+
+  - run_56 iris_0 有 27 次高度更新被拒绝，造成 Z 位置/速度误差约 0.20/0.15，NEES 升至 4.18/1.88。
+  - 其余三机 publish_vel_cov_scale=10 过于保守，速度 NEES 仅 0.30–0.51。
+  - run_56 的光流人工噪声 0.18/0.05 明显增大了实际误差。
+
+  修改如下：
+
+  flow_relative_noise_std: 0.10
+  flow_base_noise_std: 0.02
+  max_velocity_innovation: 0.75
+
+  publish_pos_cov_scale: 2.0
+  publish_vel_cov_scale: 6.0
+
+  max_height_innovation_sigma: 8.0
+
+  同时将高度 NIS 门限从通用门限中独立出来，避免放宽高度更新时连带放宽速度更新：
+
+  - src/data_process/src/ins_eskf.cpp:92
+  - src/data_process/config/ins_eskf_noise.yaml:13
+  - src/algorithm/launch/dgo_full_mission.launch:28
+  - src/test/launch/ekf_dgo_test.launch:24
+
+run_57~run_61

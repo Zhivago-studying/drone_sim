@@ -25,6 +25,12 @@
   <arg name="max_prediction_speed" default="2.0" />
   <arg name="landing_descent_rate" default="0.45" />
   <arg name="force_disarm_delay" default="2.0" />
+  <arg name="publish_pos_cov_scale" default="2.0" />
+  <arg name="publish_vel_cov_scale" default="6.0" />
+  <arg name="flow_relative_noise_std" default="0.10" />
+  <arg name="flow_base_noise_std" default="0.02" />
+  <arg name="max_velocity_innovation" default="0.75" />
+  <arg name="max_height_innovation_sigma" default="8.0" />
   <arg name="stop_after_mission_complete" default="true" />
   <arg name="dgo_stop_stage" default="7" />
   <arg name="publish_hold_after_stop" default="false" />
@@ -74,11 +80,12 @@
       <param name="disable_attitude_update" value="false" />
       <param name="imu_frame" value="auto" />
       <param name="min_flow_quality" value="100" />
-      <param name="publish_pos_cov_scale" value="2.0" />
-      <param name="publish_vel_cov_scale" value="10.0" />
-      <param name="flow_base_noise_std" value="0.05" />
-      <param name="flow_relative_noise_std" value="0.18" />
-      <param name="max_velocity_innovation" value="1.20" />
+      <param name="publish_pos_cov_scale" value="$(arg publish_pos_cov_scale)" />
+      <param name="publish_vel_cov_scale" value="$(arg publish_vel_cov_scale)" />
+      <param name="flow_base_noise_std" value="$(arg flow_base_noise_std)" />
+      <param name="flow_relative_noise_std" value="$(arg flow_relative_noise_std)" />
+      <param name="max_velocity_innovation" value="$(arg max_velocity_innovation)" />
+      <param name="max_height_innovation_sigma" value="$(arg max_height_innovation_sigma)" />
       <param name="flow_csv_dir" value="$(arg ins_flow_csv_dir)" />
     </node>
     <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
@@ -127,11 +134,12 @@
       <param name="disable_attitude_update" value="false" />
       <param name="imu_frame" value="auto" />
       <param name="min_flow_quality" value="100" />
-      <param name="publish_pos_cov_scale" value="2.0" />
-      <param name="publish_vel_cov_scale" value="10.0" />
-      <param name="flow_base_noise_std" value="0.05" />
-      <param name="flow_relative_noise_std" value="0.18" />
-      <param name="max_velocity_innovation" value="1.20" />
+      <param name="publish_pos_cov_scale" value="$(arg publish_pos_cov_scale)" />
+      <param name="publish_vel_cov_scale" value="$(arg publish_vel_cov_scale)" />
+      <param name="flow_base_noise_std" value="$(arg flow_base_noise_std)" />
+      <param name="flow_relative_noise_std" value="$(arg flow_relative_noise_std)" />
+      <param name="max_velocity_innovation" value="$(arg max_velocity_innovation)" />
+      <param name="max_height_innovation_sigma" value="$(arg max_height_innovation_sigma)" />
       <param name="flow_csv_dir" value="$(arg ins_flow_csv_dir)" />
     </node>
     <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
@@ -180,11 +188,12 @@
       <param name="disable_attitude_update" value="false" />
       <param name="imu_frame" value="auto" />
       <param name="min_flow_quality" value="100" />
-      <param name="publish_pos_cov_scale" value="2.0" />
-      <param name="publish_vel_cov_scale" value="10.0" />
-      <param name="flow_base_noise_std" value="0.05" />
-      <param name="flow_relative_noise_std" value="0.18" />
-      <param name="max_velocity_innovation" value="1.20" />
+      <param name="publish_pos_cov_scale" value="$(arg publish_pos_cov_scale)" />
+      <param name="publish_vel_cov_scale" value="$(arg publish_vel_cov_scale)" />
+      <param name="flow_base_noise_std" value="$(arg flow_base_noise_std)" />
+      <param name="flow_relative_noise_std" value="$(arg flow_relative_noise_std)" />
+      <param name="max_velocity_innovation" value="$(arg max_velocity_innovation)" />
+      <param name="max_height_innovation_sigma" value="$(arg max_height_innovation_sigma)" />
       <param name="flow_csv_dir" value="$(arg ins_flow_csv_dir)" />
     </node>
     <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />
@@ -233,11 +242,12 @@
       <param name="disable_attitude_update" value="false" />
       <param name="imu_frame" value="auto" />
       <param name="min_flow_quality" value="100" />
-      <param name="publish_pos_cov_scale" value="2.0" />
-      <param name="publish_vel_cov_scale" value="10.0" />
-      <param name="flow_base_noise_std" value="0.05" />
-      <param name="flow_relative_noise_std" value="0.18" />
-      <param name="max_velocity_innovation" value="1.20" />
+      <param name="publish_pos_cov_scale" value="$(arg publish_pos_cov_scale)" />
+      <param name="publish_vel_cov_scale" value="$(arg publish_vel_cov_scale)" />
+      <param name="flow_base_noise_std" value="$(arg flow_base_noise_std)" />
+      <param name="flow_relative_noise_std" value="$(arg flow_relative_noise_std)" />
+      <param name="max_velocity_innovation" value="$(arg max_velocity_innovation)" />
+      <param name="max_height_innovation_sigma" value="$(arg max_height_innovation_sigma)" />
       <param name="flow_csv_dir" value="$(arg ins_flow_csv_dir)" />
     </node>
     <node pkg="data_process" type="camera_relative_angle_cal" name="camera_relative_angle_cal" output="screen" />

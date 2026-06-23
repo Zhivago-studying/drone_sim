@@ -92,8 +92,10 @@ public:
         nh_.param<std::string>("imu_frame", imu_frame_param_, "auto");  // auto|flu|frd
         nh_.param("min_flow_quality", min_flow_quality_, 100);
         nh_.param("max_innovation_sigma", max_innovation_sigma_, 6.0);
-        nh_.param("publish_pos_cov_scale", publish_pos_cov_scale_, 15.0);
-        nh_.param("publish_vel_cov_scale", publish_vel_cov_scale_, 3.0);
+        nh_.param("max_height_innovation_sigma",
+                  max_height_innovation_sigma_, 8.0);
+        nh_.param("publish_pos_cov_scale", publish_pos_cov_scale_, 2.0);
+        nh_.param("publish_vel_cov_scale", publish_vel_cov_scale_, 6.0);
         nh_.param("flow_relative_noise_std", flow_relative_noise_std_, 0.1);
         nh_.param("flow_base_noise_std", flow_base_noise_std_, 0.02);
         nh_.param("tof_noise_std", tof_noise_std_, 0.05);
@@ -128,6 +130,7 @@ public:
         nh_.param("flow_csv_dir", flow_csv_dir_, std::string(""));
         if (min_flow_quality_ < 0 ||
             max_innovation_sigma_ <= 0.0 ||
+            max_height_innovation_sigma_ <= 0.0 ||
             publish_pos_cov_scale_ <= 0.0 ||
             publish_vel_cov_scale_ <= 0.0 ||
             flow_relative_noise_std_ < 0.0 ||
@@ -151,6 +154,7 @@ public:
         {
             ROS_FATAL("[INS ESKF] invalid measurement/update parameter: "
                       "min_flow_quality=%d max_innovation_sigma=%.3f "
+                      "max_height_innovation_sigma=%.3f "
                       "publish_cov_scale=(%.3f,%.3f) "
                       "flow_relative_noise_std=%.3f flow_base_noise_std=%.3f "
                       "tof_noise_std=%.3f tof_min_range=%.3f "
@@ -162,6 +166,7 @@ public:
                       "max_velocity_innovation=%.3f "
                       "velocity_recovery_reject_count=%d",
                       min_flow_quality_, max_innovation_sigma_,
+                      max_height_innovation_sigma_,
                       publish_pos_cov_scale_, publish_vel_cov_scale_,
                       flow_relative_noise_std_, flow_base_noise_std_,
                       tof_noise_std_, tof_min_range_,
@@ -254,7 +259,8 @@ public:
                  "initial_attitude_std=%.2fdeg initial_bg_std=%.4frad/s "
                  "min_att_vertical_speed=%.2fm/s "
                  "max_att_innovation=%.2fm/s max_att_correction=%.2fdeg "
-                 "max_vel_innovation=%.2fm/s recovery_rejects=%d "
+                 "max_vel_innovation=%.2fm/s "
+                 "max_height_innovation=%.1fsigma recovery_rejects=%d "
                  "noise_seed=%d imu_frame=%s",
                  ns_.c_str(), sigma_acc_, sigma_gyro_,
                  sigma_ba_, tau_ba_, sigma_bg_, tau_bg_,
@@ -266,7 +272,8 @@ public:
                  attitude_update_min_vertical_speed_,
                  attitude_update_max_innovation_,
                  attitude_update_max_correction_deg_,
-                 max_velocity_innovation_, velocity_recovery_reject_count_,
+                 max_velocity_innovation_, max_height_innovation_sigma_,
+                 velocity_recovery_reject_count_,
                  measurement_noise_seed_,
                  imu_frame_param_.c_str());
 
@@ -1027,7 +1034,8 @@ private:
 
         const double nis = y * y / S;
         if (!std::isfinite(nis) ||
-            nis > max_innovation_sigma_ * max_innovation_sigma_)
+            nis > max_height_innovation_sigma_ *
+                      max_height_innovation_sigma_)
         {
             ROS_WARN_THROTTLE(
                 10.0,
@@ -1280,8 +1288,8 @@ private:
     double sigma_bg_;
     double tau_ba_;
     double tau_bg_;
-    double flow_relative_noise_std_ = 0.18;
-    double flow_base_noise_std_ = 0.05;
+    double flow_relative_noise_std_ = 0.10;
+    double flow_base_noise_std_ = 0.02;
     double tof_noise_std_ = 0.05;
     double tof_min_range_ = 0.20;
     double initial_attitude_std_deg_ = 3.0;
@@ -1289,7 +1297,7 @@ private:
     double attitude_update_max_innovation_ = 0.15;
     double attitude_update_max_correction_deg_ = 0.15;
     double initial_gyro_bias_std_ = 0.001;
-    double max_velocity_innovation_ = 1.20;
+    double max_velocity_innovation_ = 0.75;
     int velocity_recovery_reject_count_ = 5;
     double max_recovery_velocity_correction_ = 0.10;
     double max_position_correction_ = 0.25;
@@ -1309,8 +1317,9 @@ private:
     std::string imu_frame_param_;
     int min_flow_quality_ = 100;
     double max_innovation_sigma_ = 6.0;
+    double max_height_innovation_sigma_ = 8.0;
     double publish_pos_cov_scale_ = 2.0;
-    double publish_vel_cov_scale_ = 10.0;
+    double publish_vel_cov_scale_ = 6.0;
     int consecutive_velocity_rejects_ = 0;
     bool velocity_recovery_active_ = false;
 
