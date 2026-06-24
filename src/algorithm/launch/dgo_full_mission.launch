@@ -27,8 +27,8 @@
   <arg name="force_disarm_delay" default="2.0" />
   <arg name="publish_pos_cov_scale" default="2.0" />
   <arg name="publish_vel_cov_scale" default="6.0" />
-  <arg name="flow_relative_noise_std" default="0.10" />
-  <arg name="flow_base_noise_std" default="0.02" />
+  <arg name="flow_relative_noise_std" default="0.18" />
+  <arg name="flow_base_noise_std" default="0.05" />
   <arg name="max_velocity_innovation" default="0.75" />
   <arg name="max_height_innovation_sigma" default="8.0" />
   <arg name="stop_after_mission_complete" default="true" />
