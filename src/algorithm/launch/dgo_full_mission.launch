@@ -37,6 +37,17 @@
   <arg name="ignore_after_mission_complete" default="true" />
   <arg name="eval_stop_stage" default="7" />
   <arg name="count_ignored_callbacks" default="true" />
+  <arg name="enable_dekf" default="true" />
+  <arg name="dekf_rate" default="30.0" />
+  <arg name="dekf_history_keep_time" default="1.0" />
+  <arg name="dekf_delay_threshold" default="0.035" />
+  <arg name="dekf_max_observation_delay" default="0.60" />
+  <arg name="dekf_max_dgo_pair_dt" default="0.12" />
+  <arg name="dekf_accel_noise_std" default="0.8" />
+  <arg name="dekf_dgo_position_noise_std" default="0.18" />
+  <arg name="dekf_uwb_noise_std" default="$(arg uwb_stddev)" />
+  <arg name="dekf_camera_alpha_noise_std" default="0.05" />
+  <arg name="dekf_camera_theta_noise_std" default="0.05" />
   <arg name="run_id" default="" />
 
   <!--
@@ -67,6 +78,10 @@
   <arg name="ins_ekf_test_csv_dir"  value="$(arg csv_dir)"
        unless="$(eval arg('run_id') != '')" />
   <arg name="ins_ekf_test_csv_dir"  value="$(arg log_base)/ins_eskf_test"
+       if="$(eval arg('run_id') != '')" />
+  <arg name="dekf_csv_dir"       value=""
+       unless="$(eval arg('run_id') != '')" />
+  <arg name="dekf_csv_dir"       value="$(arg log_base)/dekf"
        if="$(eval arg('run_id') != '')" />
 
   <include file="$(find sensors)/launch/uwb.launch" />
@@ -137,6 +152,24 @@
       <param name="max_camera_age_dynamic" value="0.18" />
       <param name="max_camera_age_chase" value="0.15" />
     </node>
+    <node if="$(arg enable_dekf)" pkg="algorithm" type="dekf" name="dekf" output="screen">
+      <param name="uav_id" value="0" />
+      <param name="uav_num" value="4" />
+      <param name="initial_spacing" value="2.0" />
+      <param name="rate" value="$(arg dekf_rate)" />
+      <param name="csv_dir" value="$(arg dekf_csv_dir)" />
+      <param name="history_keep_time" value="$(arg dekf_history_keep_time)" />
+      <param name="delay_threshold" value="$(arg dekf_delay_threshold)" />
+      <param name="max_observation_delay" value="$(arg dekf_max_observation_delay)" />
+      <param name="max_dgo_pair_dt" value="$(arg dekf_max_dgo_pair_dt)" />
+      <param name="accel_noise_std" value="$(arg dekf_accel_noise_std)" />
+      <param name="dgo_position_noise_std" value="$(arg dekf_dgo_position_noise_std)" />
+      <param name="uwb_noise_std" value="$(arg dekf_uwb_noise_std)" />
+      <param name="camera_alpha_noise_std" value="$(arg dekf_camera_alpha_noise_std)" />
+      <param name="camera_theta_noise_std" value="$(arg dekf_camera_theta_noise_std)" />
+      <param name="stop_after_mission_complete" value="$(arg stop_after_mission_complete)" />
+      <param name="dekf_stop_stage" value="$(arg dgo_stop_stage)" />
+    </node>
   </group>
 
   <group ns="iris_1">
@@ -201,6 +234,24 @@
       <param name="max_camera_age_static" value="0.30" />
       <param name="max_camera_age_dynamic" value="0.18" />
       <param name="max_camera_age_chase" value="0.15" />
+    </node>
+    <node if="$(arg enable_dekf)" pkg="algorithm" type="dekf" name="dekf" output="screen">
+      <param name="uav_id" value="1" />
+      <param name="uav_num" value="4" />
+      <param name="initial_spacing" value="2.0" />
+      <param name="rate" value="$(arg dekf_rate)" />
+      <param name="csv_dir" value="$(arg dekf_csv_dir)" />
+      <param name="history_keep_time" value="$(arg dekf_history_keep_time)" />
+      <param name="delay_threshold" value="$(arg dekf_delay_threshold)" />
+      <param name="max_observation_delay" value="$(arg dekf_max_observation_delay)" />
+      <param name="max_dgo_pair_dt" value="$(arg dekf_max_dgo_pair_dt)" />
+      <param name="accel_noise_std" value="$(arg dekf_accel_noise_std)" />
+      <param name="dgo_position_noise_std" value="$(arg dekf_dgo_position_noise_std)" />
+      <param name="uwb_noise_std" value="$(arg dekf_uwb_noise_std)" />
+      <param name="camera_alpha_noise_std" value="$(arg dekf_camera_alpha_noise_std)" />
+      <param name="camera_theta_noise_std" value="$(arg dekf_camera_theta_noise_std)" />
+      <param name="stop_after_mission_complete" value="$(arg stop_after_mission_complete)" />
+      <param name="dekf_stop_stage" value="$(arg dgo_stop_stage)" />
     </node>
   </group>
 
@@ -267,6 +318,24 @@
       <param name="max_camera_age_dynamic" value="0.18" />
       <param name="max_camera_age_chase" value="0.15" />
     </node>
+    <node if="$(arg enable_dekf)" pkg="algorithm" type="dekf" name="dekf" output="screen">
+      <param name="uav_id" value="2" />
+      <param name="uav_num" value="4" />
+      <param name="initial_spacing" value="2.0" />
+      <param name="rate" value="$(arg dekf_rate)" />
+      <param name="csv_dir" value="$(arg dekf_csv_dir)" />
+      <param name="history_keep_time" value="$(arg dekf_history_keep_time)" />
+      <param name="delay_threshold" value="$(arg dekf_delay_threshold)" />
+      <param name="max_observation_delay" value="$(arg dekf_max_observation_delay)" />
+      <param name="max_dgo_pair_dt" value="$(arg dekf_max_dgo_pair_dt)" />
+      <param name="accel_noise_std" value="$(arg dekf_accel_noise_std)" />
+      <param name="dgo_position_noise_std" value="$(arg dekf_dgo_position_noise_std)" />
+      <param name="uwb_noise_std" value="$(arg dekf_uwb_noise_std)" />
+      <param name="camera_alpha_noise_std" value="$(arg dekf_camera_alpha_noise_std)" />
+      <param name="camera_theta_noise_std" value="$(arg dekf_camera_theta_noise_std)" />
+      <param name="stop_after_mission_complete" value="$(arg stop_after_mission_complete)" />
+      <param name="dekf_stop_stage" value="$(arg dgo_stop_stage)" />
+    </node>
   </group>
 
   <group ns="iris_3">
@@ -331,6 +400,24 @@
       <param name="max_camera_age_static" value="0.30" />
       <param name="max_camera_age_dynamic" value="0.18" />
       <param name="max_camera_age_chase" value="0.15" />
+    </node>
+    <node if="$(arg enable_dekf)" pkg="algorithm" type="dekf" name="dekf" output="screen">
+      <param name="uav_id" value="3" />
+      <param name="uav_num" value="4" />
+      <param name="initial_spacing" value="2.0" />
+      <param name="rate" value="$(arg dekf_rate)" />
+      <param name="csv_dir" value="$(arg dekf_csv_dir)" />
+      <param name="history_keep_time" value="$(arg dekf_history_keep_time)" />
+      <param name="delay_threshold" value="$(arg dekf_delay_threshold)" />
+      <param name="max_observation_delay" value="$(arg dekf_max_observation_delay)" />
+      <param name="max_dgo_pair_dt" value="$(arg dekf_max_dgo_pair_dt)" />
+      <param name="accel_noise_std" value="$(arg dekf_accel_noise_std)" />
+      <param name="dgo_position_noise_std" value="$(arg dekf_dgo_position_noise_std)" />
+      <param name="uwb_noise_std" value="$(arg dekf_uwb_noise_std)" />
+      <param name="camera_alpha_noise_std" value="$(arg dekf_camera_alpha_noise_std)" />
+      <param name="camera_theta_noise_std" value="$(arg dekf_camera_theta_noise_std)" />
+      <param name="stop_after_mission_complete" value="$(arg stop_after_mission_complete)" />
+      <param name="dekf_stop_stage" value="$(arg dgo_stop_stage)" />
     </node>
   </group>
 

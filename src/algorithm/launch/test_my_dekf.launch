@@ -1,0 +1,10 @@
+<launch>
+  <node pkg="algorithm" type="my_dekf" name="my_dekf" output="screen">
+    <param name="uav_id" value="0" />
+    <param name="uav_num" value="4" />
+    <param name="rate" value="30.0" />
+    <param name="sigma_ax" value="0.80" />
+    <param name="sigma_ay" value="0.80" />
+    <param name="sigma_az" value="0.80" />
+  </node>
+</launch>

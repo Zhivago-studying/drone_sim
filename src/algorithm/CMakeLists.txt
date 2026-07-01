@@ -10,6 +10,7 @@ add_compile_options(-std=c++11)
 find_package(catkin REQUIRED COMPONENTS
   data_process
   gazebo_msgs
+  geometry_msgs
   nav_msgs
   roscpp
   roslib
@@ -112,7 +113,7 @@ find_package(Eigen3 REQUIRED)
 catkin_package(
 #  INCLUDE_DIRS include
 #  LIBRARIES algorithm
-  CATKIN_DEPENDS data_process gazebo_msgs nav_msgs roscpp roslib sensors std_msgs
+  CATKIN_DEPENDS data_process gazebo_msgs geometry_msgs nav_msgs roscpp roslib sensors std_msgs
 #  DEPENDS system_lib
 )
 
@@ -172,6 +173,40 @@ add_dependencies(${PROJECT_NAME}_dgo_node
 )
 
 target_link_libraries(${PROJECT_NAME}_dgo_node
+  ${catkin_LIBRARIES}
+)
+
+## DEKF node
+add_executable(${PROJECT_NAME}_dekf_node src/dekf.cpp)
+
+set_target_properties(${PROJECT_NAME}_dekf_node PROPERTIES
+  OUTPUT_NAME dekf
+  PREFIX ""
+)
+
+add_dependencies(${PROJECT_NAME}_dekf_node
+  ${${PROJECT_NAME}_EXPORTED_TARGETS}
+  ${catkin_EXPORTED_TARGETS}
+)
+
+target_link_libraries(${PROJECT_NAME}_dekf_node
+  ${catkin_LIBRARIES}
+)
+
+## my_DEKF node
+add_executable(${PROJECT_NAME}_my_dekf_node src/my_dekf.cpp)
+
+set_target_properties(${PROJECT_NAME}_my_dekf_node PROPERTIES
+  OUTPUT_NAME my_dekf
+  PREFIX ""
+)
+
+add_dependencies(${PROJECT_NAME}_my_dekf_node
+  ${${PROJECT_NAME}_EXPORTED_TARGETS}
+  ${catkin_EXPORTED_TARGETS}
+)
+
+target_link_libraries(${PROJECT_NAME}_my_dekf_node
   ${catkin_LIBRARIES}
 )
 
