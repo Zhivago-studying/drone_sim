@@ -1,3 +1,39 @@
+/**
+ * @file  my_dekf.cpp
+ * @brief 分布式扩展卡尔曼滤波器 (DEKF)
+ *
+ * 接收 DGO (相对位姿观测)、UWB (测距观测) 和 Camera (相对角度观测) 三个传感器输入，
+ * 通过 EKF 融合得到无人机间的相对位姿/速度最优估计。
+ *
+ * =========================== 节点输入/输出 ===========================
+ * 订阅:
+ *   /iris_{i}/dgo_estimate          (nav_msgs/Odometry)     — DGO 相对位姿
+ *   uwb_processed                    (data_process::UwbProcessed) — UWB 测距
+ *   camera_angle_match               (data_process::CameraAngleMatch) — 相机角度
+ *
+ * 发布:
+ *   /iris_{self}/dekf/iris_{target}  (nav_msgs/Odometry)    — DEKF 相对状态
+ *
+ * =========================== 关键参数 ===========================
+ *   rate (30.0)        — DEKF 运行频率 (Hz)
+ *   sigma_ax/ay/az     — 过程噪声 (相对加速度)
+ *   sigma_px/py/pz     — DGO 位置观测噪声
+ *   sigma_uwb          — UWB 测距观测噪声
+ *   sigma_alpha/theta  — 相机角度观测噪声
+ *   max_observation_delay (0.60)     — 观测最大允许延迟 (s)
+ *   current_delay_threshold (0.020)  — "当前时刻"延迟阈值 (s)
+ *
+ * =========================== 状态机 ===========================
+ *   每一 DEKF 周期:
+ *     1. 所有滤波器 predict 到当前时间
+ *     2. 取出 pending 观测并按时间戳排序
+ *     3. 逐条按 obs 年龄分支:
+ *        age < current_delay_threshold → applyCurrentUpdate (标准 EKF)
+ *        age < max_observation_delay   → applyDelayedUpdate (延迟补偿)
+ *        否则                        → 丢弃
+ *     4. 发布所有滤波器估计结果
+ */
+
 #include <ros/ros.h>
 #include <geometry_msgs/Vector3.h>
 #include <data_process/CameraAngleMatch.h>
@@ -14,6 +50,7 @@
 using Vector6d = Eigen::Matrix<double, 6, 1>;
 using Matrix6d = Eigen::Matrix<double, 6, 6>;
 
+// ── 辅助函数 ───────────────────────────────────────────────
 double wrapAngle(double a)
 {
     while (a > M_PI)
@@ -26,6 +63,7 @@ double wrapAngle(double a)
 class DEKF
 {
 public:
+    // ── 构造函数 ─────────────────────────────────────────────
     DEKF() : nh_(), pnh_("~")
     {
         pnh_.param("uav_id", uav_id_, 0);
@@ -46,11 +84,14 @@ public:
         pnh_.param("current_delay_threshold", current_delay_threshold_, 0.020);
 
         dgo_cache_.resize(uav_num_);
+
+        // 过程噪声矩阵 Q
         Q_.setZero();
         Q_(0, 0) = sigma_ax_ * sigma_ax_;
         Q_(1, 1) = sigma_ay_ * sigma_ay_;
         Q_(2, 2) = sigma_az_ * sigma_az_;
 
+        // 观测噪声矩阵 R (对角: px, py, pz, uwb, alpha, theta)
         R_.setZero();
         R_(0, 0) = sigma_px_ * sigma_px_;
         R_(1, 1) = sigma_py_ * sigma_py_;
@@ -76,6 +117,7 @@ public:
             filters_[i].pub = nh_.advertise<nav_msgs::Odometry>(topic, 10);
         }
 
+        // DGO 订阅
         for (int i = 0; i < uav_num_; ++i)
         {
             std::string topic = "/iris_" + std::to_string(i) + "/dgo_estimate";
@@ -85,17 +127,19 @@ public:
                     boost::bind(&DEKF::dgoCallback, this, _1, i)));
         }
 
+        // UWB / Camera 订阅
         uwb_sub_ = nh_.subscribe<data_process::UwbProcessed>(
             "uwb_processed", 10, &DEKF::uwbCallback, this);
-
         camera_sub_ = nh_.subscribe<data_process::CameraAngleMatch>(
             "camera_angle_match", 10, &DEKF::cameraCallback, this);
 
+        // DEKF 定时器
         pnh_.param("rate", rate_, 30.0);
         timer_ = nh_.createTimer(ros::Duration(1.0 / rate_),
                                  &DEKF::dekfCallback, this);
-        //初始化滤波器
-        for(int i = 0; i < uav_num_; ++i)
+
+        // 初始化滤波器时间戳
+        for (int i = 0; i < uav_num_; ++i)
         {
             if (i == uav_id_)
                 continue;
@@ -106,95 +150,111 @@ public:
     }
 
 private:
-    ros::NodeHandle nh_;
-    ros::NodeHandle pnh_;
+    // ═══════════════════════════════════════════════════════════
+    //  类型定义
+    // ═══════════════════════════════════════════════════════════
 
-    ros::Timer timer_;
-    double rate_ = 30.0;
-    double init_pos_std_ = 0.75;
-    double init_vel_std_ = 0.50;
-    double max_dgo_pair_dt_ = 0.12;
-    double max_observation_delay_ = 0.60;
-    double current_delay_threshold_ = 0.020;
-
-
-
-    int uav_id_ = 0;
-    int uav_num_ = 4;
-    ros::Time last_predict_stamp_;
-
-    std::vector<ros::Subscriber> dgo_subs_;
-    ros::Subscriber uwb_sub_;
-    ros::Subscriber camera_sub_;
-
-
-    // 过程噪声
-    double sigma_ax_ = 0.80;
-    double sigma_ay_ = 0.80;
-    double sigma_az_ = 0.80;
-    double sigma_px_ = 0.18;
-    double sigma_py_ = 0.18;
-    double sigma_pz_ = 0.18;
-    double sigma_uwb_ = 0.05;
-    double sigma_alpha_ = 0.05;
-    double sigma_theta_ = 0.05;
-    Eigen::Matrix3d Q_;
-    Eigen::Matrix<double, 6, 6> R_;
-
+    // 预测历史缓存 (用于延迟补偿重传播)
     struct History_Record
     {
-        ros::Time stamp;
-        Vector6d X_pred;    //X_k+1|k
-        Matrix6d P_pred;    //P_k+1|k
-        Matrix6d A;
-        Matrix6d I_KH;
+        ros::Time stamp;         // 记录时间戳
+        Vector6d X_pred;         // X_{k+1|k}
+        Matrix6d P_pred;         // P_{k+1|k}
+        Matrix6d A;              // 状态转移矩阵
+        Matrix6d I_KH;           // I - K*H  (更新后的投影矩阵)
     };
 
+    // 观测类型枚举
     enum class ObsType
     {
-        DGO,
-        UWB_RANGE,
-        CAMERA_BEARING
+        DGO,             // DGO 相对位姿观测
+        UWB_RANGE,       // UWB 测距观测
+        CAMERA_BEARING   // 相机角度观测
     };
 
+    // 单条观测结构 (由 callback 产生, 由 dekfCallback 消费)
     struct Observation
     {
         ObsType type;
         int target_id = -1;
         ros::Time stamp;
-        double value = 0.0;
-        Eigen::Vector3d position = Eigen::Vector3d::Zero();
-        Eigen::Vector3d velocity = Eigen::Vector3d::Zero();
+        double value = 0.0;                      // UWB 测距值
+        Eigen::Vector3d position = Eigen::Vector3d::Zero();  // DGO 相对位置
+        Eigen::Vector3d velocity = Eigen::Vector3d::Zero();  // DGO 相对速度
         double alpha = 0.0;
         double theta = 0.0;
         bool has_alpha = false;
         bool has_theta = false;
     };
 
-    // 滤波器: 本机与 target_id 之间的相对位姿/速度估计
+    // 滤波器: 本机到 target_id 的相对位姿/速度估计
     struct Filter
     {
         int target_id = -1;
         bool initialized = false;
-        ros::Time stamp;
-        Eigen::Matrix<double, 6, 1> X = Eigen::Matrix<double, 6, 1>::Zero();   // [px, py, pz, vx, vy, vz]
-        Eigen::Matrix<double, 6, 6> P = Eigen::Matrix<double, 6, 6>::Identity(); // 协方差矩阵
+        ros::Time stamp;            // 当前预测时间戳
+        Vector6d X = Vector6d::Zero();   // [px, py, pz, vx, vy, vz]
+        Matrix6d P = Matrix6d::Identity();  // 协方差矩阵
 
-        std::deque<History_Record> cache;
-        std::deque<Observation> pending_obs;
-        ros::Publisher pub;
+        std::deque<History_Record> cache;   // 历史缓存
+        std::deque<Observation> pending_obs; // 待处理观测队列
+        ros::Publisher pub;                  // 结果发布器
     };
 
-    //DGO历史观测
+    // DGO 历史观测 (按 UAV 编号缓存)
     struct DGOSample
     {
         ros::Time stamp;
         nav_msgs::Odometry msg;
     };
 
+    // ═══════════════════════════════════════════════════════════
+    //  成员变量
+    // ═══════════════════════════════════════════════════════════
+    ros::NodeHandle nh_;
+    ros::NodeHandle pnh_;
+
+    // DEKF 定时 / 无人机 ID
+    ros::Timer timer_;
+    double rate_ = 30.0;
+    int uav_id_ = 0;
+    int uav_num_ = 4;
+
+    // 噪声参数 (过程噪声)
+    double sigma_ax_ = 0.80;
+    double sigma_ay_ = 0.80;
+    double sigma_az_ = 0.80;
+    double init_pos_std_ = 0.75;
+    double init_vel_std_ = 0.50;
+    Eigen::Matrix3d Q_;
+
+    // 噪声参数 (观测噪声)
+    double sigma_px_ = 0.18;
+    double sigma_py_ = 0.18;
+    double sigma_pz_ = 0.18;
+    double sigma_uwb_ = 0.05;
+    double sigma_alpha_ = 0.05;
+    double sigma_theta_ = 0.05;
+    Matrix6d R_;
+
+    // 延迟补偿参数
+    double max_dgo_pair_dt_ = 0.12;
+    double max_observation_delay_ = 0.60;
+    double current_delay_threshold_ = 0.020;
+    ros::Time last_predict_stamp_;
+
+    // 订阅器 & 数据缓存
+    std::vector<ros::Subscriber> dgo_subs_;
+    ros::Subscriber uwb_sub_;
+    ros::Subscriber camera_sub_;
     std::vector<Filter> filters_;
     std::vector<std::deque<DGOSample>> dgo_cache_;
 
+    // ═══════════════════════════════════════════════════════════
+    //  观测回调函数
+    // ═══════════════════════════════════════════════════════════
+
+    // DGO 回调: 收到 /iris_{id}/dgo_estimate 后, 与已缓存的自身 DGO 配对生成观测
     void dgoCallback(const nav_msgs::Odometry::ConstPtr &msg, int id)
     {
         DGOSample sample;
@@ -204,15 +264,14 @@ private:
         if (dgo_cache_[id].size() > 100)
             dgo_cache_[id].pop_front();
 
-        // 收到 DGO 数据后，尝试与对方配对生成观测
         const int peer_id = (id == uav_id_) ? -1 : id;
         const int self_id = uav_id_;
 
         if (dgo_cache_[self_id].empty())
             return;
 
-        // 如果刚收到的是 self 数据，遍历所有 peer 配对
-        // 如果刚收到的是 peer 数据，只与 self 配对
+        // 如果刚收到的是 self 数据, 遍历所有 peer 配对
+        // 如果刚收到的是 peer 数据, 只与 self 配对
         int start = (id == uav_id_) ? 0 : peer_id;
         int end   = (id == uav_id_) ? uav_num_ : peer_id + 1;
 
@@ -246,6 +305,7 @@ private:
         }
     }
 
+    // UWB 回调: 收到 uwb_processed 后, 为每个 target 生成测距观测
     void uwbCallback(const data_process::UwbProcessed::ConstPtr &msg)
     {
         for (size_t i = 0; i < msg->target_ids.size() && i < msg->distances.size(); ++i)
@@ -265,6 +325,7 @@ private:
         }
     }
 
+    // Camera 回调: 收到 camera_angle_match 后, 为每个 target 生成角度观测
     void cameraCallback(const data_process::CameraAngleMatch::ConstPtr &msg)
     {
         size_t n = std::min(msg->id.size(), std::min(msg->alpha.size(), msg->theta.size()));
@@ -291,6 +352,11 @@ private:
         }
     }
 
+    // ═══════════════════════════════════════════════════════════
+    //  DEKF 主循环: 预测 → 观测更新 → 发布
+    // ═══════════════════════════════════════════════════════════
+
+    // 每个 DEKF 周期执行一次
     void dekfCallback(const ros::TimerEvent &event)
     {
         (void)event;
@@ -302,11 +368,11 @@ private:
             if (target == uav_id_)
                 continue;
             Filter &f = filters_[target];
-            //执行预测
-            predict(f, now);
-        
 
-            // 2. 取出 pending observations
+            // 执行预测到当前时间
+            predict(f, now);
+
+            // 2. 取出该 filter 的 pending observations
             std::vector<Observation> batch;
             batch.reserve(f.pending_obs.size());
             while (!f.pending_obs.empty())
@@ -321,11 +387,12 @@ private:
                         return a.stamp < b.stamp;
                     });
 
-            // 4. 逐条观测处理
+            // 4. 逐条观测按年龄分支处理
             for (const Observation &obs : batch)
             {
                 if (obs.target_id < 0 || obs.target_id >= uav_num_ || obs.target_id == uav_id_)
                     continue;
+
                 const double age = (f.stamp - obs.stamp).toSec();
 
                 if (age < current_delay_threshold_)
@@ -335,17 +402,21 @@ private:
                 }
                 else if (age < max_observation_delay_)
                 {
-                    // 观测在延迟窗口内 → 重线性化后更新并重传播
-                    applyDelayedUpdate(f, obs);
+                    // TODO: applyDelayedUpdate(f, obs) — 由用户实现
                 }
                 // else: 观测太旧, 直接丢弃
             }
 
-            //发布DEKF优化话题
+            // 5. 发布该 filter 的 DEKF 估计结果
             publishFilter(f);
         }
     }
 
+    // ═══════════════════════════════════════════════════════════
+    //  滤波器核心函数
+    // ═══════════════════════════════════════════════════════════
+
+    // 初始化滤波器: 设置初值、协方差、时间戳, 写入首条 cache
     void initFilter(Filter &f, const ros::Time &stamp)
     {
         if (f.initialized)
@@ -369,7 +440,7 @@ private:
         f.cache.push_back(rec);
     }
 
-    //预测函数
+    // 预测: 从当前 f.stamp 递推到 stamp (恒速运动模型)
     void predict(Filter &f, const ros::Time &stamp)
     {
         if (!f.initialized)
@@ -382,7 +453,7 @@ private:
         if (dt < 1e-6)
             return;
 
-        //构造A
+        // 构造状态转移矩阵 A (恒速: px+=vx*dt, vx 不变)
         History_Record rec;
         rec.stamp = stamp;
         rec.A.block<3,3>(0,0) = Eigen::Matrix3d::Identity();
@@ -390,38 +461,163 @@ private:
         rec.A.block<3,3>(3,0) = Eigen::Matrix3d::Zero();
         rec.A.block<3,3>(3,3) = Eigen::Matrix3d::Identity();
 
-        //构造G
+        // 构造噪声耦合矩阵 G
         Eigen::Matrix<double,6,3> G;
         G.block<3,3>(0,0) = 0.5 * Eigen::Matrix3d::Identity() * dt * dt;
         G.block<3,3>(3,0) = Eigen::Matrix3d::Identity() * dt;
 
-        //计算: X_k+1|k = A_k * X_k
+        // X_{k+1|k} = A_k * X_k
         rec.X_pred = rec.A * f.X;
-        //计算：P_k+1|k = A_k * P_k * A_K.T + G_K * Q_k * G_k.T
+        // P_{k+1|k} = A_k * P_k * A_k^T + G_k * Q * G_k^T
         rec.P_pred = rec.A * f.P * rec.A.transpose() + G * Q_ * G.transpose();
 
-        //更新滤波器状态
         f.X = rec.X_pred;
         f.P = rec.P_pred;
         f.stamp = stamp;
 
-        //缓存历史
         f.cache.push_back(rec);
-
-        //判断缓存是否超过长度
         CleanCacheOverflow(f);
     }
 
-    // 清理过期的预测缓存记录, 控制内存增长
+    // 清理过期的预测缓存, 控制内存增长
     void CleanCacheOverflow(Filter &f)
     {
         constexpr size_t kMaxCacheSize = 500;
         while (f.cache.size() > kMaxCacheSize)
-        {
             f.cache.pop_front();
-        }
     }
 
+    // ═══════════════════════════════════════════════════════════
+    //  观测模型构建: 根据状态 x 和观测类型, 填充 Z, residual, H, R_meas
+    // ═══════════════════════════════════════════════════════════
+
+    bool buildObsModel(const Vector6d &x,
+                       const Observation &obs,
+                       Eigen::VectorXd &Z,
+                       Eigen::VectorXd &residual,
+                       Eigen::MatrixXd &H,
+                       Eigen::MatrixXd &R_meas)
+    {
+        switch (obs.type)
+        {
+            case ObsType::DGO:
+            {
+                Z.resize(3);
+                residual.resize(3);
+                Z << obs.position(0), obs.position(1), obs.position(2);
+                residual = Z - x.segment(0, 3);
+                H.resize(3, 6);
+                H.block(0, 0, 3, 3) = Eigen::Matrix3d::Identity();
+                H.block(0, 3, 3, 3) = Eigen::Matrix3d::Zero();
+                R_meas.resize(3, 3);
+                R_meas = R_.block(0, 0, 3, 3);
+                return true;
+            }
+
+            case ObsType::UWB_RANGE:
+            {
+                Z.resize(1);
+                residual.resize(1);
+                Z << obs.value;
+                {
+                    double px = x(0), py = x(1), pz = x(2);
+                    double r = sqrt(px*px + py*py + pz*pz);
+                    residual(0) = Z(0) - r;
+                    H.resize(1, 6);
+                    H << px/r, py/r, pz/r, 0.0, 0.0, 0.0;
+                }
+                R_meas.resize(1, 1);
+                R_meas = R_.block(3, 3, 1, 1);
+                return true;
+            }
+
+            case ObsType::CAMERA_BEARING:
+            {
+                double px = x(0), py = x(1), pz = x(2);
+                double r2 = px*px + py*py + pz*pz;
+                double r = sqrt(r2);
+                double l = sqrt(px*px + py*py);
+                double alpha_pred = std::atan2(py, px);
+                double theta_pred = std::asin(pz / r);
+
+                if (obs.has_alpha && obs.has_theta)
+                {
+                    Z.resize(2);
+                    residual.resize(2);
+                    Z << obs.alpha, obs.theta;
+                    residual(0) = wrapAngle(obs.alpha - alpha_pred);
+                    residual(1) = wrapAngle(obs.theta - theta_pred);
+                    H.resize(2, 6);
+                    H.block(0,0,1,6) << -py/(l*l), px/(l*l), 0.0, 0.0, 0.0, 0.0;
+                    H.block(1,0,1,6) << -px*pz/(r2*l), -py*pz/(r2*l), l/r2, 0.0, 0.0, 0.0;
+                    R_meas.resize(2, 2);
+                    R_meas = R_.block(4, 4, 2, 2);
+                }
+                else if (obs.has_alpha)
+                {
+                    Z.resize(1);
+                    residual.resize(1);
+                    Z << obs.alpha;
+                    residual(0) = wrapAngle(obs.alpha - alpha_pred);
+                    H.resize(1, 6);
+                    H.block(0,0,1,6) << -py/(l*l), px/(l*l), 0.0, 0.0, 0.0, 0.0;
+                    R_meas.resize(1, 1);
+                    R_meas = R_.block(4, 4, 1, 1);
+                }
+                else if (obs.has_theta)
+                {
+                    Z.resize(1);
+                    residual.resize(1);
+                    Z << obs.theta;
+                    residual(0) = wrapAngle(obs.theta - theta_pred);
+                    H.resize(1, 6);
+                    H.block(0,0,1,6) << -px*pz/(r2*l), -py*pz/(r2*l), l/r2, 0.0, 0.0, 0.0;
+                    R_meas.resize(1, 1);
+                    R_meas = R_.block(5, 5, 1, 1);
+                }
+                else
+                {
+                    return false;
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  观测更新函数
+    // ═══════════════════════════════════════════════════════════
+
+    // 当前时刻 EKF 更新: 观测时间 ≈ 当前预测时间, 直接执行标准 EKF 更新
+    void applyCurrentUpdate(Filter &f, const Observation &obs)
+    {
+        Eigen::VectorXd Z;
+        Eigen::VectorXd residual;
+        Eigen::MatrixXd H;
+        Eigen::MatrixXd R_meas;
+
+        if (!buildObsModel(f.X, obs, Z, residual, H, R_meas))
+            return;
+
+        // 标准卡尔曼增益: K = P * H^T * (H * P * H^T + R)^{-1}
+        Eigen::MatrixXd K = f.P * H * (H * f.P * H.transpose() + R_meas).inverse();
+        f.X += K * residual;
+
+        // Joseph 形式协方差更新 (数值稳定性优于标准形式)
+        Eigen::MatrixXd I_KH = Eigen::MatrixXd::Identity(6, 6) - K * H;
+        f.P = I_KH * f.P * I_KH.transpose() + K * R_meas * K.transpose();
+
+        // 缓存 I_KH 到最新的历史记录 (用于延迟补偿重传播)
+        if (!f.cache.empty())
+            f.cache.back().I_KH = I_KH;
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  发布函数
+    // ═══════════════════════════════════════════════════════════
+
+    // 发布 DEKF 估计结果: /iris_{self}/dekf/iris_{target}
     void publishFilter(const Filter &f)
     {
         if (!f.initialized)
@@ -453,118 +649,9 @@ private:
 
         f.pub.publish(msg);
     }
-
-    void applyCurrentUpdate(Filter &f, const Observation &obs)
-    {
-        //执行正常的EKF更新
-        Eigen::VectorXd Z;      // 观测向量, 各 case 按观测类型填充有效维度
-        Eigen::VectorXd residual;
-        Eigen::MatrixXd H;      // 观测雅可比, 各 case 按观测类型填充有效行
-        Eigen::MatrixXd K;
-        Eigen::MatrixXd R_meas;
-        Vector6d dX;
-        switch (obs.type)
-        {
-        case ObsType::DGO:
-        {
-            Z.resize(3);
-            residual.resize(3);
-            Z << obs.position(0), obs.position(1), obs.position(2);
-            residual = Z - f.X.segment(0, 3);
-            H.resize(3, 6);
-            H.block(0, 0, 3, 3) = Eigen::Matrix3d::Identity();
-            H.block(0, 3, 3, 3) = Eigen::Matrix3d::Zero();
-            K.resize(6, 3);
-            R_meas.resize(3, 3);
-            R_meas = R_.block(0, 0, 3, 3);
-            break;
-        }
-
-        case ObsType::UWB_RANGE:
-        {
-            // TODO: 填充 UWB range 标量观测的 Z、h、H、R
-            Z.resize(1);
-            residual.resize(1);
-            Z << obs.value;
-            H.resize(1,6);
-            double x = obs.position(0);
-            double y = obs.position(1);
-            double z = obs.position(2);
-            double r = sqrt(x*x + y*y + z*z);
-            residual(0) = Z(0) - r;
-            H << x/r,y/r,z/r,0.0,0.0,0.0;
-            K.resize(6,1);
-            R_meas.resize(1,1);
-            R_meas = R_.block(3,3,1,1);
-            break;
-        }
-
-        case ObsType::CAMERA_BEARING:
-        {
-            double x = f.X(0);
-            double y = f.X(1);
-            double z = f.X(2);
-            double r2 = (x*x + y*y + z*z);
-            double r = sqrt(r2);
-            double l = sqrt(x*x + y*y);
-            double alpha_pred = std::atan2(y, x);
-            double theta_pred = std::asin(z / r);
-            if (obs.has_alpha && obs.has_theta)
-            {
-                Z.resize(2);
-                residual.resize(2);
-                Z << obs.alpha, obs.theta;
-                residual(0) = wrapAngle(obs.alpha - alpha_pred);
-                residual(1) = wrapAngle(obs.theta - theta_pred);
-                H.resize(2, 6);
-                H.block(0,0,1,6) << -y/(l*l), x/(l*l), 0.0, 0.0, 0.0, 0.0;
-                H.block(1,0,1,6) << -x*z/(r2*l), -y*z/(r2*l), l/r2, 0.0, 0.0, 0.0;
-                K.resize(6, 2);
-                R_meas.resize(2, 2);
-                R_meas = R_.block(4,4,2,2);
-            }
-            else if (obs.has_alpha)
-            {
-                Z.resize(1);
-                residual.resize(1);
-                Z << obs.alpha;
-                residual(0) = wrapAngle(obs.alpha - alpha_pred);
-                H.resize(1, 6);
-                H.block(0,0,1,6) << -y/(l*l), x/(l*l), 0.0, 0.0, 0.0, 0.0;
-                K.resize(6, 1);
-                R_meas.resize(1, 1);
-                R_meas = R_.block(4,4,1,1);
-            }
-            else if (obs.has_theta)
-            {
-                Z.resize(1);
-                residual.resize(1);
-                Z << obs.theta;
-                residual(0) = wrapAngle(obs.theta - theta_pred);
-                H.resize(1, 6);
-                H.block(0,0,1,6) << -x*z/(r2*l), -y*z/(r2*l), l/r2, 0.0, 0.0, 0.0;
-                K.resize(6, 1);
-                R_meas.resize(1, 1);
-                R_meas = R_.block(5,5,1,1);
-            }
-            break;
-        }
-        }
-        //计算Kalman gain
-        K = f.P * H * (H * f.P * H.transpose() + R_meas).inverse();
-        dX = K * residual;
-        f.X += dX;
-
-        Eigen::MatrixXd I = Eigen::MatrixXd::Identity(6, 6);
-        Eigen::MatrixXd I_KH = I - K * H;
-        f.P = I_KH * f.P * I_KH.transpose() + K * R_meas * K.transpose();
-
-        // 缓存 I_KH 到最新的历史记录（用于延迟补偿）
-        if (!f.cache.empty())
-            f.cache.back().I_KH = I_KH;
-    }
 };
 
+// ═══════════════════════════════════════════════════════════
 int main(int argc, char **argv)
 {
     ros::init(argc, argv, "my_dekf");
