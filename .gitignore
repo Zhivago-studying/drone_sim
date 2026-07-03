@@ -42,3 +42,4 @@ src/test/logs/
 # MemPalace 项目配置（含本地路径）
 mempalace.yaml
 entities.json
+
