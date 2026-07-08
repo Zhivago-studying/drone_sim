@@ -41,6 +41,10 @@
   <arg name="dekf_rate" default="30.0" />
   <arg name="dekf_history_keep_time" default="1.0" />
   <arg name="dekf_delay_threshold" default="0.035" />
+  <arg name="dekf_future_tolerance" default="0.02" />
+  <arg name="dekf_max_nis" default="25.0" />
+  <arg name="dekf_max_pending" default="100" />
+  <arg name="dekf_max_history_match_dt" default="0.06" />
   <arg name="dekf_max_observation_delay" default="0.60" />
   <arg name="dekf_max_dgo_pair_dt" default="0.12" />
   <arg name="dekf_accel_noise_std" default="0.8" />
@@ -48,6 +52,7 @@
   <arg name="dekf_uwb_noise_std" default="$(arg uwb_stddev)" />
   <arg name="dekf_camera_alpha_noise_std" default="0.05" />
   <arg name="dekf_camera_theta_noise_std" default="0.05" />
+  <arg name="max_dekf_align_dt" default="0.12" />
   <arg name="run_id" default="" />
 
   <!--
@@ -82,6 +87,10 @@
   <arg name="dekf_csv_dir"       value=""
        unless="$(eval arg('run_id') != '')" />
   <arg name="dekf_csv_dir"       value="$(arg log_base)/dekf"
+       if="$(eval arg('run_id') != '')" />
+  <arg name="formation_csv_dir"  value="/home/scott/swarm_localization/src/sensors/logs"
+       unless="$(eval arg('run_id') != '')" />
+  <arg name="formation_csv_dir"  value="$(arg log_base)/formation"
        if="$(eval arg('run_id') != '')" />
 
   <include file="$(find sensors)/launch/uwb.launch" />
@@ -159,6 +168,21 @@
       <param name="sigma_ax" value="$(arg dekf_accel_noise_std)" />
       <param name="sigma_ay" value="$(arg dekf_accel_noise_std)" />
       <param name="sigma_az" value="$(arg dekf_accel_noise_std)" />
+      <param name="sigma_px" value="$(arg dekf_dgo_position_noise_std)" />
+      <param name="sigma_py" value="$(arg dekf_dgo_position_noise_std)" />
+      <param name="sigma_pz" value="$(arg dekf_dgo_position_noise_std)" />
+      <param name="sigma_uwb" value="$(arg dekf_uwb_noise_std)" />
+      <param name="sigma_alpha" value="$(arg dekf_camera_alpha_noise_std)" />
+      <param name="sigma_theta" value="$(arg dekf_camera_theta_noise_std)" />
+      <param name="max_dgo_pair_dt" value="$(arg dekf_max_dgo_pair_dt)" />
+      <param name="max_observation_delay" value="$(arg dekf_max_observation_delay)" />
+      <param name="current_delay_threshold" value="$(arg dekf_delay_threshold)" />
+      <param name="future_tolerance" value="$(arg dekf_future_tolerance)" />
+      <param name="max_nis" value="$(arg dekf_max_nis)" />
+      <param name="max_pending" value="$(arg dekf_max_pending)" />
+      <param name="history_keep_time" value="$(arg dekf_history_keep_time)" />
+      <param name="max_history_match_dt" value="$(arg dekf_max_history_match_dt)" />
+      <param name="csv_dir" value="$(arg dekf_csv_dir)" />
     </node>
   </group>
 
@@ -232,6 +256,21 @@
       <param name="sigma_ax" value="$(arg dekf_accel_noise_std)" />
       <param name="sigma_ay" value="$(arg dekf_accel_noise_std)" />
       <param name="sigma_az" value="$(arg dekf_accel_noise_std)" />
+      <param name="sigma_px" value="$(arg dekf_dgo_position_noise_std)" />
+      <param name="sigma_py" value="$(arg dekf_dgo_position_noise_std)" />
+      <param name="sigma_pz" value="$(arg dekf_dgo_position_noise_std)" />
+      <param name="sigma_uwb" value="$(arg dekf_uwb_noise_std)" />
+      <param name="sigma_alpha" value="$(arg dekf_camera_alpha_noise_std)" />
+      <param name="sigma_theta" value="$(arg dekf_camera_theta_noise_std)" />
+      <param name="max_dgo_pair_dt" value="$(arg dekf_max_dgo_pair_dt)" />
+      <param name="max_observation_delay" value="$(arg dekf_max_observation_delay)" />
+      <param name="current_delay_threshold" value="$(arg dekf_delay_threshold)" />
+      <param name="future_tolerance" value="$(arg dekf_future_tolerance)" />
+      <param name="max_nis" value="$(arg dekf_max_nis)" />
+      <param name="max_pending" value="$(arg dekf_max_pending)" />
+      <param name="history_keep_time" value="$(arg dekf_history_keep_time)" />
+      <param name="max_history_match_dt" value="$(arg dekf_max_history_match_dt)" />
+      <param name="csv_dir" value="$(arg dekf_csv_dir)" />
     </node>
   </group>
 
@@ -305,6 +344,21 @@
       <param name="sigma_ax" value="$(arg dekf_accel_noise_std)" />
       <param name="sigma_ay" value="$(arg dekf_accel_noise_std)" />
       <param name="sigma_az" value="$(arg dekf_accel_noise_std)" />
+      <param name="sigma_px" value="$(arg dekf_dgo_position_noise_std)" />
+      <param name="sigma_py" value="$(arg dekf_dgo_position_noise_std)" />
+      <param name="sigma_pz" value="$(arg dekf_dgo_position_noise_std)" />
+      <param name="sigma_uwb" value="$(arg dekf_uwb_noise_std)" />
+      <param name="sigma_alpha" value="$(arg dekf_camera_alpha_noise_std)" />
+      <param name="sigma_theta" value="$(arg dekf_camera_theta_noise_std)" />
+      <param name="max_dgo_pair_dt" value="$(arg dekf_max_dgo_pair_dt)" />
+      <param name="max_observation_delay" value="$(arg dekf_max_observation_delay)" />
+      <param name="current_delay_threshold" value="$(arg dekf_delay_threshold)" />
+      <param name="future_tolerance" value="$(arg dekf_future_tolerance)" />
+      <param name="max_nis" value="$(arg dekf_max_nis)" />
+      <param name="max_pending" value="$(arg dekf_max_pending)" />
+      <param name="history_keep_time" value="$(arg dekf_history_keep_time)" />
+      <param name="max_history_match_dt" value="$(arg dekf_max_history_match_dt)" />
+      <param name="csv_dir" value="$(arg dekf_csv_dir)" />
     </node>
   </group>
 
@@ -378,6 +432,21 @@
       <param name="sigma_ax" value="$(arg dekf_accel_noise_std)" />
       <param name="sigma_ay" value="$(arg dekf_accel_noise_std)" />
       <param name="sigma_az" value="$(arg dekf_accel_noise_std)" />
+      <param name="sigma_px" value="$(arg dekf_dgo_position_noise_std)" />
+      <param name="sigma_py" value="$(arg dekf_dgo_position_noise_std)" />
+      <param name="sigma_pz" value="$(arg dekf_dgo_position_noise_std)" />
+      <param name="sigma_uwb" value="$(arg dekf_uwb_noise_std)" />
+      <param name="sigma_alpha" value="$(arg dekf_camera_alpha_noise_std)" />
+      <param name="sigma_theta" value="$(arg dekf_camera_theta_noise_std)" />
+      <param name="max_dgo_pair_dt" value="$(arg dekf_max_dgo_pair_dt)" />
+      <param name="max_observation_delay" value="$(arg dekf_max_observation_delay)" />
+      <param name="current_delay_threshold" value="$(arg dekf_delay_threshold)" />
+      <param name="future_tolerance" value="$(arg dekf_future_tolerance)" />
+      <param name="max_nis" value="$(arg dekf_max_nis)" />
+      <param name="max_pending" value="$(arg dekf_max_pending)" />
+      <param name="history_keep_time" value="$(arg dekf_history_keep_time)" />
+      <param name="max_history_match_dt" value="$(arg dekf_max_history_match_dt)" />
+      <param name="csv_dir" value="$(arg dekf_csv_dir)" />
     </node>
   </group>
 
@@ -400,7 +469,7 @@
     <param name="translate_speed" value="1.0" />
     <param name="chase_speed" value="0.7" />
     <param name="chase_slow_radius" value="1.0" />
-    <param name="speed_csv_dir" value="/home/scott/swarm_localization/src/sensors/logs" />
+    <param name="speed_csv_dir" value="$(arg formation_csv_dir)" />
   </node>
 
   <!-- EKF 评估节点: 监控全部 4 机 ins_estimate, 析构时写入 gt/est/vel/relative_error CSV -->
@@ -448,4 +517,16 @@
       <param name="count_ignored_callbacks" value="$(arg count_ignored_callbacks)" />
     </node>
   </group>
+
+  <!-- DEKF 评估节点: 评价 /iris_0/dekf/iris_{1,2,3} 相对位姿精度 -->
+  <node pkg="test" type="ekf_dgo_dekf_test" name="ekf_dgo_dekf_test" output="screen">
+    <param name="csv_dir" value="$(arg dekf_csv_dir)" />
+    <param name="reference_name" value="iris_0" />
+    <rosparam param="target_names">["iris_1", "iris_2", "iris_3"]</rosparam>
+    <param name="max_model_align_dt" value="$(arg max_model_align_dt)" />
+    <param name="max_dekf_align_dt" value="$(arg max_dekf_align_dt)" />
+    <param name="ignore_after_mission_complete" value="$(arg ignore_after_mission_complete)" />
+    <param name="eval_stop_stage" value="$(arg eval_stop_stage)" />
+    <param name="count_ignored_callbacks" value="$(arg count_ignored_callbacks)" />
+  </node>
 </launch>

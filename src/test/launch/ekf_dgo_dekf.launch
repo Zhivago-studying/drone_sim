@@ -1,8 +1,32 @@
 <launch>
+  <!--
+    EKF + DGO + DEKF full mission entrypoint.
+
+    Usage:
+      roslaunch test ekf_dgo_dekf.launch run_id:=X
+
+    CSV output when run_id is non-empty:
+      ~/swarm_localization/run_data/run_X/dgo/
+      ~/swarm_localization/run_data/run_X/dekf/
+      ~/swarm_localization/run_data/run_X/ekf_dgo_test/
+      ~/swarm_localization/run_data/run_X/ins_eskf_test/
+      ~/swarm_localization/run_data/run_X/ins_eskf/
+      ~/swarm_localization/run_data/run_X/uwb_zero_score/
+
+    This launch delegates the concrete node graph to
+    algorithm/launch/dgo_full_mission.launch, which starts:
+      UWB simulator/filter, INS ESKF, camera pipeline, communication,
+      DGO, my_dekf, formation controller, INS evaluator and DGO evaluator.
+  -->
+
+  <!-- ===== Common logging / evaluator parameters ===== -->
+  <arg name="run_id" default="" />
   <arg name="csv_dir" default="$(find test)/logs" />
   <arg name="max_align_dt" default="0.08" />
   <arg name="max_dgo_align_dt" default="0.12" />
   <arg name="max_model_align_dt" default="0.03" />
+
+  <!-- ===== DGO / communication parameters ===== -->
   <arg name="oracle_mode" default="false" />
   <arg name="max_communication_age" default="0.5" />
   <arg name="max_communication_skew" default="0.2" />
@@ -19,6 +43,8 @@
   <arg name="min_dgo_start_altitude" default="0.35" />
   <arg name="max_position_correction_rate" default="0.8" />
   <arg name="max_prediction_speed" default="2.0" />
+
+  <!-- ===== Formation / INS parameters ===== -->
   <arg name="landing_descent_rate" default="0.45" />
   <arg name="force_disarm_delay" default="2.0" />
   <arg name="publish_pos_cov_scale" default="2.0" />
@@ -27,12 +53,16 @@
   <arg name="flow_base_noise_std" default="0.02" />
   <arg name="max_velocity_innovation" default="0.75" />
   <arg name="max_height_innovation_sigma" default="8.0" />
+
+  <!-- ===== Mission stop / evaluator crop parameters ===== -->
   <arg name="stop_after_mission_complete" default="true" />
   <arg name="dgo_stop_stage" default="7" />
   <arg name="publish_hold_after_stop" default="false" />
   <arg name="ignore_after_mission_complete" default="true" />
   <arg name="eval_stop_stage" default="7" />
   <arg name="count_ignored_callbacks" default="true" />
+
+  <!-- ===== DEKF parameters ===== -->
   <arg name="enable_dekf" default="true" />
   <arg name="dekf_rate" default="30.0" />
   <arg name="dekf_history_keep_time" default="1.0" />
@@ -48,14 +78,16 @@
   <arg name="dekf_uwb_noise_std" default="$(arg uwb_stddev)" />
   <arg name="dekf_camera_alpha_noise_std" default="0.05" />
   <arg name="dekf_camera_theta_noise_std" default="0.05" />
-  <arg name="run_id" default="" />
+  <arg name="max_dekf_align_dt" default="0.12" />
 
-  <!-- Alias launch: the full mission launch owns the evaluator node. -->
   <include file="$(find algorithm)/launch/dgo_full_mission.launch">
+    <arg name="run_id" value="$(arg run_id)" />
     <arg name="csv_dir" value="$(arg csv_dir)" />
+
     <arg name="max_align_dt" value="$(arg max_align_dt)" />
     <arg name="max_dgo_align_dt" value="$(arg max_dgo_align_dt)" />
     <arg name="max_model_align_dt" value="$(arg max_model_align_dt)" />
+
     <arg name="oracle_mode" value="$(arg oracle_mode)" />
     <arg name="max_communication_age" value="$(arg max_communication_age)" />
     <arg name="max_communication_skew" value="$(arg max_communication_skew)" />
@@ -72,6 +104,7 @@
     <arg name="min_dgo_start_altitude" value="$(arg min_dgo_start_altitude)" />
     <arg name="max_position_correction_rate" value="$(arg max_position_correction_rate)" />
     <arg name="max_prediction_speed" value="$(arg max_prediction_speed)" />
+
     <arg name="landing_descent_rate" value="$(arg landing_descent_rate)" />
     <arg name="force_disarm_delay" value="$(arg force_disarm_delay)" />
     <arg name="publish_pos_cov_scale" value="$(arg publish_pos_cov_scale)" />
@@ -80,12 +113,14 @@
     <arg name="flow_base_noise_std" value="$(arg flow_base_noise_std)" />
     <arg name="max_velocity_innovation" value="$(arg max_velocity_innovation)" />
     <arg name="max_height_innovation_sigma" value="$(arg max_height_innovation_sigma)" />
+
     <arg name="stop_after_mission_complete" value="$(arg stop_after_mission_complete)" />
     <arg name="dgo_stop_stage" value="$(arg dgo_stop_stage)" />
     <arg name="publish_hold_after_stop" value="$(arg publish_hold_after_stop)" />
     <arg name="ignore_after_mission_complete" value="$(arg ignore_after_mission_complete)" />
     <arg name="eval_stop_stage" value="$(arg eval_stop_stage)" />
     <arg name="count_ignored_callbacks" value="$(arg count_ignored_callbacks)" />
+
     <arg name="enable_dekf" value="$(arg enable_dekf)" />
     <arg name="dekf_rate" value="$(arg dekf_rate)" />
     <arg name="dekf_history_keep_time" value="$(arg dekf_history_keep_time)" />
@@ -101,6 +136,6 @@
     <arg name="dekf_uwb_noise_std" value="$(arg dekf_uwb_noise_std)" />
     <arg name="dekf_camera_alpha_noise_std" value="$(arg dekf_camera_alpha_noise_std)" />
     <arg name="dekf_camera_theta_noise_std" value="$(arg dekf_camera_theta_noise_std)" />
-    <arg name="run_id" value="$(arg run_id)" />
+    <arg name="max_dekf_align_dt" value="$(arg max_dekf_align_dt)" />
   </include>
 </launch>

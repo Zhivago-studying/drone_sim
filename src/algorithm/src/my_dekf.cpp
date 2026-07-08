@@ -42,9 +42,15 @@
 #include <std_msgs/UInt8.h>
 #include <geometry_msgs/Point.h>
 #include <Eigen/Dense>
+#include <cerrno>
 #include <cmath>
 #include <deque>
+#include <fstream>
+#include <iomanip>
+#include <limits>
 #include <string>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <vector>
 
 using Vector6d = Eigen::Matrix<double, 6, 1>;
@@ -68,6 +74,9 @@ public:
     {
         pnh_.param("uav_id", uav_id_, 0);
         pnh_.param("uav_num", uav_num_, 4);
+        pnh_.param("rate", rate_, 30.0);
+        pnh_.param("initial_spacing", initial_spacing_, 2.0);
+        pnh_.param("csv_dir", csv_dir_, std::string(""));
         pnh_.param("init_pos_std", init_pos_std_, 0.75);
         pnh_.param("init_vel_std", init_vel_std_, 0.50);
         pnh_.param("sigma_ax", sigma_ax_, 0.80);
@@ -82,8 +91,79 @@ public:
         pnh_.param("max_dgo_pair_dt", max_dgo_pair_dt_, 0.12);
         pnh_.param("max_observation_delay", max_observation_delay_, 0.60);
         pnh_.param("current_delay_threshold", current_delay_threshold_, 0.020);
+        pnh_.param("max_history_match_dt", max_history_match_dt_, 0.06);
+        pnh_.param("future_tolerance", future_tolerance_, 0.02);
+        pnh_.param("max_nis", max_nis_, 25.0);
+        pnh_.param("max_pending", max_pending_, 100);
+        pnh_.param("history_keep_time", history_keep_time_, 2.0);
+
+        // ── 参数合法性检查 ──────────────────────────────────
+        {
+            bool ok = true;
+            if (uav_num_ < 2 || uav_id_ < 0 || uav_id_ >= uav_num_)
+            {
+                ROS_FATAL("[DEKF] invalid uav_id=%d uav_num=%d", uav_id_, uav_num_);
+                ok = false;
+            }
+            if (uav_num_ != 4)
+            {
+                ROS_FATAL("[DEKF] current initial_offsets layout supports exactly 4 UAVs, got uav_num=%d",
+                          uav_num_);
+                ok = false;
+            }
+            if (rate_ <= 0.0)
+            {
+                ROS_FATAL("[DEKF] rate=%.2f must be > 0", rate_);
+                ok = false;
+            }
+            if (initial_spacing_ <= 0.0)
+            {
+                ROS_FATAL("[DEKF] initial_spacing=%.3f must be > 0", initial_spacing_);
+                ok = false;
+            }
+            if (init_pos_std_ <= 0.0 || init_vel_std_ <= 0.0 ||
+                sigma_ax_ <= 0.0 || sigma_ay_ <= 0.0 || sigma_az_ <= 0.0)
+            {
+                ROS_FATAL("[DEKF] process noise sigma must be > 0");
+                ok = false;
+            }
+            if (sigma_px_ <= 0.0 || sigma_py_ <= 0.0 || sigma_pz_ <= 0.0 ||
+                sigma_uwb_ <= 0.0 || sigma_alpha_ <= 0.0 || sigma_theta_ <= 0.0)
+            {
+                ROS_FATAL("[DEKF] observation noise sigma must be > 0");
+                ok = false;
+            }
+            if (max_observation_delay_ <= current_delay_threshold_)
+            {
+                ROS_FATAL("[DEKF] max_observation_delay=%.3f must be > "
+                          "current_delay_threshold=%.3f",
+                          max_observation_delay_, current_delay_threshold_);
+                ok = false;
+            }
+            if (!ok)
+            {
+                ros::shutdown();
+                return;
+            }
+        }
 
         dgo_cache_.resize(uav_num_);
+
+        // 编队初始 offset: 2x2 方阵, z=0 (已知编队)
+        initial_offsets_.resize(uav_num_);
+        initial_offsets_[0] = Eigen::Vector3d(0.0, 0.0, 0.0);
+        initial_offsets_[1] = Eigen::Vector3d(initial_spacing_, 0.0, 0.0);
+        initial_offsets_[2] = Eigen::Vector3d(initial_spacing_, initial_spacing_, 0.0);
+        initial_offsets_[3] = Eigen::Vector3d(0.0, initial_spacing_, 0.0);
+
+        ROS_INFO("[DEKF] ns=%s uav_id=%d uav_num=%d rate=%.2fHz initial_spacing=%.3f "
+                 "offsets: iris_0=(%.2f,%.2f,%.2f) iris_1=(%.2f,%.2f,%.2f) "
+                 "iris_2=(%.2f,%.2f,%.2f) iris_3=(%.2f,%.2f,%.2f)",
+                 ros::this_node::getNamespace().c_str(), uav_id_, uav_num_, rate_, initial_spacing_,
+                 initial_offsets_[0].x(), initial_offsets_[0].y(), initial_offsets_[0].z(),
+                 initial_offsets_[1].x(), initial_offsets_[1].y(), initial_offsets_[1].z(),
+                 initial_offsets_[2].x(), initial_offsets_[2].y(), initial_offsets_[2].z(),
+                 initial_offsets_[3].x(), initial_offsets_[3].y(), initial_offsets_[3].z());
 
         // 过程噪声矩阵 Q
         Q_.setZero();
@@ -100,14 +180,18 @@ public:
         R_(4, 4) = sigma_alpha_ * sigma_alpha_;
         R_(5, 5) = sigma_theta_ * sigma_theta_;
 
-        // 初始化滤波器: 每个 target 一个, 跳过本机
+        // 初始化滤波器: 每个 target 一个, 跳过本机, 用编队初始 offset 设置初值
         filters_.resize(uav_num_);
         for (int i = 0; i < uav_num_; ++i)
         {
             filters_[i].target_id = i;
             if (i == uav_id_)
                 continue;
-            filters_[i].X.setZero();
+
+            Eigen::Vector3d init_rel =
+                initial_offsets_[i] - initial_offsets_[uav_id_];
+            filters_[i].X.segment<3>(0) = init_rel;
+            filters_[i].X.segment<3>(3).setZero();
             filters_[i].P.setZero();
             filters_[i].P.block<3, 3>(0, 0).diagonal().setConstant(0.75 * 0.75);
             filters_[i].P.block<3, 3>(3, 3).diagonal().setConstant(0.50 * 0.50);
@@ -133,21 +217,12 @@ public:
         camera_sub_ = nh_.subscribe<data_process::CameraAngleMatch>(
             "camera_angle_match", 10, &DEKF::cameraCallback, this);
 
-        // DEKF 定时器
-        pnh_.param("rate", rate_, 30.0);
-        timer_ = nh_.createTimer(ros::Duration(1.0 / rate_),
-                                 &DEKF::dekfCallback, this);
+        openCsv();
 
-        // 初始化滤波器时间戳
-        for (int i = 0; i < uav_num_; ++i)
-        {
-            if (i == uav_id_)
-                continue;
-            Filter &f = filters_[i];
-            ros::Time now = ros::Time::now();
-            initFilter(f, now);
-        }
-    }
+	        // DEKF 定时器
+	        timer_ = nh_.createTimer(ros::Duration(1.0 / rate_),
+	                                 &DEKF::dekfCallback, this);
+	    }
 
 private:
     // ═══════════════════════════════════════════════════════════
@@ -162,6 +237,8 @@ private:
         Matrix6d P_pred;         // P_{k+1|k}
         Matrix6d A;              // 状态转移矩阵
         Matrix6d I_KH;           // I - K*H  (更新后的投影矩阵)
+        Eigen::MatrixXd H;       // 观测雅可比 (动态维度, 用于延迟补偿)
+        Eigen::MatrixXd K;       // 卡尔曼增益 (用于延迟补偿)
     };
 
     // 观测类型枚举
@@ -199,6 +276,17 @@ private:
         std::deque<History_Record> cache;   // 历史缓存
         std::deque<Observation> pending_obs; // 待处理观测队列
         ros::Publisher pub;                  // 结果发布器
+
+        size_t publish_count = 0;
+        size_t current_updates = 0;
+        size_t delayed_updates = 0;
+        size_t dgo_updates = 0;
+        size_t uwb_updates = 0;
+        size_t camera_updates = 0;
+        size_t rejects = 0;
+        size_t delayed_p_skips = 0;
+        size_t future_requeues = 0;
+        size_t old_drops = 0;
     };
 
     // DGO 历史观测 (按 UAV 编号缓存)
@@ -219,6 +307,7 @@ private:
     double rate_ = 30.0;
     int uav_id_ = 0;
     int uav_num_ = 4;
+    double initial_spacing_ = 2.0;
 
     // 噪声参数 (过程噪声)
     double sigma_ax_ = 0.80;
@@ -241,7 +330,16 @@ private:
     double max_dgo_pair_dt_ = 0.12;
     double max_observation_delay_ = 0.60;
     double current_delay_threshold_ = 0.020;
-    ros::Time last_predict_stamp_;
+    double max_history_match_dt_ = 0.06;
+    double future_tolerance_ = 0.02;
+    double max_nis_ = 25.0;
+    int max_pending_ = 100;
+    double history_keep_time_ = 2.0;
+    bool initialized_ = false;
+
+    // CSV 诊断输出
+    std::string csv_dir_;
+    std::ofstream csv_;
 
     // 订阅器 & 数据缓存
     std::vector<ros::Subscriber> dgo_subs_;
@@ -249,6 +347,197 @@ private:
     ros::Subscriber camera_sub_;
     std::vector<Filter> filters_;
     std::vector<std::deque<DGOSample>> dgo_cache_;
+
+    // 编队初始 offset (用于 DGO 相对位置补齐)
+    std::vector<Eigen::Vector3d> initial_offsets_;
+
+    // ═══════════════════════════════════════════════════════════
+    //  CSV 诊断输出
+    // ═══════════════════════════════════════════════════════════
+
+    static bool ensureDirectory(const std::string &path)
+    {
+        if (path.empty())
+            return false;
+
+        std::string current;
+        if (path[0] == '/')
+            current = "/";
+
+        size_t start = (path[0] == '/') ? 1 : 0;
+        while (start <= path.size())
+        {
+            const size_t slash = path.find('/', start);
+            const std::string part = path.substr(start, slash - start);
+            if (!part.empty())
+            {
+                if (!current.empty() && current[current.size() - 1] != '/')
+                    current += "/";
+                current += part;
+
+                struct stat st;
+                if (stat(current.c_str(), &st) != 0)
+                {
+                    if (mkdir(current.c_str(), 0755) != 0 && errno != EEXIST)
+                        return false;
+                }
+                else if (!S_ISDIR(st.st_mode))
+                {
+                    return false;
+                }
+            }
+
+            if (slash == std::string::npos)
+                break;
+            start = slash + 1;
+        }
+
+        return true;
+    }
+
+    const char *obsTypeName(ObsType type) const
+    {
+        switch (type)
+        {
+            case ObsType::DGO:
+                return "dgo";
+            case ObsType::UWB_RANGE:
+                return "uwb";
+            case ObsType::CAMERA_BEARING:
+                return "camera";
+        }
+        return "unknown";
+    }
+
+    void openCsv()
+    {
+        if (csv_dir_.empty())
+            return;
+
+        if (!ensureDirectory(csv_dir_))
+        {
+            ROS_WARN("[DEKF] failed to create csv_dir=%s", csv_dir_.c_str());
+            return;
+        }
+
+        const std::string self_name = "iris_" + std::to_string(uav_id_);
+        const std::string path = csv_dir_ + "/" + self_name + "_my_dekf_debug.csv";
+        csv_.open(path.c_str(), std::ios::out | std::ios::trunc);
+        if (!csv_.is_open())
+        {
+            ROS_WARN("[DEKF] cannot open CSV: %s", path.c_str());
+            return;
+        }
+
+        csv_ << "time,event,target,obs_type,accepted,delayed,p_updated,reason,"
+             << "obs_stamp,filter_stamp,age,history_match_dt,residual_norm,nis,"
+             << "x,y,z,vx,vy,vz,"
+             << "Pxx,Pyy,Pzz,Pvxvx,Pvyvy,Pvzvz,"
+             << "pending_size,cache_size,publish_count,current_updates,delayed_updates,"
+             << "dgo_updates,uwb_updates,camera_updates,rejects,delayed_p_skips,"
+             << "future_requeues,old_drops\n";
+
+        ROS_INFO("[DEKF] debug CSV: %s", path.c_str());
+    }
+
+    void logCsvRow(const std::string &event,
+                   const Filter &f,
+                   const char *obs_type,
+                   int accepted,
+                   int delayed,
+                   int p_updated,
+                   const std::string &reason,
+                   double obs_stamp,
+                   double age,
+                   double history_match_dt,
+                   double residual_norm,
+                   double nis)
+    {
+        if (!csv_.is_open())
+            return;
+
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        const double t = f.stamp.isZero() ? ros::Time::now().toSec() : f.stamp.toSec();
+        const double filter_stamp = f.stamp.isZero() ? nan : f.stamp.toSec();
+
+        csv_ << std::fixed << std::setprecision(9)
+             << t << ","
+             << event << ","
+             << f.target_id << ","
+             << obs_type << ","
+             << accepted << ","
+             << delayed << ","
+             << p_updated << ","
+             << reason << ","
+             << obs_stamp << ","
+             << filter_stamp << ","
+             << age << ","
+             << history_match_dt << ","
+             << residual_norm << ","
+             << nis << ","
+             << f.X[0] << "," << f.X[1] << "," << f.X[2] << ","
+             << f.X[3] << "," << f.X[4] << "," << f.X[5] << ","
+             << f.P(0, 0) << "," << f.P(1, 1) << "," << f.P(2, 2) << ","
+             << f.P(3, 3) << "," << f.P(4, 4) << "," << f.P(5, 5) << ","
+             << f.pending_obs.size() << ","
+             << f.cache.size() << ","
+             << f.publish_count << ","
+             << f.current_updates << ","
+             << f.delayed_updates << ","
+             << f.dgo_updates << ","
+             << f.uwb_updates << ","
+             << f.camera_updates << ","
+             << f.rejects << ","
+             << f.delayed_p_skips << ","
+             << f.future_requeues << ","
+             << f.old_drops << "\n";
+    }
+
+    void logObservationRow(const std::string &event,
+                           const Filter &f,
+                           const Observation &obs,
+                           int accepted,
+                           int delayed,
+                           int p_updated,
+                           const std::string &reason,
+                           double age,
+                           double history_match_dt,
+                           double residual_norm,
+                           double nis)
+    {
+        const double obs_stamp =
+            obs.stamp.isZero() ? std::numeric_limits<double>::quiet_NaN() : obs.stamp.toSec();
+        logCsvRow(event, f, obsTypeName(obs.type), accepted, delayed, p_updated,
+                  reason, obs_stamp, age, history_match_dt, residual_norm, nis);
+    }
+
+    void logPublishRow(const Filter &f)
+    {
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        logCsvRow("publish", f, "none", 1, 0, 0, "publish",
+                  nan, nan, nan, nan, nan);
+    }
+
+    void incrementAcceptedCounters(Filter &f, const Observation &obs, bool delayed)
+    {
+        if (delayed)
+            ++f.delayed_updates;
+        else
+            ++f.current_updates;
+
+        switch (obs.type)
+        {
+            case ObsType::DGO:
+                ++f.dgo_updates;
+                break;
+            case ObsType::UWB_RANGE:
+                ++f.uwb_updates;
+                break;
+            case ObsType::CAMERA_BEARING:
+                ++f.camera_updates;
+                break;
+        }
+    }
 
     // ═══════════════════════════════════════════════════════════
     //  观测回调函数
@@ -291,9 +580,12 @@ private:
             obs.type = ObsType::DGO;
             obs.target_id = target;
             obs.stamp = obs_stamp;
-            obs.position.x() = peer.msg.pose.pose.position.x - self.msg.pose.pose.position.x;
-            obs.position.y() = peer.msg.pose.pose.position.y - self.msg.pose.pose.position.y;
-            obs.position.z() = peer.msg.pose.pose.position.z - self.msg.pose.pose.position.z;
+            obs.position.x() = (initial_offsets_[target].x() - initial_offsets_[self_id].x())
+                             + peer.msg.pose.pose.position.x - self.msg.pose.pose.position.x;
+            obs.position.y() = (initial_offsets_[target].y() - initial_offsets_[self_id].y())
+                             + peer.msg.pose.pose.position.y - self.msg.pose.pose.position.y;
+            obs.position.z() = (initial_offsets_[target].z() - initial_offsets_[self_id].z())
+                             + peer.msg.pose.pose.position.z - self.msg.pose.pose.position.z;
             obs.velocity.x() = peer.msg.twist.twist.linear.x - self.msg.twist.twist.linear.x;
             obs.velocity.y() = peer.msg.twist.twist.linear.y - self.msg.twist.twist.linear.y;
             obs.velocity.z() = peer.msg.twist.twist.linear.z - self.msg.twist.twist.linear.z;
@@ -302,6 +594,8 @@ private:
                 continue;
 
             filters_[target].pending_obs.push_back(obs);
+            while (filters_[target].pending_obs.size() > static_cast<size_t>(max_pending_))
+                filters_[target].pending_obs.pop_front();
         }
     }
 
@@ -322,6 +616,8 @@ private:
             obs.stamp = msg->header.stamp;
             obs.value = msg->distances[i];
             filters_[target].pending_obs.push_back(obs);
+            while (filters_[target].pending_obs.size() > static_cast<size_t>(max_pending_))
+                filters_[target].pending_obs.pop_front();
         }
     }
 
@@ -349,6 +645,8 @@ private:
                 continue;
 
             filters_[target].pending_obs.push_back(obs);
+            while (filters_[target].pending_obs.size() > static_cast<size_t>(max_pending_))
+                filters_[target].pending_obs.pop_front();
         }
     }
 
@@ -361,6 +659,23 @@ private:
     {
         (void)event;
         const ros::Time now = ros::Time::now();
+
+        // use_sim_time 下, 仿真时钟尚未就绪时 now 为 0
+        if (now.isZero())
+            return;
+
+        // 首次触发时初始化所有滤波器时间戳
+        if (!initialized_)
+        {
+            for (int target = 0; target < uav_num_; ++target)
+            {
+                if (target == uav_id_)
+                    continue;
+                Filter &f = filters_[target];
+                f.stamp = now;
+            }
+            initialized_ = true;
+        }
 
         // 1. 所有 filter predict 到 now
         for (int target = 0; target < uav_num_; ++target)
@@ -395,16 +710,39 @@ private:
 
                 const double age = (f.stamp - obs.stamp).toSec();
 
-                if (age < current_delay_threshold_)
+                if (age < -future_tolerance_)
+                {
+                    // 观测时间戳在未来 → 跳过, 等后续周期再处理
+                    f.pending_obs.push_back(obs);
+                    while (f.pending_obs.size() > static_cast<size_t>(max_pending_))
+                        f.pending_obs.pop_front();
+                    ++f.future_requeues;
+                    logObservationRow("requeue_future", f, obs, 0, 0, 0,
+                                      "future_observation", age,
+                                      std::numeric_limits<double>::quiet_NaN(),
+                                      std::numeric_limits<double>::quiet_NaN(),
+                                      std::numeric_limits<double>::quiet_NaN());
+                }
+                else if (age < current_delay_threshold_)
                 {
                     // 观测时间 ≈ 当前时间 → 直接在当前状态上更新
                     applyCurrentUpdate(f, obs);
                 }
                 else if (age < max_observation_delay_)
                 {
-                    // TODO: applyDelayedUpdate(f, obs) — 由用户实现
+                    applyDelayedUpdate(f, obs);
                 }
-                // else: 观测太旧, 直接丢弃
+                else
+                {
+                    // 观测太旧, 直接丢弃
+                    ++f.old_drops;
+                    ++f.rejects;
+                    logObservationRow("drop_old", f, obs, 0, 0, 0,
+                                      "observation_too_old", age,
+                                      std::numeric_limits<double>::quiet_NaN(),
+                                      std::numeric_limits<double>::quiet_NaN(),
+                                      std::numeric_limits<double>::quiet_NaN());
+                }
             }
 
             // 5. 发布该 filter 的 DEKF 估计结果
@@ -422,7 +760,13 @@ private:
         if (f.initialized)
             return;
 
-        f.X.setZero();
+        // 用编队初始 offset 作为相对位姿初值, 而非全零
+        // 这样 UWB/Camera 的初始线性化更准确
+        Eigen::Vector3d init_rel = Eigen::Vector3d::Zero();
+        if (f.target_id >= 0 && f.target_id < uav_num_)
+            init_rel = initial_offsets_[f.target_id] - initial_offsets_[uav_id_];
+        f.X.segment<3>(0) = init_rel;
+        f.X.segment<3>(3).setZero();
         f.P.setZero();
         f.P.block<3, 3>(0, 0).diagonal().setConstant(
             init_pos_std_ * init_pos_std_);
@@ -471,20 +815,29 @@ private:
         // P_{k+1|k} = A_k * P_k * A_k^T + G_k * Q * G_k^T
         rec.P_pred = rec.A * f.P * rec.A.transpose() + G * Q_ * G.transpose();
 
+        // 初始化延迟补偿缓存 (无更新时 I_KH=Identity, H/K 为空)
+        rec.I_KH.setIdentity();
+        rec.H.resize(0, 0);
+        rec.K.resize(0, 0);
+
         f.X = rec.X_pred;
         f.P = rec.P_pred;
+        symmetrizeCov(f.P);
         f.stamp = stamp;
 
         f.cache.push_back(rec);
         CleanCacheOverflow(f);
     }
 
-    // 清理过期的预测缓存, 控制内存增长
+    // 清理过期的预测缓存, 按时间保留 (默认保留最近 2s)
     void CleanCacheOverflow(Filter &f)
     {
-        constexpr size_t kMaxCacheSize = 500;
-        while (f.cache.size() > kMaxCacheSize)
+        const ros::Time now = f.stamp;
+        while (f.cache.size() > 2 &&
+               (now - f.cache.front().stamp).toSec() > history_keep_time_)
+        {
             f.cache.pop_front();
+        }
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -516,16 +869,17 @@ private:
 
             case ObsType::UWB_RANGE:
             {
+                double px = x(0), py = x(1), pz = x(2);
+                double r = sqrt(px*px + py*py + pz*pz);
+                if (r < 1e-6)
+                    return false;
+
                 Z.resize(1);
                 residual.resize(1);
                 Z << obs.value;
-                {
-                    double px = x(0), py = x(1), pz = x(2);
-                    double r = sqrt(px*px + py*py + pz*pz);
-                    residual(0) = Z(0) - r;
-                    H.resize(1, 6);
-                    H << px/r, py/r, pz/r, 0.0, 0.0, 0.0;
-                }
+                residual(0) = Z(0) - r;
+                H.resize(1, 6);
+                H << px/r, py/r, pz/r, 0.0, 0.0, 0.0;
                 R_meas.resize(1, 1);
                 R_meas = R_.block(3, 3, 1, 1);
                 return true;
@@ -537,8 +891,12 @@ private:
                 double r2 = px*px + py*py + pz*pz;
                 double r = sqrt(r2);
                 double l = sqrt(px*px + py*py);
+                if (r < 1e-6 || l < 1e-6)
+                    return false;
+
                 double alpha_pred = std::atan2(py, px);
-                double theta_pred = std::asin(pz / r);
+                double ratio = std::max(-1.0, std::min(1.0, pz / r));
+                double theta_pred = std::asin(ratio);
 
                 if (obs.has_alpha && obs.has_theta)
                 {
@@ -586,31 +944,246 @@ private:
     }
 
     // ═══════════════════════════════════════════════════════════
+    //  协方差维护
+    // ═══════════════════════════════════════════════════════════
+
+    void symmetrizeCov(Matrix6d &P) const
+    {
+        P = 0.5 * (P + P.transpose());
+        for (int i = 0; i < 6; ++i)
+        {
+            if (!std::isfinite(P(i, i)) || P(i, i) < 1e-9)
+                P(i, i) = 1e-9;
+        }
+    }
+
+    bool isUsableCovariance(const Matrix6d &P) const
+    {
+        if (!P.allFinite())
+            return false;
+
+        Matrix6d P_sym = 0.5 * (P + P.transpose());
+        for (int i = 0; i < 6; ++i)
+        {
+            if (!std::isfinite(P_sym(i, i)) || P_sym(i, i) <= 1e-9)
+                return false;
+        }
+
+        Eigen::LLT<Matrix6d> llt(P_sym);
+        return llt.info() == Eigen::Success;
+    }
+
+    // ═══════════════════════════════════════════════════════════
     //  观测更新函数
     // ═══════════════════════════════════════════════════════════
 
     // 当前时刻 EKF 更新: 观测时间 ≈ 当前预测时间, 直接执行标准 EKF 更新
     void applyCurrentUpdate(Filter &f, const Observation &obs)
     {
+        const double age = (f.stamp - obs.stamp).toSec();
         Eigen::VectorXd Z;
         Eigen::VectorXd residual;
         Eigen::MatrixXd H;
         Eigen::MatrixXd R_meas;
 
         if (!buildObsModel(f.X, obs, Z, residual, H, R_meas))
+        {
+            ++f.rejects;
+            logObservationRow("current_update", f, obs, 0, 0, 0,
+                              "build_obs_model_failed", age,
+                              std::numeric_limits<double>::quiet_NaN(),
+                              std::numeric_limits<double>::quiet_NaN(),
+                              std::numeric_limits<double>::quiet_NaN());
             return;
+        }
+
+        const double residual_norm = residual.norm();
+
+        // ── NIS gate: 拒绝异常观测 ──────────────────────────
+        Eigen::MatrixXd S = H * f.P * H.transpose() + R_meas;
+        Eigen::FullPivLU<Eigen::MatrixXd> lu(S);
+        if (!lu.isInvertible())
+        {
+            ++f.rejects;
+            logObservationRow("current_update", f, obs, 0, 0, 0,
+                              "innovation_cov_not_invertible", age,
+                              std::numeric_limits<double>::quiet_NaN(),
+                              residual_norm,
+                              std::numeric_limits<double>::quiet_NaN());
+            return;
+        }
+        const Eigen::MatrixXd S_inv = lu.inverse();
+        const double nis = residual.transpose() * S_inv * residual;
+        if (nis > max_nis_)
+        {
+            ++f.rejects;
+            logObservationRow("current_update", f, obs, 0, 0, 0,
+                              "nis_reject", age,
+                              std::numeric_limits<double>::quiet_NaN(),
+                              residual_norm,
+                              nis);
+            return;
+        }
 
         // 标准卡尔曼增益: K = P * H^T * (H * P * H^T + R)^{-1}
-        Eigen::MatrixXd K = f.P * H * (H * f.P * H.transpose() + R_meas).inverse();
+        Eigen::MatrixXd K = f.P * H.transpose() * S_inv;
         f.X += K * residual;
 
         // Joseph 形式协方差更新 (数值稳定性优于标准形式)
         Eigen::MatrixXd I_KH = Eigen::MatrixXd::Identity(6, 6) - K * H;
         f.P = I_KH * f.P * I_KH.transpose() + K * R_meas * K.transpose();
+        symmetrizeCov(f.P);
+        incrementAcceptedCounters(f, obs, false);
 
-        // 缓存 I_KH 到最新的历史记录 (用于延迟补偿重传播)
+        // 缓存 H, K, I_KH 到最新的历史记录 (用于延迟补偿重传播)
         if (!f.cache.empty())
-            f.cache.back().I_KH = I_KH;
+        {
+            f.cache.back().H = H;
+            f.cache.back().K = K;
+            // 累乘: 同一历史时刻多次 update 的 I_KH 组合
+            f.cache.back().I_KH = I_KH * f.cache.back().I_KH;
+        }
+
+        logObservationRow("current_update", f, obs, 1, 0, 1,
+                          "accepted", age,
+                          std::numeric_limits<double>::quiet_NaN(),
+                          residual_norm,
+                          nis);
+    }
+
+    void applyDelayedUpdate(Filter &f, const Observation &obs)
+    {
+        const double age = (f.stamp - obs.stamp).toSec();
+        if (f.cache.empty())
+        {
+            ++f.rejects;
+            logObservationRow("delayed_update", f, obs, 0, 1, 0,
+                              "empty_history_cache", age,
+                              std::numeric_limits<double>::quiet_NaN(),
+                              std::numeric_limits<double>::quiet_NaN(),
+                              std::numeric_limits<double>::quiet_NaN());
+            return;
+        }
+
+        // 从前往后找第一个 cache[i].stamp >= obs.stamp 的记录
+        int best_idx = -1;
+        double best_dt = std::numeric_limits<double>::max();
+        for (size_t i = 0; i < f.cache.size(); ++i)
+        {
+            double dt = (f.cache[i].stamp - obs.stamp).toSec();
+            if (dt >= 0.0)
+            {
+                best_idx = static_cast<int>(i);
+                best_dt = dt;
+                break;
+            }
+        }
+        if (best_idx < 0 || best_dt > max_history_match_dt_)
+        {
+            ++f.rejects;
+            logObservationRow("delayed_update", f, obs, 0, 1, 0,
+                              "history_match_failed", age,
+                              best_dt,
+                              std::numeric_limits<double>::quiet_NaN(),
+                              std::numeric_limits<double>::quiet_NaN());
+            return;
+        }
+
+        const History_Record &hist = f.cache[best_idx];
+
+        Eigen::VectorXd Zs;
+        Eigen::VectorXd residual;
+        Eigen::MatrixXd Hs;
+        Eigen::MatrixXd R_meas;
+
+        if (!buildObsModel(hist.X_pred, obs, Zs, residual, Hs, R_meas))
+        {
+            ++f.rejects;
+            logObservationRow("delayed_update", f, obs, 0, 1, 0,
+                              "build_obs_model_failed", age,
+                              best_dt,
+                              std::numeric_limits<double>::quiet_NaN(),
+                              std::numeric_limits<double>::quiet_NaN());
+            return;
+        }
+
+        // 在历史状态处计算 Kalman 增益
+        const double residual_norm = residual.norm();
+        Eigen::MatrixXd S = Hs * hist.P_pred * Hs.transpose() + R_meas;
+        Eigen::FullPivLU<Eigen::MatrixXd> lu(S);
+        if (!lu.isInvertible())
+        {
+            ++f.rejects;
+            logObservationRow("delayed_update", f, obs, 0, 1, 0,
+                              "innovation_cov_not_invertible", age,
+                              best_dt,
+                              residual_norm,
+                              std::numeric_limits<double>::quiet_NaN());
+            return;
+        }
+
+        const Eigen::MatrixXd S_inv = lu.inverse();
+        const double nis = residual.transpose() * S_inv * residual;
+        if (nis > max_nis_)
+        {
+            ++f.rejects;
+            logObservationRow("delayed_update", f, obs, 0, 1, 0,
+                              "nis_reject", age,
+                              best_dt,
+                              residual_norm,
+                              nis);
+            return;
+        }
+        Eigen::MatrixXd K_s = hist.P_pred * Hs.transpose() * S_inv;
+
+        // 修正量 = K_s * residual, 并用同一条 A/I_KH 链传播 K_s 到当前时刻。
+        // Wk 维度为 6 x m, m 是当前观测维度(DGO=3, UWB=1, Camera=1/2)。
+        Eigen::MatrixXd Wk = K_s;
+        for (size_t i = static_cast<size_t>(best_idx) + 1; i < f.cache.size(); ++i)
+        {
+            Wk = f.cache[i].A * Wk;
+            Wk = f.cache[i].I_KH * Wk;
+        }
+
+        Vector6d delta = Wk * residual;
+        if (!delta.allFinite() || !Wk.allFinite())
+        {
+            ++f.rejects;
+            logObservationRow("delayed_update", f, obs, 0, 1, 0,
+                              "nonfinite_delta_or_Wk", age,
+                              best_dt,
+                              residual_norm,
+                              nis);
+            return;
+        }
+
+        // 更新当前状态。
+        f.X += delta;
+        incrementAcceptedCounters(f, obs, true);
+
+        // 近似 delayed covariance update:
+        // P_k = P_k - W_k * S_s * W_k^T.
+        // 若该近似导致非法协方差, 保留状态修正但不污染 P。
+        Matrix6d P_new = f.P - Wk * S * Wk.transpose();
+        if (!isUsableCovariance(P_new))
+        {
+            ++f.delayed_p_skips;
+            logObservationRow("delayed_update", f, obs, 1, 1, 0,
+                              "accepted_state_only_p_rejected", age,
+                              best_dt,
+                              residual_norm,
+                              nis);
+            return;
+        }
+
+        f.P = P_new;
+        symmetrizeCov(f.P);
+
+        logObservationRow("delayed_update", f, obs, 1, 1, 1,
+                          "accepted", age,
+                          best_dt,
+                          residual_norm,
+                          nis);
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -618,7 +1191,7 @@ private:
     // ═══════════════════════════════════════════════════════════
 
     // 发布 DEKF 估计结果: /iris_{self}/dekf/iris_{target}
-    void publishFilter(const Filter &f)
+    void publishFilter(Filter &f)
     {
         if (!f.initialized)
             return;
@@ -648,6 +1221,8 @@ private:
         }
 
         f.pub.publish(msg);
+        ++f.publish_count;
+        logPublishRow(f);
     }
 };
 

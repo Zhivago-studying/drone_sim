@@ -6,5 +6,6 @@
     <param name="sigma_ax" value="0.80" />
     <param name="sigma_ay" value="0.80" />
     <param name="sigma_az" value="0.80" />
+    <param name="csv_dir" value="/tmp/my_dekf" />
   </node>
 </launch>

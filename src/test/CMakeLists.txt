@@ -163,6 +163,22 @@ target_link_libraries(ekf_dgo_test
   ${catkin_LIBRARIES}
 )
 
+add_executable(${PROJECT_NAME}_ekf_dgo_dekf_test_node
+  src/ekf_dgo_dekf_test.cpp
+)
+
+add_dependencies(${PROJECT_NAME}_ekf_dgo_dekf_test_node
+  ${catkin_EXPORTED_TARGETS}
+)
+
+target_link_libraries(${PROJECT_NAME}_ekf_dgo_dekf_test_node
+  ${catkin_LIBRARIES}
+)
+
+set_target_properties(${PROJECT_NAME}_ekf_dgo_dekf_test_node
+  PROPERTIES OUTPUT_NAME ekf_dgo_dekf_test PREFIX ""
+)
+
 ## Declare a C++ library
 # add_library(${PROJECT_NAME}
 #   src/${PROJECT_NAME}/test.cpp
