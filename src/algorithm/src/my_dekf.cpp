@@ -94,6 +94,13 @@ public:
         pnh_.param("max_history_match_dt", max_history_match_dt_, 0.06);
         pnh_.param("future_tolerance", future_tolerance_, 0.02);
         pnh_.param("max_nis", max_nis_, 25.0);
+        pnh_.param("max_nis_dgo", max_nis_dgo_, 16.3);
+        pnh_.param("max_nis_uwb", max_nis_uwb_, 9.0);
+        pnh_.param("max_nis_camera_1d", max_nis_camera_1d_, 9.0);
+        pnh_.param("max_nis_camera_2d", max_nis_camera_2d_, 13.8);
+        pnh_.param("uwb_residual_gate", uwb_residual_gate_, 0.8);
+        pnh_.param("dgo_residual_gate", dgo_residual_gate_, 2.0);
+        pnh_.param("camera_residual_gate", camera_residual_gate_, 0.5);
         pnh_.param("max_pending", max_pending_, 100);
         pnh_.param("history_keep_time", history_keep_time_, 2.0);
 
@@ -140,6 +147,18 @@ public:
                           max_observation_delay_, current_delay_threshold_);
                 ok = false;
             }
+            if (max_nis_dgo_ <= 0.0 || max_nis_uwb_ <= 0.0 ||
+                max_nis_camera_1d_ <= 0.0 || max_nis_camera_2d_ <= 0.0)
+            {
+                ROS_FATAL("[DEKF] per-observation NIS gates must be > 0");
+                ok = false;
+            }
+            if (uwb_residual_gate_ <= 0.0 || dgo_residual_gate_ <= 0.0 ||
+                camera_residual_gate_ <= 0.0)
+            {
+                ROS_FATAL("[DEKF] residual gates must be > 0");
+                ok = false;
+            }
             if (!ok)
             {
                 ros::shutdown();
@@ -164,6 +183,12 @@ public:
                  initial_offsets_[1].x(), initial_offsets_[1].y(), initial_offsets_[1].z(),
                  initial_offsets_[2].x(), initial_offsets_[2].y(), initial_offsets_[2].z(),
                  initial_offsets_[3].x(), initial_offsets_[3].y(), initial_offsets_[3].z());
+        ROS_INFO("[DEKF] gates: max_nis legacy=%.2f dgo=%.2f uwb=%.2f "
+                 "camera_1d=%.2f camera_2d=%.2f residual_gate dgo=%.2fm "
+                 "uwb=%.2fm camera=%.2frad",
+                 max_nis_, max_nis_dgo_, max_nis_uwb_,
+                 max_nis_camera_1d_, max_nis_camera_2d_,
+                 dgo_residual_gate_, uwb_residual_gate_, camera_residual_gate_);
 
         // 过程噪声矩阵 Q
         Q_.setZero();
@@ -333,6 +358,13 @@ private:
     double max_history_match_dt_ = 0.06;
     double future_tolerance_ = 0.02;
     double max_nis_ = 25.0;
+    double max_nis_dgo_ = 16.3;
+    double max_nis_uwb_ = 9.0;
+    double max_nis_camera_1d_ = 9.0;
+    double max_nis_camera_2d_ = 13.8;
+    double uwb_residual_gate_ = 0.8;
+    double dgo_residual_gate_ = 2.0;
+    double camera_residual_gate_ = 0.5;
     int max_pending_ = 100;
     double history_keep_time_ = 2.0;
     bool initialized_ = false;
@@ -537,6 +569,63 @@ private:
                 ++f.camera_updates;
                 break;
         }
+    }
+
+    double nisGateForObservation(const Observation &obs, int residual_dim) const
+    {
+        switch (obs.type)
+        {
+            case ObsType::DGO:
+                return max_nis_dgo_;
+            case ObsType::UWB_RANGE:
+                return max_nis_uwb_;
+            case ObsType::CAMERA_BEARING:
+                return residual_dim <= 1 ? max_nis_camera_1d_ : max_nis_camera_2d_;
+        }
+        return max_nis_;
+    }
+
+    bool passHardResidualGate(const Observation &obs,
+                              const Eigen::VectorXd &residual,
+                              std::string &reason) const
+    {
+        if (!residual.allFinite())
+        {
+            reason = "nonfinite_residual";
+            return false;
+        }
+
+        switch (obs.type)
+        {
+            case ObsType::DGO:
+                if (residual.norm() > dgo_residual_gate_)
+                {
+                    reason = "dgo_residual_gate_reject";
+                    return false;
+                }
+                return true;
+
+            case ObsType::UWB_RANGE:
+                if (residual.size() < 1 ||
+                    std::abs(residual(0)) > uwb_residual_gate_)
+                {
+                    reason = "uwb_residual_gate_reject";
+                    return false;
+                }
+                return true;
+
+            case ObsType::CAMERA_BEARING:
+                if (residual.size() < 1 ||
+                    residual.cwiseAbs().maxCoeff() > camera_residual_gate_)
+                {
+                    reason = "camera_residual_gate_reject";
+                    return false;
+                }
+                return true;
+        }
+
+        reason = "unknown_observation_type";
+        return false;
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -998,6 +1087,17 @@ private:
         }
 
         const double residual_norm = residual.norm();
+        std::string gate_reason;
+        if (!passHardResidualGate(obs, residual, gate_reason))
+        {
+            ++f.rejects;
+            logObservationRow("current_update", f, obs, 0, 0, 0,
+                              gate_reason, age,
+                              std::numeric_limits<double>::quiet_NaN(),
+                              residual_norm,
+                              std::numeric_limits<double>::quiet_NaN());
+            return;
+        }
 
         // ── NIS gate: 拒绝异常观测 ──────────────────────────
         Eigen::MatrixXd S = H * f.P * H.transpose() + R_meas;
@@ -1014,7 +1114,8 @@ private:
         }
         const Eigen::MatrixXd S_inv = lu.inverse();
         const double nis = residual.transpose() * S_inv * residual;
-        if (nis > max_nis_)
+        const double nis_gate = nisGateForObservation(obs, residual.size());
+        if (nis > nis_gate)
         {
             ++f.rejects;
             logObservationRow("current_update", f, obs, 0, 0, 0,
@@ -1109,6 +1210,18 @@ private:
 
         // 在历史状态处计算 Kalman 增益
         const double residual_norm = residual.norm();
+        std::string gate_reason;
+        if (!passHardResidualGate(obs, residual, gate_reason))
+        {
+            ++f.rejects;
+            logObservationRow("delayed_update", f, obs, 0, 1, 0,
+                              gate_reason, age,
+                              best_dt,
+                              residual_norm,
+                              std::numeric_limits<double>::quiet_NaN());
+            return;
+        }
+
         Eigen::MatrixXd S = Hs * hist.P_pred * Hs.transpose() + R_meas;
         Eigen::FullPivLU<Eigen::MatrixXd> lu(S);
         if (!lu.isInvertible())
@@ -1124,7 +1237,8 @@ private:
 
         const Eigen::MatrixXd S_inv = lu.inverse();
         const double nis = residual.transpose() * S_inv * residual;
-        if (nis > max_nis_)
+        const double nis_gate = nisGateForObservation(obs, residual.size());
+        if (nis > nis_gate)
         {
             ++f.rejects;
             logObservationRow("delayed_update", f, obs, 0, 1, 0,
@@ -1157,27 +1271,29 @@ private:
             return;
         }
 
-        // 更新当前状态。
-        f.X += delta;
-        incrementAcceptedCounters(f, obs, true);
+        // 原子化 delayed update:
+        // 先同时计算 X_new/P_new, 只有协方差合法时才提交状态和协方差。
+        const Vector6d X_new = f.X + delta;
 
         // 近似 delayed covariance update:
         // P_k = P_k - W_k * S_s * W_k^T.
-        // 若该近似导致非法协方差, 保留状态修正但不污染 P。
-        Matrix6d P_new = f.P - Wk * S * Wk.transpose();
-        if (!isUsableCovariance(P_new))
+        Matrix6d P_new = f.P - (Wk * S * Wk.transpose());
+        if (!X_new.allFinite() || !isUsableCovariance(P_new))
         {
             ++f.delayed_p_skips;
-            logObservationRow("delayed_update", f, obs, 1, 1, 0,
-                              "accepted_state_only_p_rejected", age,
+            ++f.rejects;
+            logObservationRow("delayed_update", f, obs, 0, 1, 0,
+                              "atomic_update_rejected", age,
                               best_dt,
                               residual_norm,
                               nis);
             return;
         }
 
+        f.X = X_new;
         f.P = P_new;
         symmetrizeCov(f.P);
+        incrementAcceptedCounters(f, obs, true);
 
         logObservationRow("delayed_update", f, obs, 1, 1, 1,
                           "accepted", age,
