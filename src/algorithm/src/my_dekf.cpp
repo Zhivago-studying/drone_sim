@@ -111,6 +111,8 @@ public:
         pnh_.param("dgo_recovery_pos_std", dgo_recovery_pos_std_, 0.20);
         pnh_.param("dgo_recovery_vel_std", dgo_recovery_vel_std_, 0.50);
         pnh_.param("clear_history_on_recovery", clear_history_on_recovery_, true);
+        pnh_.param("max_position_cov", max_position_cov_, 2.0);
+        pnh_.param("max_velocity_cov", max_velocity_cov_, 1.0);
         pnh_.param("max_pending", max_pending_, 100);
         pnh_.param("history_keep_time", history_keep_time_, 2.0);
 
@@ -179,6 +181,12 @@ public:
                 ROS_FATAL("[DEKF] recovery / anchor parameters are invalid");
                 ok = false;
             }
+            if (max_position_cov_ <= 0.0 || max_velocity_cov_ <= 0.0)
+            {
+                ROS_FATAL("[DEKF] covariance bounds must be > 0: pos=%.3f vel=%.3f",
+                          max_position_cov_, max_velocity_cov_);
+                ok = false;
+            }
             if (!ok)
             {
                 ros::shutdown();
@@ -221,6 +229,8 @@ public:
                  dgo_recovery_pos_std_,
                  dgo_recovery_vel_std_,
                  clear_history_on_recovery_ ? 1 : 0);
+        ROS_INFO("[DEKF] covariance bounds: max_position_cov=%.3f max_velocity_cov=%.3f",
+                 max_position_cov_, max_velocity_cov_);
 
         // 过程噪声矩阵 Q
         Q_.setZero();
@@ -412,6 +422,8 @@ private:
     double dgo_recovery_pos_std_ = 0.20;
     double dgo_recovery_vel_std_ = 0.50;
     bool clear_history_on_recovery_ = true;
+    double max_position_cov_ = 2.0;
+    double max_velocity_cov_ = 1.0;
     int max_pending_ = 100;
     double history_keep_time_ = 2.0;
     bool initialized_ = false;
@@ -510,6 +522,7 @@ private:
 
         csv_ << "time,event,target,obs_type,accepted,delayed,p_updated,reason,"
              << "obs_stamp,filter_stamp,age,history_match_dt,residual_norm,nis,"
+             << "gain_consistency_error,"
              << "x,y,z,vx,vy,vz,"
              << "Pxx,Pyy,Pzz,Pvxvx,Pvyvy,Pvzvz,"
              << "pending_size,cache_size,publish_count,current_updates,delayed_updates,"
@@ -531,7 +544,8 @@ private:
                    double age,
                    double history_match_dt,
                    double residual_norm,
-                   double nis)
+                   double nis,
+                   double gain_consistency_error = std::numeric_limits<double>::quiet_NaN())
     {
         if (!csv_.is_open())
             return;
@@ -559,6 +573,7 @@ private:
              << history_match_dt << ","
              << residual_norm << ","
              << nis << ","
+             << gain_consistency_error << ","
              << f.X[0] << "," << f.X[1] << "," << f.X[2] << ","
              << f.X[3] << "," << f.X[4] << "," << f.X[5] << ","
              << f.P(0, 0) << "," << f.P(1, 1) << "," << f.P(2, 2) << ","
@@ -590,12 +605,14 @@ private:
                            double age,
                            double history_match_dt,
                            double residual_norm,
-                           double nis)
+                           double nis,
+                           double gain_consistency_error = std::numeric_limits<double>::quiet_NaN())
     {
         const double obs_stamp =
             obs.stamp.isZero() ? std::numeric_limits<double>::quiet_NaN() : obs.stamp.toSec();
         logCsvRow(event, f, obsTypeName(obs.type), accepted, delayed, p_updated,
-                  reason, obs_stamp, age, history_match_dt, residual_norm, nis);
+                  reason, obs_stamp, age, history_match_dt, residual_norm, nis,
+                  gain_consistency_error);
     }
 
     void logPublishRow(const Filter &f)
@@ -1248,6 +1265,25 @@ private:
         return llt.info() == Eigen::Success;
     }
 
+    bool isBoundedCovariance(const Matrix6d &P) const
+    {
+        if (!isUsableCovariance(P))
+            return false;
+
+        Matrix6d P_sym = 0.5 * (P + P.transpose());
+        for (int i = 0; i < 3; ++i)
+        {
+            if (P_sym(i, i) > max_position_cov_)
+                return false;
+        }
+        for (int i = 3; i < 6; ++i)
+        {
+            if (P_sym(i, i) > max_velocity_cov_)
+                return false;
+        }
+        return true;
+    }
+
     // ═══════════════════════════════════════════════════════════
     //  观测更新函数
     // ═══════════════════════════════════════════════════════════
@@ -1488,20 +1524,32 @@ private:
         }
         Eigen::MatrixXd K_s = hist.P_pred * Hs.transpose() * S_inv;
 
-        // 修正量 = K_s * residual, 并用同一条 A/I_KH 链传播 K_s 到当前时刻。
+        // 修正量 = K_s * residual，并用同一条 A/I_KH 链传播到当前时刻。
+        // 这里 hist.X_pred / hist.P_pred 已经对应 hist.stamp，因此 L 从 hist.stamp
+        // 之后的 cache 记录开始传播，不能再额外乘 hist.A。
         // Wk 维度为 6 x m, m 是当前观测维度(DGO=3, UWB=1, Camera=1/2)。
-        // Mk = A_{k-1}*(I-K_{k-1}*H_{k-1})*...*A_{s+1}*(I-K_{s+1}*H_{s+1}) 为传播矩阵
-        // L  = Mk * A_s, 用于 covariance 的 Joseph 更新
-        Matrix6d Mk = Matrix6d::Identity();
+        Matrix6d L = Matrix6d::Identity();
         Eigen::MatrixXd Wk = K_s;
         for (size_t i = static_cast<size_t>(best_idx) + 1; i < f.cache.size(); ++i)
         {
-            Mk = f.cache[i].A * Mk;
-            Mk = f.cache[i].I_KH * Mk;
+            L = f.cache[i].A * L;
+            L = f.cache[i].I_KH * L;
             Wk = f.cache[i].A * Wk;
             Wk = f.cache[i].I_KH * Wk;
         }
-        const Matrix6d L = Mk * hist.A;
+
+        const double gain_consistency_error = (Wk - L * K_s).norm();
+        if (!std::isfinite(gain_consistency_error) || gain_consistency_error > 1e-8)
+        {
+            ROS_WARN_THROTTLE(1.0,
+                              "[DEKF] delayed gain consistency error target=%d type=%s "
+                              "err=%.3e cache_idx=%d cache_size=%lu",
+                              f.target_id,
+                              obsTypeName(obs.type),
+                              gain_consistency_error,
+                              best_idx,
+                              static_cast<unsigned long>(f.cache.size()));
+        }
 
         Vector6d delta = Wk * residual;
         if (!delta.allFinite() || !Wk.allFinite())
@@ -1511,7 +1559,8 @@ private:
                               "nonfinite_delta_or_Wk", age,
                               best_dt,
                               residual_norm,
-                              nis);
+                              nis,
+                              gain_consistency_error);
             return;
         }
 
@@ -1519,19 +1568,47 @@ private:
         // 先同时计算 X_new/P_new, 只有协方差合法时才提交状态和协方差。
         const Vector6d X_new = f.X + delta;
 
-        // 近似 delayed covariance update:
-        // P_k = P_k - W_k * S_s * W_k^T.
-        Matrix6d P_new = f.P - L * hist.P_pred * L.transpose() + (L - Wk * Hs) * hist.P_pred * (L - Wk * Hs).transpose()
-                            + Wk * R_meas * Wk.transpose();
-        if (!X_new.allFinite() || !isUsableCovariance(P_new))
+        // 延迟观测的 Joseph 协方差更新:
+        // P_k = P_k - L·P_s·Lᵀ + (L-W·H_s)·P_s·(L-W·H_s)ᵀ + W·R_s·Wᵀ
+        Matrix6d P_new = f.P - L * hist.P_pred * L.transpose()
+                         + (L - Wk * Hs) * hist.P_pred * (L - Wk * Hs).transpose()
+                         + Wk * R_meas * Wk.transpose();
+        if (!X_new.allFinite())
         {
             ++f.delayed_p_skips;
+            ++f.rejects;
+            logObservationRow("delayed_update", f, obs, 0, 1, 0,
+                              "atomic_state_nonfinite", age,
+                              best_dt,
+                              residual_norm,
+                              nis,
+                              gain_consistency_error);
+            return;
+        }
+
+        if (!isBoundedCovariance(P_new))
+        {
+            ++f.delayed_p_skips;
+            if (obs.type == ObsType::DGO)
+            {
+                f.X = X_new;
+                incrementAcceptedCounters(f, obs, true);
+                logObservationRow("delayed_update", f, obs, 1, 1, 0,
+                                  "accepted_x_only_p_invalid_or_unbounded", age,
+                                  best_dt,
+                                  residual_norm,
+                                  nis,
+                                  gain_consistency_error);
+                return;
+            }
+
             ++f.rejects;
             logObservationRow("delayed_update", f, obs, 0, 1, 0,
                               "atomic_update_rejected", age,
                               best_dt,
                               residual_norm,
-                              nis);
+                              nis,
+                              gain_consistency_error);
             return;
         }
 
@@ -1544,7 +1621,8 @@ private:
                           "accepted", age,
                           best_dt,
                           residual_norm,
-                          nis);
+                          nis,
+                          gain_consistency_error);
     }
 
     // ═══════════════════════════════════════════════════════════

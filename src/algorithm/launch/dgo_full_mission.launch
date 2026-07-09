@@ -59,6 +59,8 @@
   <arg name="dekf_dgo_recovery_pos_std" default="0.20" />
   <arg name="dekf_dgo_recovery_vel_std" default="0.50" />
   <arg name="dekf_clear_history_on_recovery" default="true" />
+  <arg name="dekf_max_position_cov" default="2.0" />
+  <arg name="dekf_max_velocity_cov" default="1.0" />
   <arg name="dekf_max_pending" default="100" />
   <arg name="dekf_max_history_match_dt" default="0.06" />
   <arg name="dekf_max_observation_delay" default="0.60" />
@@ -211,6 +213,8 @@
       <param name="dgo_recovery_pos_std" value="$(arg dekf_dgo_recovery_pos_std)" />
       <param name="dgo_recovery_vel_std" value="$(arg dekf_dgo_recovery_vel_std)" />
       <param name="clear_history_on_recovery" value="$(arg dekf_clear_history_on_recovery)" />
+      <param name="max_position_cov" value="$(arg dekf_max_position_cov)" />
+      <param name="max_velocity_cov" value="$(arg dekf_max_velocity_cov)" />
       <param name="max_pending" value="$(arg dekf_max_pending)" />
       <param name="history_keep_time" value="$(arg dekf_history_keep_time)" />
       <param name="max_history_match_dt" value="$(arg dekf_max_history_match_dt)" />
@@ -315,6 +319,8 @@
       <param name="dgo_recovery_pos_std" value="$(arg dekf_dgo_recovery_pos_std)" />
       <param name="dgo_recovery_vel_std" value="$(arg dekf_dgo_recovery_vel_std)" />
       <param name="clear_history_on_recovery" value="$(arg dekf_clear_history_on_recovery)" />
+      <param name="max_position_cov" value="$(arg dekf_max_position_cov)" />
+      <param name="max_velocity_cov" value="$(arg dekf_max_velocity_cov)" />
       <param name="max_pending" value="$(arg dekf_max_pending)" />
       <param name="history_keep_time" value="$(arg dekf_history_keep_time)" />
       <param name="max_history_match_dt" value="$(arg dekf_max_history_match_dt)" />
@@ -419,6 +425,8 @@
       <param name="dgo_recovery_pos_std" value="$(arg dekf_dgo_recovery_pos_std)" />
       <param name="dgo_recovery_vel_std" value="$(arg dekf_dgo_recovery_vel_std)" />
       <param name="clear_history_on_recovery" value="$(arg dekf_clear_history_on_recovery)" />
+      <param name="max_position_cov" value="$(arg dekf_max_position_cov)" />
+      <param name="max_velocity_cov" value="$(arg dekf_max_velocity_cov)" />
       <param name="max_pending" value="$(arg dekf_max_pending)" />
       <param name="history_keep_time" value="$(arg dekf_history_keep_time)" />
       <param name="max_history_match_dt" value="$(arg dekf_max_history_match_dt)" />
@@ -523,6 +531,8 @@
       <param name="dgo_recovery_pos_std" value="$(arg dekf_dgo_recovery_pos_std)" />
       <param name="dgo_recovery_vel_std" value="$(arg dekf_dgo_recovery_vel_std)" />
       <param name="clear_history_on_recovery" value="$(arg dekf_clear_history_on_recovery)" />
+      <param name="max_position_cov" value="$(arg dekf_max_position_cov)" />
+      <param name="max_velocity_cov" value="$(arg dekf_max_velocity_cov)" />
       <param name="max_pending" value="$(arg dekf_max_pending)" />
       <param name="history_keep_time" value="$(arg dekf_history_keep_time)" />
       <param name="max_history_match_dt" value="$(arg dekf_max_history_match_dt)" />
