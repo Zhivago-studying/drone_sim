@@ -1490,12 +1490,18 @@ private:
 
         // 修正量 = K_s * residual, 并用同一条 A/I_KH 链传播 K_s 到当前时刻。
         // Wk 维度为 6 x m, m 是当前观测维度(DGO=3, UWB=1, Camera=1/2)。
+        // Mk = A_{k-1}*(I-K_{k-1}*H_{k-1})*...*A_{s+1}*(I-K_{s+1}*H_{s+1}) 为传播矩阵
+        // L  = Mk * A_s, 用于 covariance 的 Joseph 更新
+        Matrix6d Mk = Matrix6d::Identity();
         Eigen::MatrixXd Wk = K_s;
         for (size_t i = static_cast<size_t>(best_idx) + 1; i < f.cache.size(); ++i)
         {
+            Mk = f.cache[i].A * Mk;
+            Mk = f.cache[i].I_KH * Mk;
             Wk = f.cache[i].A * Wk;
             Wk = f.cache[i].I_KH * Wk;
         }
+        const Matrix6d L = Mk * hist.A;
 
         Vector6d delta = Wk * residual;
         if (!delta.allFinite() || !Wk.allFinite())
@@ -1515,7 +1521,8 @@ private:
 
         // 近似 delayed covariance update:
         // P_k = P_k - W_k * S_s * W_k^T.
-        Matrix6d P_new = f.P - (Wk * S * Wk.transpose());
+        Matrix6d P_new = f.P - L * hist.P_pred * L.transpose() + (L - Wk * Hs) * hist.P_pred * (L - Wk * Hs).transpose()
+                            + Wk * R_meas * Wk.transpose();
         if (!X_new.allFinite() || !isUsableCovariance(P_new))
         {
             ++f.delayed_p_skips;
