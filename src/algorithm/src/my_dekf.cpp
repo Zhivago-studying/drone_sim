@@ -104,13 +104,14 @@ public:
         pnh_.param("camera_residual_gate", camera_residual_gate_, 0.5);
         pnh_.param("require_direction_anchor_for_uwb", require_direction_anchor_for_uwb_, true);
         pnh_.param("uwb_anchor_max_age", uwb_anchor_max_age_, 0.50);
-        pnh_.param("enable_dgo_recovery", enable_dgo_recovery_, true);
-        pnh_.param("dgo_recovery_gate", dgo_recovery_gate_, 1.0);
-        pnh_.param("dgo_recovery_count_threshold", dgo_recovery_count_threshold_, 3);
+        pnh_.param("enable_dgo_recovery", enable_dgo_recovery_, false);
+        pnh_.param("dgo_recovery_gate", dgo_recovery_gate_, 3.0);
+        pnh_.param("dgo_recovery_count_threshold", dgo_recovery_count_threshold_, 6);
         pnh_.param("dgo_recovery_consistency_gate", dgo_recovery_consistency_gate_, 0.50);
         pnh_.param("dgo_recovery_pos_std", dgo_recovery_pos_std_, 0.20);
         pnh_.param("dgo_recovery_vel_std", dgo_recovery_vel_std_, 0.50);
         pnh_.param("clear_history_on_recovery", clear_history_on_recovery_, true);
+        pnh_.param("allow_dgo_x_only_on_bad_cov", allow_dgo_x_only_on_bad_cov_, false);
         pnh_.param("max_position_cov", max_position_cov_, 2.0);
         pnh_.param("max_velocity_cov", max_velocity_cov_, 1.0);
         pnh_.param("max_pending", max_pending_, 100);
@@ -219,7 +220,8 @@ public:
                  dgo_residual_gate_, uwb_residual_gate_, camera_residual_gate_);
         ROS_INFO("[DEKF] recovery/anchor: require_uwb_anchor=%d uwb_anchor_max_age=%.2fs "
                  "enable_dgo_recovery=%d recovery_gate=%.2fm count=%d consistency=%.2fm "
-                 "reset_std_pos=%.2fm reset_std_vel=%.2fm clear_history=%d",
+                 "reset_std_pos=%.2fm reset_std_vel=%.2fm clear_history=%d "
+                 "allow_dgo_x_only_on_bad_cov=%d",
                  require_direction_anchor_for_uwb_ ? 1 : 0,
                  uwb_anchor_max_age_,
                  enable_dgo_recovery_ ? 1 : 0,
@@ -228,7 +230,8 @@ public:
                  dgo_recovery_consistency_gate_,
                  dgo_recovery_pos_std_,
                  dgo_recovery_vel_std_,
-                 clear_history_on_recovery_ ? 1 : 0);
+                 clear_history_on_recovery_ ? 1 : 0,
+                 allow_dgo_x_only_on_bad_cov_ ? 1 : 0);
         ROS_INFO("[DEKF] covariance bounds: max_position_cov=%.3f max_velocity_cov=%.3f",
                  max_position_cov_, max_velocity_cov_);
 
@@ -415,13 +418,14 @@ private:
     double camera_residual_gate_ = 0.5;
     bool require_direction_anchor_for_uwb_ = true;
     double uwb_anchor_max_age_ = 0.50;
-    bool enable_dgo_recovery_ = true;
-    double dgo_recovery_gate_ = 1.0;
-    int dgo_recovery_count_threshold_ = 3;
+    bool enable_dgo_recovery_ = false;
+    double dgo_recovery_gate_ = 3.0;
+    int dgo_recovery_count_threshold_ = 6;
     double dgo_recovery_consistency_gate_ = 0.50;
     double dgo_recovery_pos_std_ = 0.20;
     double dgo_recovery_vel_std_ = 0.50;
     bool clear_history_on_recovery_ = true;
+    bool allow_dgo_x_only_on_bad_cov_ = false;
     double max_position_cov_ = 2.0;
     double max_velocity_cov_ = 1.0;
     int max_pending_ = 100;
@@ -1589,7 +1593,7 @@ private:
         if (!isBoundedCovariance(P_new))
         {
             ++f.delayed_p_skips;
-            if (obs.type == ObsType::DGO)
+            if (allow_dgo_x_only_on_bad_cov_ && obs.type == ObsType::DGO)
             {
                 f.X = X_new;
                 incrementAcceptedCounters(f, obs, true);
@@ -1604,7 +1608,7 @@ private:
 
             ++f.rejects;
             logObservationRow("delayed_update", f, obs, 0, 1, 0,
-                              "atomic_update_rejected", age,
+                              "atomic_update_rejected_bad_cov", age,
                               best_dt,
                               residual_norm,
                               nis,
