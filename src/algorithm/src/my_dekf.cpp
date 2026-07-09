@@ -104,10 +104,11 @@ public:
         pnh_.param("camera_residual_gate", camera_residual_gate_, 0.5);
         pnh_.param("require_direction_anchor_for_uwb", require_direction_anchor_for_uwb_, true);
         pnh_.param("uwb_anchor_max_age", uwb_anchor_max_age_, 0.50);
-        pnh_.param("enable_dgo_recovery", enable_dgo_recovery_, false);
+        pnh_.param("enable_dgo_recovery", enable_dgo_recovery_, true);
         pnh_.param("dgo_recovery_gate", dgo_recovery_gate_, 3.0);
-        pnh_.param("dgo_recovery_count_threshold", dgo_recovery_count_threshold_, 6);
+        pnh_.param("dgo_recovery_count_threshold", dgo_recovery_count_threshold_, 3);
         pnh_.param("dgo_recovery_consistency_gate", dgo_recovery_consistency_gate_, 0.50);
+        pnh_.param("dgo_recovery_cooldown", dgo_recovery_cooldown_, 1.0);
         pnh_.param("dgo_recovery_pos_std", dgo_recovery_pos_std_, 0.20);
         pnh_.param("dgo_recovery_vel_std", dgo_recovery_vel_std_, 0.50);
         pnh_.param("clear_history_on_recovery", clear_history_on_recovery_, true);
@@ -176,6 +177,7 @@ public:
                 dgo_recovery_gate_ <= 0.0 ||
                 dgo_recovery_count_threshold_ < 1 ||
                 dgo_recovery_consistency_gate_ <= 0.0 ||
+                dgo_recovery_cooldown_ < 0.0 ||
                 dgo_recovery_pos_std_ <= 0.0 ||
                 dgo_recovery_vel_std_ <= 0.0)
             {
@@ -219,7 +221,7 @@ public:
                  max_nis_camera_1d_, max_nis_camera_2d_,
                  dgo_residual_gate_, uwb_residual_gate_, camera_residual_gate_);
         ROS_INFO("[DEKF] recovery/anchor: require_uwb_anchor=%d uwb_anchor_max_age=%.2fs "
-                 "enable_dgo_recovery=%d recovery_gate=%.2fm count=%d consistency=%.2fm "
+                 "enable_dgo_recovery=%d recovery_gate=%.2fm count=%d consistency=%.2fm cooldown=%.2fs "
                  "reset_std_pos=%.2fm reset_std_vel=%.2fm clear_history=%d "
                  "allow_dgo_x_only_on_bad_cov=%d",
                  require_direction_anchor_for_uwb_ ? 1 : 0,
@@ -228,6 +230,7 @@ public:
                  dgo_recovery_gate_,
                  dgo_recovery_count_threshold_,
                  dgo_recovery_consistency_gate_,
+                 dgo_recovery_cooldown_,
                  dgo_recovery_pos_std_,
                  dgo_recovery_vel_std_,
                  clear_history_on_recovery_ ? 1 : 0,
@@ -360,6 +363,7 @@ private:
         size_t recovery_resets = 0;
 
         ros::Time last_direction_anchor_stamp;
+        ros::Time last_recovery_reset_stamp;
         int dgo_recovery_count = 0;
         bool has_last_recovery_dgo = false;
         Eigen::Vector3d last_recovery_dgo_position = Eigen::Vector3d::Zero();
@@ -418,10 +422,11 @@ private:
     double camera_residual_gate_ = 0.5;
     bool require_direction_anchor_for_uwb_ = true;
     double uwb_anchor_max_age_ = 0.50;
-    bool enable_dgo_recovery_ = false;
+    bool enable_dgo_recovery_ = true;
     double dgo_recovery_gate_ = 3.0;
-    int dgo_recovery_count_threshold_ = 6;
+    int dgo_recovery_count_threshold_ = 3;
     double dgo_recovery_consistency_gate_ = 0.50;
+    double dgo_recovery_cooldown_ = 1.0;
     double dgo_recovery_pos_std_ = 0.20;
     double dgo_recovery_vel_std_ = 0.50;
     bool clear_history_on_recovery_ = true;
@@ -532,7 +537,7 @@ private:
              << "pending_size,cache_size,publish_count,current_updates,delayed_updates,"
              << "dgo_updates,uwb_updates,camera_updates,rejects,delayed_p_skips,"
              << "future_requeues,old_drops,recovery_resets,dgo_recovery_count,"
-             << "last_direction_anchor_age\n";
+             << "last_direction_anchor_age,last_recovery_reset_age\n";
 
         ROS_INFO("[DEKF] debug CSV: %s", path.c_str());
     }
@@ -561,6 +566,10 @@ private:
             f.last_direction_anchor_stamp.isZero() || f.stamp.isZero()
                 ? nan
                 : (f.stamp - f.last_direction_anchor_stamp).toSec();
+        const double recovery_reset_age =
+            f.last_recovery_reset_stamp.isZero() || f.stamp.isZero()
+                ? nan
+                : (f.stamp - f.last_recovery_reset_stamp).toSec();
 
         csv_ << std::fixed << std::setprecision(9)
              << t << ","
@@ -596,7 +605,8 @@ private:
              << f.old_drops << ","
              << f.recovery_resets << ","
              << f.dgo_recovery_count << ","
-             << anchor_age << "\n";
+             << anchor_age << ","
+             << recovery_reset_age << "\n";
     }
 
     void logObservationRow(const std::string &event,
@@ -688,6 +698,7 @@ private:
         symmetrizeCov(f.P);
 
         ++f.recovery_resets;
+        f.last_recovery_reset_stamp = f.stamp;
         incrementAcceptedCounters(f, obs, delayed);
         markDirectionAnchor(f);
 
@@ -723,6 +734,22 @@ private:
             !obs.position.allFinite() || residual_norm < dgo_recovery_gate_)
         {
             return false;
+        }
+
+        if (!f.last_recovery_reset_stamp.isZero() && !f.stamp.isZero())
+        {
+            const double since_reset = (f.stamp - f.last_recovery_reset_stamp).toSec();
+            if (std::isfinite(since_reset) &&
+                since_reset >= 0.0 &&
+                since_reset < dgo_recovery_cooldown_)
+            {
+                ++f.rejects;
+                logObservationRow(delayed ? "delayed_update" : "current_update",
+                                  f, obs, 0, delayed ? 1 : 0, 0,
+                                  "dgo_recovery_cooldown_after_" + source_reason,
+                                  age, history_match_dt, residual_norm, nis);
+                return true;
+            }
         }
 
         bool consistent = true;

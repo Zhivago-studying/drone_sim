@@ -48,10 +48,11 @@
   <arg name="dekf_camera_residual_gate" default="0.5" />
   <arg name="dekf_require_direction_anchor_for_uwb" default="true" />
   <arg name="dekf_uwb_anchor_max_age" default="0.50" />
-  <arg name="dekf_enable_dgo_recovery" default="false" />
+  <arg name="dekf_enable_dgo_recovery" default="true" />
   <arg name="dekf_dgo_recovery_gate" default="3.0" />
-  <arg name="dekf_dgo_recovery_count_threshold" default="6" />
+  <arg name="dekf_dgo_recovery_count_threshold" default="3" />
   <arg name="dekf_dgo_recovery_consistency_gate" default="0.50" />
+  <arg name="dekf_dgo_recovery_cooldown" default="1.0" />
   <arg name="dekf_dgo_recovery_pos_std" default="0.20" />
   <arg name="dekf_dgo_recovery_vel_std" default="0.50" />
   <arg name="dekf_clear_history_on_recovery" default="true" />
@@ -124,6 +125,7 @@
     <arg name="dekf_dgo_recovery_gate" value="$(arg dekf_dgo_recovery_gate)" />
     <arg name="dekf_dgo_recovery_count_threshold" value="$(arg dekf_dgo_recovery_count_threshold)" />
     <arg name="dekf_dgo_recovery_consistency_gate" value="$(arg dekf_dgo_recovery_consistency_gate)" />
+    <arg name="dekf_dgo_recovery_cooldown" value="$(arg dekf_dgo_recovery_cooldown)" />
     <arg name="dekf_dgo_recovery_pos_std" value="$(arg dekf_dgo_recovery_pos_std)" />
     <arg name="dekf_dgo_recovery_vel_std" value="$(arg dekf_dgo_recovery_vel_std)" />
     <arg name="dekf_clear_history_on_recovery" value="$(arg dekf_clear_history_on_recovery)" />
