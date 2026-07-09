@@ -42,6 +42,7 @@
 #include <std_msgs/UInt8.h>
 #include <geometry_msgs/Point.h>
 #include <Eigen/Dense>
+#include <algorithm>
 #include <cerrno>
 #include <cmath>
 #include <deque>
@@ -101,6 +102,15 @@ public:
         pnh_.param("uwb_residual_gate", uwb_residual_gate_, 0.8);
         pnh_.param("dgo_residual_gate", dgo_residual_gate_, 2.0);
         pnh_.param("camera_residual_gate", camera_residual_gate_, 0.5);
+        pnh_.param("require_direction_anchor_for_uwb", require_direction_anchor_for_uwb_, true);
+        pnh_.param("uwb_anchor_max_age", uwb_anchor_max_age_, 0.50);
+        pnh_.param("enable_dgo_recovery", enable_dgo_recovery_, true);
+        pnh_.param("dgo_recovery_gate", dgo_recovery_gate_, 1.0);
+        pnh_.param("dgo_recovery_count_threshold", dgo_recovery_count_threshold_, 3);
+        pnh_.param("dgo_recovery_consistency_gate", dgo_recovery_consistency_gate_, 0.50);
+        pnh_.param("dgo_recovery_pos_std", dgo_recovery_pos_std_, 0.20);
+        pnh_.param("dgo_recovery_vel_std", dgo_recovery_vel_std_, 0.50);
+        pnh_.param("clear_history_on_recovery", clear_history_on_recovery_, true);
         pnh_.param("max_pending", max_pending_, 100);
         pnh_.param("history_keep_time", history_keep_time_, 2.0);
 
@@ -159,6 +169,16 @@ public:
                 ROS_FATAL("[DEKF] residual gates must be > 0");
                 ok = false;
             }
+            if (uwb_anchor_max_age_ <= 0.0 ||
+                dgo_recovery_gate_ <= 0.0 ||
+                dgo_recovery_count_threshold_ < 1 ||
+                dgo_recovery_consistency_gate_ <= 0.0 ||
+                dgo_recovery_pos_std_ <= 0.0 ||
+                dgo_recovery_vel_std_ <= 0.0)
+            {
+                ROS_FATAL("[DEKF] recovery / anchor parameters are invalid");
+                ok = false;
+            }
             if (!ok)
             {
                 ros::shutdown();
@@ -189,6 +209,18 @@ public:
                  max_nis_, max_nis_dgo_, max_nis_uwb_,
                  max_nis_camera_1d_, max_nis_camera_2d_,
                  dgo_residual_gate_, uwb_residual_gate_, camera_residual_gate_);
+        ROS_INFO("[DEKF] recovery/anchor: require_uwb_anchor=%d uwb_anchor_max_age=%.2fs "
+                 "enable_dgo_recovery=%d recovery_gate=%.2fm count=%d consistency=%.2fm "
+                 "reset_std_pos=%.2fm reset_std_vel=%.2fm clear_history=%d",
+                 require_direction_anchor_for_uwb_ ? 1 : 0,
+                 uwb_anchor_max_age_,
+                 enable_dgo_recovery_ ? 1 : 0,
+                 dgo_recovery_gate_,
+                 dgo_recovery_count_threshold_,
+                 dgo_recovery_consistency_gate_,
+                 dgo_recovery_pos_std_,
+                 dgo_recovery_vel_std_,
+                 clear_history_on_recovery_ ? 1 : 0);
 
         // 过程噪声矩阵 Q
         Q_.setZero();
@@ -312,6 +344,12 @@ private:
         size_t delayed_p_skips = 0;
         size_t future_requeues = 0;
         size_t old_drops = 0;
+        size_t recovery_resets = 0;
+
+        ros::Time last_direction_anchor_stamp;
+        int dgo_recovery_count = 0;
+        bool has_last_recovery_dgo = false;
+        Eigen::Vector3d last_recovery_dgo_position = Eigen::Vector3d::Zero();
     };
 
     // DGO 历史观测 (按 UAV 编号缓存)
@@ -365,6 +403,15 @@ private:
     double uwb_residual_gate_ = 0.8;
     double dgo_residual_gate_ = 2.0;
     double camera_residual_gate_ = 0.5;
+    bool require_direction_anchor_for_uwb_ = true;
+    double uwb_anchor_max_age_ = 0.50;
+    bool enable_dgo_recovery_ = true;
+    double dgo_recovery_gate_ = 1.0;
+    int dgo_recovery_count_threshold_ = 3;
+    double dgo_recovery_consistency_gate_ = 0.50;
+    double dgo_recovery_pos_std_ = 0.20;
+    double dgo_recovery_vel_std_ = 0.50;
+    bool clear_history_on_recovery_ = true;
     int max_pending_ = 100;
     double history_keep_time_ = 2.0;
     bool initialized_ = false;
@@ -467,7 +514,8 @@ private:
              << "Pxx,Pyy,Pzz,Pvxvx,Pvyvy,Pvzvz,"
              << "pending_size,cache_size,publish_count,current_updates,delayed_updates,"
              << "dgo_updates,uwb_updates,camera_updates,rejects,delayed_p_skips,"
-             << "future_requeues,old_drops\n";
+             << "future_requeues,old_drops,recovery_resets,dgo_recovery_count,"
+             << "last_direction_anchor_age\n";
 
         ROS_INFO("[DEKF] debug CSV: %s", path.c_str());
     }
@@ -491,6 +539,10 @@ private:
         const double nan = std::numeric_limits<double>::quiet_NaN();
         const double t = f.stamp.isZero() ? ros::Time::now().toSec() : f.stamp.toSec();
         const double filter_stamp = f.stamp.isZero() ? nan : f.stamp.toSec();
+        const double anchor_age =
+            f.last_direction_anchor_stamp.isZero() || f.stamp.isZero()
+                ? nan
+                : (f.stamp - f.last_direction_anchor_stamp).toSec();
 
         csv_ << std::fixed << std::setprecision(9)
              << t << ","
@@ -522,7 +574,10 @@ private:
              << f.rejects << ","
              << f.delayed_p_skips << ","
              << f.future_requeues << ","
-             << f.old_drops << "\n";
+             << f.old_drops << ","
+             << f.recovery_resets << ","
+             << f.dgo_recovery_count << ","
+             << anchor_age << "\n";
     }
 
     void logObservationRow(const std::string &event,
@@ -550,6 +605,135 @@ private:
                   nan, nan, nan, nan, nan);
     }
 
+    bool hasRecentDirectionAnchor(const Filter &f) const
+    {
+        if (!require_direction_anchor_for_uwb_)
+            return true;
+        if (f.last_direction_anchor_stamp.isZero() || f.stamp.isZero())
+            return false;
+        const double age = (f.stamp - f.last_direction_anchor_stamp).toSec();
+        return std::isfinite(age) && age >= 0.0 && age <= uwb_anchor_max_age_;
+    }
+
+    void markDirectionAnchor(Filter &f)
+    {
+        f.last_direction_anchor_stamp = f.stamp;
+        f.dgo_recovery_count = 0;
+        f.has_last_recovery_dgo = false;
+    }
+
+    void rebuildHistoryAfterRecovery(Filter &f)
+    {
+        f.cache.clear();
+
+        History_Record rec;
+        rec.stamp = f.stamp;
+        rec.X_pred = f.X;
+        rec.P_pred = f.P;
+        rec.A.setIdentity();
+        rec.I_KH.setIdentity();
+        rec.H.resize(0, 0);
+        rec.K.resize(0, 0);
+        f.cache.push_back(rec);
+    }
+
+    void resetFilterToDgo(Filter &f,
+                          const Observation &obs,
+                          bool delayed,
+                          double age,
+                          double history_match_dt,
+                          double residual_norm,
+                          double nis,
+                          const std::string &reason)
+    {
+        const double dt_comp =
+            std::max(0.0, std::min(age, max_observation_delay_));
+
+        Eigen::Vector3d recovered_pos = obs.position;
+        Eigen::Vector3d recovered_vel = Eigen::Vector3d::Zero();
+        if (obs.velocity.allFinite())
+        {
+            recovered_pos += obs.velocity * dt_comp;
+            recovered_vel = obs.velocity;
+        }
+
+        f.X.segment<3>(0) = recovered_pos;
+        f.X.segment<3>(3) = recovered_vel;
+        f.P.setZero();
+        f.P.block<3, 3>(0, 0).diagonal().setConstant(
+            dgo_recovery_pos_std_ * dgo_recovery_pos_std_);
+        f.P.block<3, 3>(3, 3).diagonal().setConstant(
+            dgo_recovery_vel_std_ * dgo_recovery_vel_std_);
+        symmetrizeCov(f.P);
+
+        ++f.recovery_resets;
+        incrementAcceptedCounters(f, obs, delayed);
+        markDirectionAnchor(f);
+
+        if (clear_history_on_recovery_)
+            rebuildHistoryAfterRecovery(f);
+
+        ROS_WARN("[DEKF] recovery reset target=%d delayed=%d reason=%s "
+                 "age=%.3f residual=%.3f pos=(%.3f %.3f %.3f) vel=(%.3f %.3f %.3f)",
+                 f.target_id,
+                 delayed ? 1 : 0,
+                 reason.c_str(),
+                 age,
+                 residual_norm,
+                 f.X[0], f.X[1], f.X[2],
+                 f.X[3], f.X[4], f.X[5]);
+
+        logObservationRow(delayed ? "delayed_update" : "current_update",
+                          f, obs, 1, delayed ? 1 : 0, 1,
+                          reason, age, history_match_dt,
+                          residual_norm, nis);
+    }
+
+    bool tryDgoRecovery(Filter &f,
+                        const Observation &obs,
+                        bool delayed,
+                        double age,
+                        double history_match_dt,
+                        double residual_norm,
+                        double nis,
+                        const std::string &source_reason)
+    {
+        if (!enable_dgo_recovery_ || obs.type != ObsType::DGO ||
+            !obs.position.allFinite() || residual_norm < dgo_recovery_gate_)
+        {
+            return false;
+        }
+
+        bool consistent = true;
+        if (f.has_last_recovery_dgo)
+        {
+            consistent =
+                (obs.position - f.last_recovery_dgo_position).norm() <=
+                dgo_recovery_consistency_gate_;
+        }
+
+        f.last_recovery_dgo_position = obs.position;
+        f.has_last_recovery_dgo = true;
+        f.dgo_recovery_count = consistent ? f.dgo_recovery_count + 1 : 1;
+
+        if (f.dgo_recovery_count >= dgo_recovery_count_threshold_)
+        {
+            resetFilterToDgo(f, obs, delayed, age, history_match_dt,
+                             residual_norm, nis,
+                             "dgo_recovery_reset_after_" + source_reason);
+        }
+        else
+        {
+            ++f.rejects;
+            logObservationRow(delayed ? "delayed_update" : "current_update",
+                              f, obs, 0, delayed ? 1 : 0, 0,
+                              "dgo_recovery_pending_after_" + source_reason,
+                              age, history_match_dt, residual_norm, nis);
+        }
+
+        return true;
+    }
+
     void incrementAcceptedCounters(Filter &f, const Observation &obs, bool delayed)
     {
         if (delayed)
@@ -561,12 +745,14 @@ private:
         {
             case ObsType::DGO:
                 ++f.dgo_updates;
+                markDirectionAnchor(f);
                 break;
             case ObsType::UWB_RANGE:
                 ++f.uwb_updates;
                 break;
             case ObsType::CAMERA_BEARING:
                 ++f.camera_updates;
+                markDirectionAnchor(f);
                 break;
         }
     }
@@ -1087,9 +1273,29 @@ private:
         }
 
         const double residual_norm = residual.norm();
+        if (obs.type == ObsType::UWB_RANGE && !hasRecentDirectionAnchor(f))
+        {
+            ++f.rejects;
+            logObservationRow("current_update", f, obs, 0, 0, 0,
+                              "uwb_no_recent_direction_anchor", age,
+                              std::numeric_limits<double>::quiet_NaN(),
+                              residual_norm,
+                              std::numeric_limits<double>::quiet_NaN());
+            return;
+        }
+
         std::string gate_reason;
         if (!passHardResidualGate(obs, residual, gate_reason))
         {
+            if (tryDgoRecovery(f, obs, false, age,
+                               std::numeric_limits<double>::quiet_NaN(),
+                               residual_norm,
+                               std::numeric_limits<double>::quiet_NaN(),
+                               gate_reason))
+            {
+                return;
+            }
+
             ++f.rejects;
             logObservationRow("current_update", f, obs, 0, 0, 0,
                               gate_reason, age,
@@ -1117,6 +1323,13 @@ private:
         const double nis_gate = nisGateForObservation(obs, residual.size());
         if (nis > nis_gate)
         {
+            if (tryDgoRecovery(f, obs, false, age,
+                               std::numeric_limits<double>::quiet_NaN(),
+                               residual_norm, nis, "nis_reject"))
+            {
+                return;
+            }
+
             ++f.rejects;
             logObservationRow("current_update", f, obs, 0, 0, 0,
                               "nis_reject", age,
@@ -1210,9 +1423,28 @@ private:
 
         // 在历史状态处计算 Kalman 增益
         const double residual_norm = residual.norm();
+        if (obs.type == ObsType::UWB_RANGE && !hasRecentDirectionAnchor(f))
+        {
+            ++f.rejects;
+            logObservationRow("delayed_update", f, obs, 0, 1, 0,
+                              "uwb_no_recent_direction_anchor", age,
+                              best_dt,
+                              residual_norm,
+                              std::numeric_limits<double>::quiet_NaN());
+            return;
+        }
+
         std::string gate_reason;
         if (!passHardResidualGate(obs, residual, gate_reason))
         {
+            if (tryDgoRecovery(f, obs, true, age, best_dt,
+                               residual_norm,
+                               std::numeric_limits<double>::quiet_NaN(),
+                               gate_reason))
+            {
+                return;
+            }
+
             ++f.rejects;
             logObservationRow("delayed_update", f, obs, 0, 1, 0,
                               gate_reason, age,
@@ -1240,6 +1472,12 @@ private:
         const double nis_gate = nisGateForObservation(obs, residual.size());
         if (nis > nis_gate)
         {
+            if (tryDgoRecovery(f, obs, true, age, best_dt,
+                               residual_norm, nis, "nis_reject"))
+            {
+                return;
+            }
+
             ++f.rejects;
             logObservationRow("delayed_update", f, obs, 0, 1, 0,
                               "nis_reject", age,
