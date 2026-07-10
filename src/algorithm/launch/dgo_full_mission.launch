@@ -42,6 +42,8 @@
   <arg name="dekf_history_keep_time" default="1.0" />
   <arg name="dekf_delay_threshold" default="0.035" />
   <arg name="dekf_future_tolerance" default="0.02" />
+  <arg name="dekf_delayed_covariance_weight" default="1.0" />
+  <arg name="dekf_delayed_update_gain_weight" default="$(arg dekf_delayed_covariance_weight)" />
   <arg name="dekf_max_nis" default="25.0" />
   <arg name="dekf_max_nis_dgo" default="16.3" />
   <arg name="dekf_max_nis_uwb" default="9.0" />
@@ -198,6 +200,7 @@
       <param name="max_observation_delay" value="$(arg dekf_max_observation_delay)" />
       <param name="current_delay_threshold" value="$(arg dekf_delay_threshold)" />
       <param name="future_tolerance" value="$(arg dekf_future_tolerance)" />
+      <param name="delayed_update_gain_weight" value="$(arg dekf_delayed_update_gain_weight)" />
       <param name="max_nis" value="$(arg dekf_max_nis)" />
       <param name="max_nis_dgo" value="$(arg dekf_max_nis_dgo)" />
       <param name="max_nis_uwb" value="$(arg dekf_max_nis_uwb)" />
@@ -306,6 +309,7 @@
       <param name="max_observation_delay" value="$(arg dekf_max_observation_delay)" />
       <param name="current_delay_threshold" value="$(arg dekf_delay_threshold)" />
       <param name="future_tolerance" value="$(arg dekf_future_tolerance)" />
+      <param name="delayed_update_gain_weight" value="$(arg dekf_delayed_update_gain_weight)" />
       <param name="max_nis" value="$(arg dekf_max_nis)" />
       <param name="max_nis_dgo" value="$(arg dekf_max_nis_dgo)" />
       <param name="max_nis_uwb" value="$(arg dekf_max_nis_uwb)" />
@@ -414,6 +418,7 @@
       <param name="max_observation_delay" value="$(arg dekf_max_observation_delay)" />
       <param name="current_delay_threshold" value="$(arg dekf_delay_threshold)" />
       <param name="future_tolerance" value="$(arg dekf_future_tolerance)" />
+      <param name="delayed_update_gain_weight" value="$(arg dekf_delayed_update_gain_weight)" />
       <param name="max_nis" value="$(arg dekf_max_nis)" />
       <param name="max_nis_dgo" value="$(arg dekf_max_nis_dgo)" />
       <param name="max_nis_uwb" value="$(arg dekf_max_nis_uwb)" />
@@ -522,6 +527,7 @@
       <param name="max_observation_delay" value="$(arg dekf_max_observation_delay)" />
       <param name="current_delay_threshold" value="$(arg dekf_delay_threshold)" />
       <param name="future_tolerance" value="$(arg dekf_future_tolerance)" />
+      <param name="delayed_update_gain_weight" value="$(arg dekf_delayed_update_gain_weight)" />
       <param name="max_nis" value="$(arg dekf_max_nis)" />
       <param name="max_nis_dgo" value="$(arg dekf_max_nis_dgo)" />
       <param name="max_nis_uwb" value="$(arg dekf_max_nis_uwb)" />

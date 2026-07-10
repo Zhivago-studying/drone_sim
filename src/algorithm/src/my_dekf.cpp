@@ -45,6 +45,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cmath>
+#include <cstdint>
 #include <deque>
 #include <fstream>
 #include <iomanip>
@@ -94,6 +95,17 @@ public:
         pnh_.param("current_delay_threshold", current_delay_threshold_, 0.020);
         pnh_.param("max_history_match_dt", max_history_match_dt_, 0.06);
         pnh_.param("future_tolerance", future_tolerance_, 0.02);
+        pnh_.param("delayed_update_gain_weight", delayed_update_gain_weight_, 1.0);
+        if (!pnh_.hasParam("delayed_update_gain_weight"))
+        {
+            double legacy_delayed_covariance_weight = delayed_update_gain_weight_;
+            if (pnh_.getParam("delayed_covariance_weight", legacy_delayed_covariance_weight))
+            {
+                delayed_update_gain_weight_ = legacy_delayed_covariance_weight;
+                ROS_WARN("[DEKF] parameter delayed_covariance_weight is deprecated; "
+                         "use delayed_update_gain_weight. Interpreting value as gain damping.");
+            }
+        }
         pnh_.param("max_nis", max_nis_, 25.0);
         pnh_.param("max_nis_dgo", max_nis_dgo_, 16.3);
         pnh_.param("max_nis_uwb", max_nis_uwb_, 9.0);
@@ -161,6 +173,12 @@ public:
                           max_observation_delay_, current_delay_threshold_);
                 ok = false;
             }
+            if (delayed_update_gain_weight_ <= 0.0 || delayed_update_gain_weight_ > 1.0)
+            {
+                ROS_FATAL("[DEKF] delayed_update_gain_weight=%.3f must be in (0, 1]",
+                          delayed_update_gain_weight_);
+                ok = false;
+            }
             if (max_nis_dgo_ <= 0.0 || max_nis_uwb_ <= 0.0 ||
                 max_nis_camera_1d_ <= 0.0 || max_nis_camera_2d_ <= 0.0)
             {
@@ -216,10 +234,11 @@ public:
                  initial_offsets_[3].x(), initial_offsets_[3].y(), initial_offsets_[3].z());
         ROS_INFO("[DEKF] gates: max_nis legacy=%.2f dgo=%.2f uwb=%.2f "
                  "camera_1d=%.2f camera_2d=%.2f residual_gate dgo=%.2fm "
-                 "uwb=%.2fm camera=%.2frad",
+                 "uwb=%.2fm camera=%.2frad delayed_replay_gain_weight=%.3f",
                  max_nis_, max_nis_dgo_, max_nis_uwb_,
                  max_nis_camera_1d_, max_nis_camera_2d_,
-                 dgo_residual_gate_, uwb_residual_gate_, camera_residual_gate_);
+                 dgo_residual_gate_, uwb_residual_gate_, camera_residual_gate_,
+                 delayed_update_gain_weight_);
         ROS_INFO("[DEKF] recovery/anchor: require_uwb_anchor=%d uwb_anchor_max_age=%.2fs "
                  "enable_dgo_recovery=%d recovery_gate=%.2fm count=%d consistency=%.2fm cooldown=%.2fs "
                  "reset_std_pos=%.2fm reset_std_vel=%.2fm clear_history=%d "
@@ -302,24 +321,26 @@ private:
     //  类型定义
     // ═══════════════════════════════════════════════════════════
 
-    // 预测历史缓存 (用于延迟补偿重传播)
-    struct History_Record
-    {
-        ros::Time stamp;         // 记录时间戳
-        Vector6d X_pred;         // X_{k+1|k}
-        Matrix6d P_pred;         // P_{k+1|k}
-        Matrix6d A;              // 状态转移矩阵
-        Matrix6d I_KH;           // I - K*H  (更新后的投影矩阵)
-        Eigen::MatrixXd H;       // 观测雅可比 (动态维度, 用于延迟补偿)
-        Eigen::MatrixXd K;       // 卡尔曼增益 (用于延迟补偿)
-    };
-
     // 观测类型枚举
     enum class ObsType
     {
         DGO,             // DGO 相对位姿观测
         UWB_RANGE,       // UWB 测距观测
         CAMERA_BEARING   // 相机角度观测
+    };
+
+    enum class UpdateStatus
+    {
+        ACCEPTED,
+        REJECTED,
+        RECOVERY_RESET
+    };
+
+    enum class RecoveryResult
+    {
+        NONE,
+        HANDLED_REJECTED,
+        RESET
     };
 
     // 单条观测结构 (由 callback 产生, 由 dekfCallback 消费)
@@ -335,6 +356,35 @@ private:
         double theta = 0.0;
         bool has_alpha = false;
         bool has_theta = false;
+    };
+
+    // 已经被滤波器接受、需要随 cache replay 重放的观测。
+    // 注意：H/K/I_KH 是旧线性化结果，不能替代原始 Observation。
+    struct AppliedObservation
+    {
+        Observation obs;
+        uint64_t seq = 0;          // 同一 cache 节点内保持确定性顺序
+        bool delayed = false;      // 仅用于诊断/调试
+    };
+
+    // 预测历史缓存 (用于延迟补偿重传播)
+    // 语义约定：
+    //   X_prior/P_prior: 该 cache 时间戳下，应用本节点 updates 之前的状态。
+    //   X_post/P_post:   从 prior 顺序重放 updates 之后的状态。
+    // 下一节点预测必须从上一节点 X_post/P_post 出发；延迟 replay 必须从
+    // best_idx 节点开始，以确保新插入的 delayed obs 真正作用到该节点。
+    struct History_Record
+    {
+        ros::Time stamp;         // 记录时间戳
+        Vector6d X_prior;        // X_{i|i-1} 或该节点 replay 前状态
+        Matrix6d P_prior;        // P_{i|i-1} 或该节点 replay 前协方差
+        Vector6d X_post;         // X_{i|i}，重放本节点 updates 后状态
+        Matrix6d P_post;         // P_{i|i}，重放本节点 updates 后协方差
+        Matrix6d A;              // 状态转移矩阵
+        Matrix6d I_KH;           // I - K*H  (更新后的投影矩阵)
+        Eigen::MatrixXd H;       // 观测雅可比 (动态维度, 用于延迟补偿)
+        Eigen::MatrixXd K;       // 卡尔曼增益 (用于延迟补偿)
+        std::vector<AppliedObservation> updates; // 该 cache 节点已接受的原始观测
     };
 
     // 滤波器: 本机到 target_id 的相对位姿/速度估计
@@ -412,6 +462,7 @@ private:
     double current_delay_threshold_ = 0.020;
     double max_history_match_dt_ = 0.06;
     double future_tolerance_ = 0.02;
+    double delayed_update_gain_weight_ = 1.0;
     double max_nis_ = 25.0;
     double max_nis_dgo_ = 16.3;
     double max_nis_uwb_ = 9.0;
@@ -436,6 +487,7 @@ private:
     int max_pending_ = 100;
     double history_keep_time_ = 2.0;
     bool initialized_ = false;
+    uint64_t obs_seq_ = 0;
 
     // CSV 诊断输出
     std::string csv_dir_;
@@ -659,8 +711,10 @@ private:
 
         History_Record rec;
         rec.stamp = f.stamp;
-        rec.X_pred = f.X;
-        rec.P_pred = f.P;
+        rec.X_prior = f.X;
+        rec.P_prior = f.P;
+        rec.X_post = f.X;
+        rec.P_post = f.P;
         rec.A.setIdentity();
         rec.I_KH.setIdentity();
         rec.H.resize(0, 0);
@@ -721,19 +775,21 @@ private:
                           residual_norm, nis);
     }
 
-    bool tryDgoRecovery(Filter &f,
-                        const Observation &obs,
-                        bool delayed,
-                        double age,
-                        double history_match_dt,
-                        double residual_norm,
-                        double nis,
-                        const std::string &source_reason)
+    RecoveryResult tryDgoRecovery(Filter &f,
+                                  const Observation &obs,
+                                  bool delayed,
+                                  double age,
+                                  double history_match_dt,
+                                  double residual_norm,
+                                  double nis,
+                                  const std::string &source_reason)
     {
         if (!enable_dgo_recovery_ || obs.type != ObsType::DGO ||
-            !obs.position.allFinite() || residual_norm < dgo_recovery_gate_)
+            !obs.position.allFinite() ||
+            !std::isfinite(residual_norm) ||
+            residual_norm < dgo_recovery_gate_)
         {
-            return false;
+            return RecoveryResult::NONE;
         }
 
         if (!f.last_recovery_reset_stamp.isZero() && !f.stamp.isZero())
@@ -748,7 +804,7 @@ private:
                                   f, obs, 0, delayed ? 1 : 0, 0,
                                   "dgo_recovery_cooldown_after_" + source_reason,
                                   age, history_match_dt, residual_norm, nis);
-                return true;
+                return RecoveryResult::HANDLED_REJECTED;
             }
         }
 
@@ -769,6 +825,7 @@ private:
             resetFilterToDgo(f, obs, delayed, age, history_match_dt,
                              residual_norm, nis,
                              "dgo_recovery_reset_after_" + source_reason);
+            return RecoveryResult::RESET;
         }
         else
         {
@@ -779,7 +836,7 @@ private:
                               age, history_match_dt, residual_norm, nis);
         }
 
-        return true;
+        return RecoveryResult::HANDLED_REJECTED;
     }
 
     void incrementAcceptedCounters(Filter &f, const Observation &obs, bool delayed)
@@ -803,6 +860,26 @@ private:
                 markDirectionAnchor(f);
                 break;
         }
+    }
+
+    uint64_t recordAcceptedObservation(History_Record &rec,
+                                       const Observation &obs,
+                                       bool delayed)
+    {
+        AppliedObservation applied;
+        applied.obs = obs;
+        applied.seq = obs_seq_++;
+        applied.delayed = delayed;
+        const uint64_t seq = applied.seq;
+        rec.updates.push_back(applied);
+
+        std::sort(rec.updates.begin(), rec.updates.end(),
+                  [](const AppliedObservation &a, const AppliedObservation &b) {
+                      if (a.obs.stamp != b.obs.stamp)
+                          return a.obs.stamp < b.obs.stamp;
+                      return a.seq < b.seq;
+                  });
+        return seq;
     }
 
     double nisGateForObservation(const Observation &obs, int residual_dim) const
@@ -1049,11 +1126,21 @@ private:
                 else if (age < current_delay_threshold_)
                 {
                     // 观测时间 ≈ 当前时间 → 直接在当前状态上更新
-                    applyCurrentUpdate(f, obs);
+                    const UpdateStatus status = applyCurrentUpdate(f, obs);
+                    if (status == UpdateStatus::RECOVERY_RESET)
+                    {
+                        f.pending_obs.clear();
+                        break;
+                    }
                 }
                 else if (age < max_observation_delay_)
                 {
-                    applyDelayedUpdate(f, obs);
+                    const UpdateStatus status = applyDelayedUpdate(f, obs);
+                    if (status == UpdateStatus::RECOVERY_RESET)
+                    {
+                        f.pending_obs.clear();
+                        break;
+                    }
                 }
                 else
                 {
@@ -1100,10 +1187,14 @@ private:
 
         History_Record rec;
         rec.stamp = stamp;
-        rec.X_pred = f.X;
-        rec.P_pred = f.P;
+        rec.X_prior = f.X;
+        rec.P_prior = f.P;
+        rec.X_post = f.X;
+        rec.P_post = f.P;
         rec.A.setIdentity();
         rec.I_KH.setIdentity();
+        rec.H.resize(0, 0);
+        rec.K.resize(0, 0);
         f.cache.push_back(rec);
     }
 
@@ -1134,17 +1225,20 @@ private:
         G.block<3,3>(3,0) = Eigen::Matrix3d::Identity() * dt;
 
         // X_{k+1|k} = A_k * X_k
-        rec.X_pred = rec.A * f.X;
+        rec.X_prior = rec.A * f.X;
         // P_{k+1|k} = A_k * P_k * A_k^T + G_k * Q * G_k^T
-        rec.P_pred = rec.A * f.P * rec.A.transpose() + G * Q_ * G.transpose();
+        rec.P_prior = rec.A * f.P * rec.A.transpose() + G * Q_ * G.transpose();
+        symmetrizeCov(rec.P_prior);
+        rec.X_post = rec.X_prior;
+        rec.P_post = rec.P_prior;
 
         // 初始化延迟补偿缓存 (无更新时 I_KH=Identity, H/K 为空)
         rec.I_KH.setIdentity();
         rec.H.resize(0, 0);
         rec.K.resize(0, 0);
 
-        f.X = rec.X_pred;
-        f.P = rec.P_pred;
+        f.X = rec.X_post;
+        f.P = rec.P_post;
         symmetrizeCov(f.P);
         f.stamp = stamp;
 
@@ -1315,12 +1409,158 @@ private:
         return true;
     }
 
+    bool replayCacheFrom(std::deque<History_Record> &cache,
+                         int start_idx,
+                         bool gate_observation,
+                         uint64_t gated_seq,
+                         std::string &fail_reason,
+                         double &fail_residual_norm,
+                         double &fail_nis,
+                         bool &failed_on_gated_observation)
+    {
+        fail_reason.clear();
+        fail_residual_norm = std::numeric_limits<double>::quiet_NaN();
+        fail_nis = std::numeric_limits<double>::quiet_NaN();
+        failed_on_gated_observation = false;
+        bool saw_gated_observation = !gate_observation;
+
+        if (start_idx < 0 || start_idx >= static_cast<int>(cache.size()))
+        {
+            fail_reason = "replay_invalid_start_idx";
+            return false;
+        }
+
+        for (int i = start_idx; i < static_cast<int>(cache.size()); ++i)
+        {
+            History_Record &rec = cache[static_cast<size_t>(i)];
+
+            if (i > start_idx)
+            {
+                const History_Record &prev = cache[static_cast<size_t>(i - 1)];
+                const double dt = (rec.stamp - prev.stamp).toSec();
+                if (!std::isfinite(dt) || dt < 1e-6)
+                {
+                    fail_reason = "replay_invalid_dt";
+                    return false;
+                }
+
+                Eigen::Matrix<double,6,3> G;
+                G.block<3,3>(0,0) = 0.5 * Eigen::Matrix3d::Identity() * dt * dt;
+                G.block<3,3>(3,0) = Eigen::Matrix3d::Identity() * dt;
+
+                rec.X_prior = rec.A * prev.X_post;
+                rec.P_prior = rec.A * prev.P_post * rec.A.transpose() + G * Q_ * G.transpose();
+                symmetrizeCov(rec.P_prior);
+                if (!rec.X_prior.allFinite() || !isUsableCovariance(rec.P_prior))
+                {
+                    fail_reason = "replay_prior_invalid";
+                    return false;
+                }
+            }
+
+            rec.X_post = rec.X_prior;
+            rec.P_post = rec.P_prior;
+            rec.I_KH.setIdentity();
+            rec.H.resize(0, 0);
+            rec.K.resize(0, 0);
+
+            for (const AppliedObservation &u : rec.updates)
+            {
+                const Observation &obs_i = u.obs;
+                const bool is_gated_observation =
+                    gate_observation && u.seq == gated_seq;
+                if (is_gated_observation)
+                    saw_gated_observation = true;
+
+                Eigen::VectorXd Zk;
+                Eigen::VectorXd residual;
+                Eigen::MatrixXd Hk;
+                Eigen::MatrixXd R_meas;
+
+                if (!buildObsModel(rec.X_post, obs_i, Zk, residual, Hk, R_meas))
+                {
+                    failed_on_gated_observation = is_gated_observation;
+                    fail_reason = "replay_build_obs_model_failed";
+                    return false;
+                }
+
+                const double residual_norm = residual.norm();
+                if (is_gated_observation)
+                {
+                    fail_residual_norm = residual_norm;
+                    std::string gate_reason;
+                    if (!passHardResidualGate(obs_i, residual, gate_reason))
+                    {
+                        failed_on_gated_observation = true;
+                        fail_reason = gate_reason;
+                        return false;
+                    }
+                }
+
+                Eigen::MatrixXd S = Hk * rec.P_post * Hk.transpose() + R_meas;
+                Eigen::FullPivLU<Eigen::MatrixXd> lu(S);
+                if (!lu.isInvertible())
+                {
+                    failed_on_gated_observation = is_gated_observation;
+                    fail_residual_norm = residual_norm;
+                    fail_reason = "replay_innovation_cov_not_invertible";
+                    return false;
+                }
+
+                const Eigen::MatrixXd S_inv = lu.inverse();
+                const double nis = residual.transpose() * S_inv * residual;
+                if (is_gated_observation)
+                {
+                    fail_residual_norm = residual_norm;
+                    fail_nis = nis;
+                    const double nis_gate = nisGateForObservation(obs_i, residual.size());
+                    if (nis > nis_gate)
+                    {
+                        failed_on_gated_observation = true;
+                        fail_reason = "nis_reject";
+                        return false;
+                    }
+                }
+
+                Eigen::MatrixXd K = rec.P_post * Hk.transpose() * S_inv;
+                const double gain_weight = u.delayed ? delayed_update_gain_weight_ : 1.0;
+                Eigen::MatrixXd K_eff = gain_weight * K;
+
+                rec.X_post += K_eff * residual;
+                Matrix6d I_KH = Matrix6d::Identity() - K_eff * Hk;
+                rec.P_post =
+                    I_KH * rec.P_post * I_KH.transpose() +
+                    K_eff * R_meas * K_eff.transpose();
+                symmetrizeCov(rec.P_post);
+
+                if (!rec.X_post.allFinite() || !isUsableCovariance(rec.P_post))
+                {
+                    failed_on_gated_observation = is_gated_observation;
+                    fail_reason = "replay_post_invalid";
+                    return false;
+                }
+
+                rec.I_KH = I_KH * rec.I_KH;
+                rec.H = Hk;
+                rec.K = K_eff;
+            }
+        }
+
+        if (!saw_gated_observation)
+        {
+            fail_reason = "replay_gated_observation_not_found";
+            return false;
+        }
+
+        return true;
+    }
+
     // ═══════════════════════════════════════════════════════════
     //  观测更新函数
     // ═══════════════════════════════════════════════════════════
 
     // 当前时刻 EKF 更新: 观测时间 ≈ 当前预测时间, 直接执行标准 EKF 更新
-    void applyCurrentUpdate(Filter &f, const Observation &obs)
+    UpdateStatus applyCurrentUpdate(Filter &f, const Observation &obs)
     {
         const double age = (f.stamp - obs.stamp).toSec();
         Eigen::VectorXd Z;
@@ -1336,7 +1576,7 @@ private:
                               std::numeric_limits<double>::quiet_NaN(),
                               std::numeric_limits<double>::quiet_NaN(),
                               std::numeric_limits<double>::quiet_NaN());
-            return;
+            return UpdateStatus::REJECTED;
         }
 
         const double residual_norm = residual.norm();
@@ -1348,19 +1588,25 @@ private:
                               std::numeric_limits<double>::quiet_NaN(),
                               residual_norm,
                               std::numeric_limits<double>::quiet_NaN());
-            return;
+            return UpdateStatus::REJECTED;
         }
 
         std::string gate_reason;
         if (!passHardResidualGate(obs, residual, gate_reason))
         {
-            if (tryDgoRecovery(f, obs, false, age,
+            const RecoveryResult recovery =
+                tryDgoRecovery(f, obs, false, age,
                                std::numeric_limits<double>::quiet_NaN(),
                                residual_norm,
                                std::numeric_limits<double>::quiet_NaN(),
-                               gate_reason))
+                               gate_reason);
+            if (recovery == RecoveryResult::RESET)
             {
-                return;
+                return UpdateStatus::RECOVERY_RESET;
+            }
+            if (recovery == RecoveryResult::HANDLED_REJECTED)
+            {
+                return UpdateStatus::REJECTED;
             }
 
             ++f.rejects;
@@ -1369,7 +1615,7 @@ private:
                               std::numeric_limits<double>::quiet_NaN(),
                               residual_norm,
                               std::numeric_limits<double>::quiet_NaN());
-            return;
+            return UpdateStatus::REJECTED;
         }
 
         // ── NIS gate: 拒绝异常观测 ──────────────────────────
@@ -1383,18 +1629,24 @@ private:
                               std::numeric_limits<double>::quiet_NaN(),
                               residual_norm,
                               std::numeric_limits<double>::quiet_NaN());
-            return;
+            return UpdateStatus::REJECTED;
         }
         const Eigen::MatrixXd S_inv = lu.inverse();
         const double nis = residual.transpose() * S_inv * residual;
         const double nis_gate = nisGateForObservation(obs, residual.size());
         if (nis > nis_gate)
         {
-            if (tryDgoRecovery(f, obs, false, age,
+            const RecoveryResult recovery =
+                tryDgoRecovery(f, obs, false, age,
                                std::numeric_limits<double>::quiet_NaN(),
-                               residual_norm, nis, "nis_reject"))
+                               residual_norm, nis, "nis_reject");
+            if (recovery == RecoveryResult::RESET)
             {
-                return;
+                return UpdateStatus::RECOVERY_RESET;
+            }
+            if (recovery == RecoveryResult::HANDLED_REJECTED)
+            {
+                return UpdateStatus::REJECTED;
             }
 
             ++f.rejects;
@@ -1403,7 +1655,7 @@ private:
                               std::numeric_limits<double>::quiet_NaN(),
                               residual_norm,
                               nis);
-            return;
+            return UpdateStatus::REJECTED;
         }
 
         // 标准卡尔曼增益: K = P * H^T * (H * P * H^T + R)^{-1}
@@ -1423,6 +1675,9 @@ private:
             f.cache.back().K = K;
             // 累乘: 同一历史时刻多次 update 的 I_KH 组合
             f.cache.back().I_KH = I_KH * f.cache.back().I_KH;
+            recordAcceptedObservation(f.cache.back(), obs, false);
+            f.cache.back().X_post = f.X;
+            f.cache.back().P_post = f.P;
         }
 
         logObservationRow("current_update", f, obs, 1, 0, 1,
@@ -1430,9 +1685,10 @@ private:
                           std::numeric_limits<double>::quiet_NaN(),
                           residual_norm,
                           nis);
+        return UpdateStatus::ACCEPTED;
     }
 
-    void applyDelayedUpdate(Filter &f, const Observation &obs)
+    UpdateStatus applyDelayedUpdate(Filter &f, const Observation &obs)
     {
         const double age = (f.stamp - obs.stamp).toSec();
         if (f.cache.empty())
@@ -1443,7 +1699,7 @@ private:
                               std::numeric_limits<double>::quiet_NaN(),
                               std::numeric_limits<double>::quiet_NaN(),
                               std::numeric_limits<double>::quiet_NaN());
-            return;
+            return UpdateStatus::REJECTED;
         }
 
         // 从前往后找第一个 cache[i].stamp >= obs.stamp 的记录
@@ -1467,193 +1723,90 @@ private:
                               best_dt,
                               std::numeric_limits<double>::quiet_NaN(),
                               std::numeric_limits<double>::quiet_NaN());
-            return;
+            return UpdateStatus::REJECTED;
         }
 
-        const History_Record &hist = f.cache[best_idx];
-
-        Eigen::VectorXd Zs;
-        Eigen::VectorXd residual;
-        Eigen::MatrixXd Hs;
-        Eigen::MatrixXd R_meas;
-
-        if (!buildObsModel(hist.X_pred, obs, Zs, residual, Hs, R_meas))
-        {
-            ++f.rejects;
-            logObservationRow("delayed_update", f, obs, 0, 1, 0,
-                              "build_obs_model_failed", age,
-                              best_dt,
-                              std::numeric_limits<double>::quiet_NaN(),
-                              std::numeric_limits<double>::quiet_NaN());
-            return;
-        }
-
-        // 在历史状态处计算 Kalman 增益
-        const double residual_norm = residual.norm();
         if (obs.type == ObsType::UWB_RANGE && !hasRecentDirectionAnchor(f))
         {
             ++f.rejects;
             logObservationRow("delayed_update", f, obs, 0, 1, 0,
                               "uwb_no_recent_direction_anchor", age,
                               best_dt,
-                              residual_norm,
+                              std::numeric_limits<double>::quiet_NaN(),
                               std::numeric_limits<double>::quiet_NaN());
-            return;
+            return UpdateStatus::REJECTED;
         }
 
-        std::string gate_reason;
-        if (!passHardResidualGate(obs, residual, gate_reason))
+        // 原子化 delayed update：
+        // 在候选 cache 中插入新观测，并从 best_idx 节点开始 replay。
+        // 新 delayed obs 的 hard/NIS gate 在 replay 中、按实际插入顺序执行，
+        // 避免用旧 hist.X_post/P_post 做近似接纳判断。
+        // replay 成功且最终状态/协方差合法后，才提交到真实 filter。
+        std::deque<History_Record> candidate_cache = f.cache;
+        const uint64_t seq_before = obs_seq_;
+        const uint64_t gated_seq =
+            recordAcceptedObservation(candidate_cache[static_cast<size_t>(best_idx)], obs, true);
+
+        std::string replay_reason;
+        double replay_residual_norm = std::numeric_limits<double>::quiet_NaN();
+        double replay_nis = std::numeric_limits<double>::quiet_NaN();
+        bool failed_on_gated_observation = false;
+        if (!replayCacheFrom(candidate_cache, best_idx, true, gated_seq,
+                             replay_reason, replay_residual_norm, replay_nis,
+                             failed_on_gated_observation))
         {
-            if (tryDgoRecovery(f, obs, true, age, best_dt,
-                               residual_norm,
-                               std::numeric_limits<double>::quiet_NaN(),
-                               gate_reason))
+            obs_seq_ = seq_before;
+
+            if (failed_on_gated_observation && std::isfinite(replay_residual_norm))
             {
-                return;
+                const RecoveryResult recovery =
+                    tryDgoRecovery(f, obs, true, age, best_dt,
+                                   replay_residual_norm, replay_nis, replay_reason);
+                if (recovery == RecoveryResult::RESET)
+                {
+                    return UpdateStatus::RECOVERY_RESET;
+                }
+                if (recovery == RecoveryResult::HANDLED_REJECTED)
+                {
+                    return UpdateStatus::REJECTED;
+                }
             }
 
             ++f.rejects;
             logObservationRow("delayed_update", f, obs, 0, 1, 0,
-                              gate_reason, age,
+                              "cache_replay_failed_" + replay_reason, age,
                               best_dt,
-                              residual_norm,
-                              std::numeric_limits<double>::quiet_NaN());
-            return;
+                              replay_residual_norm,
+                              replay_nis);
+            return UpdateStatus::REJECTED;
         }
 
-        Eigen::MatrixXd S = Hs * hist.P_pred * Hs.transpose() + R_meas;
-        Eigen::FullPivLU<Eigen::MatrixXd> lu(S);
-        if (!lu.isInvertible())
+        const History_Record &final_rec = candidate_cache.back();
+        if (!final_rec.X_post.allFinite() || !isBoundedCovariance(final_rec.P_post))
         {
-            ++f.rejects;
-            logObservationRow("delayed_update", f, obs, 0, 1, 0,
-                              "innovation_cov_not_invertible", age,
-                              best_dt,
-                              residual_norm,
-                              std::numeric_limits<double>::quiet_NaN());
-            return;
-        }
-
-        const Eigen::MatrixXd S_inv = lu.inverse();
-        const double nis = residual.transpose() * S_inv * residual;
-        const double nis_gate = nisGateForObservation(obs, residual.size());
-        if (nis > nis_gate)
-        {
-            if (tryDgoRecovery(f, obs, true, age, best_dt,
-                               residual_norm, nis, "nis_reject"))
-            {
-                return;
-            }
-
-            ++f.rejects;
-            logObservationRow("delayed_update", f, obs, 0, 1, 0,
-                              "nis_reject", age,
-                              best_dt,
-                              residual_norm,
-                              nis);
-            return;
-        }
-        Eigen::MatrixXd K_s = hist.P_pred * Hs.transpose() * S_inv;
-
-        // 修正量 = K_s * residual，并用同一条 A/I_KH 链传播到当前时刻。
-        // 这里 hist.X_pred / hist.P_pred 已经对应 hist.stamp，因此 L 从 hist.stamp
-        // 之后的 cache 记录开始传播，不能再额外乘 hist.A。
-        // Wk 维度为 6 x m, m 是当前观测维度(DGO=3, UWB=1, Camera=1/2)。
-        Matrix6d L = Matrix6d::Identity();
-        Eigen::MatrixXd Wk = K_s;
-        for (size_t i = static_cast<size_t>(best_idx) + 1; i < f.cache.size(); ++i)
-        {
-            L = f.cache[i].A * L;
-            L = f.cache[i].I_KH * L;
-            Wk = f.cache[i].A * Wk;
-            Wk = f.cache[i].I_KH * Wk;
-        }
-
-        const double gain_consistency_error = (Wk - L * K_s).norm();
-        if (!std::isfinite(gain_consistency_error) || gain_consistency_error > 1e-8)
-        {
-            ROS_WARN_THROTTLE(1.0,
-                              "[DEKF] delayed gain consistency error target=%d type=%s "
-                              "err=%.3e cache_idx=%d cache_size=%lu",
-                              f.target_id,
-                              obsTypeName(obs.type),
-                              gain_consistency_error,
-                              best_idx,
-                              static_cast<unsigned long>(f.cache.size()));
-        }
-
-        Vector6d delta = Wk * residual;
-        if (!delta.allFinite() || !Wk.allFinite())
-        {
-            ++f.rejects;
-            logObservationRow("delayed_update", f, obs, 0, 1, 0,
-                              "nonfinite_delta_or_Wk", age,
-                              best_dt,
-                              residual_norm,
-                              nis,
-                              gain_consistency_error);
-            return;
-        }
-
-        // 原子化 delayed update:
-        // 先同时计算 X_new/P_new, 只有协方差合法时才提交状态和协方差。
-        const Vector6d X_new = f.X + delta;
-
-        // 延迟观测的 Joseph 协方差更新:
-        // P_k = P_k - L·P_s·Lᵀ + (L-W·H_s)·P_s·(L-W·H_s)ᵀ + W·R_s·Wᵀ
-        Matrix6d P_new = f.P - L * hist.P_pred * L.transpose()
-                         + (L - Wk * Hs) * hist.P_pred * (L - Wk * Hs).transpose()
-                         + Wk * R_meas * Wk.transpose();
-        if (!X_new.allFinite())
-        {
+            obs_seq_ = seq_before;
             ++f.delayed_p_skips;
             ++f.rejects;
             logObservationRow("delayed_update", f, obs, 0, 1, 0,
-                              "atomic_state_nonfinite", age,
+                              "cache_replay_rejected_bad_final_cov", age,
                               best_dt,
-                              residual_norm,
-                              nis,
-                              gain_consistency_error);
-            return;
+                              replay_residual_norm,
+                              replay_nis);
+            return UpdateStatus::REJECTED;
         }
 
-        if (!isBoundedCovariance(P_new))
-        {
-            ++f.delayed_p_skips;
-            if (allow_dgo_x_only_on_bad_cov_ && obs.type == ObsType::DGO)
-            {
-                f.X = X_new;
-                incrementAcceptedCounters(f, obs, true);
-                logObservationRow("delayed_update", f, obs, 1, 1, 0,
-                                  "accepted_x_only_p_invalid_or_unbounded", age,
-                                  best_dt,
-                                  residual_norm,
-                                  nis,
-                                  gain_consistency_error);
-                return;
-            }
-
-            ++f.rejects;
-            logObservationRow("delayed_update", f, obs, 0, 1, 0,
-                              "atomic_update_rejected_bad_cov", age,
-                              best_dt,
-                              residual_norm,
-                              nis,
-                              gain_consistency_error);
-            return;
-        }
-
-        f.X = X_new;
-        f.P = P_new;
+        f.cache = std::move(candidate_cache);
+        f.X = f.cache.back().X_post;
+        f.P = f.cache.back().P_post;
         symmetrizeCov(f.P);
         incrementAcceptedCounters(f, obs, true);
 
         logObservationRow("delayed_update", f, obs, 1, 1, 1,
-                          "accepted", age,
+                          "accepted_replayed", age,
                           best_dt,
-                          residual_norm,
-                          nis,
-                          gain_consistency_error);
+                          replay_residual_norm,
+                          replay_nis);
+        return UpdateStatus::ACCEPTED;
     }
 
     // ═══════════════════════════════════════════════════════════

@@ -68,6 +68,8 @@
   <arg name="dekf_history_keep_time" default="1.0" />
   <arg name="dekf_delay_threshold" default="0.035" />
   <arg name="dekf_future_tolerance" default="0.02" />
+  <arg name="dekf_delayed_covariance_weight" default="1.0" />
+  <arg name="dekf_delayed_update_gain_weight" default="$(arg dekf_delayed_covariance_weight)" />
   <arg name="dekf_max_nis" default="25.0" />
   <arg name="dekf_max_nis_dgo" default="16.3" />
   <arg name="dekf_max_nis_uwb" default="9.0" />
@@ -146,6 +148,8 @@
     <arg name="dekf_history_keep_time" value="$(arg dekf_history_keep_time)" />
     <arg name="dekf_delay_threshold" value="$(arg dekf_delay_threshold)" />
     <arg name="dekf_future_tolerance" value="$(arg dekf_future_tolerance)" />
+    <arg name="dekf_delayed_covariance_weight" value="$(arg dekf_delayed_covariance_weight)" />
+    <arg name="dekf_delayed_update_gain_weight" value="$(arg dekf_delayed_update_gain_weight)" />
     <arg name="dekf_max_nis" value="$(arg dekf_max_nis)" />
     <arg name="dekf_max_nis_dgo" value="$(arg dekf_max_nis_dgo)" />
     <arg name="dekf_max_nis_uwb" value="$(arg dekf_max_nis_uwb)" />
