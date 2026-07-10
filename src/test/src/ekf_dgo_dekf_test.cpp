@@ -158,15 +158,18 @@ public:
 	                }
 	            }
 
-	            // 初始化 pairwise 统计
-	            for (size_t i = 0; i < na; ++i)
-	            {
-	                for (size_t j = i + 1; j < na; ++j)
-	                {
-	                    pair_keys_.push_back(std::make_pair(i, j));
-	                    pair_stats_[std::make_pair(i, j)] = PairStats();
-	                }
-	            }
+		            // 初始化 pairwise 统计 (只评价涉及 reference 的 pair)
+		            for (size_t i = 0; i < na; ++i)
+		            {
+		                for (size_t j = i + 1; j < na; ++j)
+		                {
+		                    if (all_iris_[i] != reference_name_ &&
+		                        all_iris_[j] != reference_name_)
+		                        continue;
+		                    pair_keys_.push_back(std::make_pair(i, j));
+		                    pair_stats_[std::make_pair(i, j)] = PairStats();
+		                }
+		            }
 	        }
 
 	        ensureCsvDir();
