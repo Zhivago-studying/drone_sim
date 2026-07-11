@@ -358,6 +358,22 @@ private:
         bool has_theta = false;
     };
 
+    struct AdaptiveUwbInfo
+    {
+        AdaptiveUwbInfo()
+            : noise(std::numeric_limits<double>::quiet_NaN()),
+              scale(std::numeric_limits<double>::quiet_NaN()),
+              anchor_age(std::numeric_limits<double>::quiet_NaN()),
+              reason("none")
+        {
+        }
+
+        double noise;
+        double scale;
+        double anchor_age;
+        std::string reason;
+    };
+
     // 已经被滤波器接受、需要随 cache replay 重放的观测。
     // 注意：H/K/I_KH 是旧线性化结果，不能替代原始 Observation。
     struct AppliedObservation
@@ -584,6 +600,7 @@ private:
         csv_ << "time,event,target,obs_type,accepted,delayed,p_updated,reason,"
              << "obs_stamp,filter_stamp,age,history_match_dt,residual_norm,nis,"
              << "gain_consistency_error,"
+             << "uwb_noise_eff,uwb_noise_scale,uwb_anchor_age,uwb_adaptive_reason,"
              << "x,y,z,vx,vy,vz,"
              << "Pxx,Pyy,Pzz,Pvxvx,Pvyvy,Pvzvz,"
              << "pending_size,cache_size,publish_count,current_updates,delayed_updates,"
@@ -606,7 +623,8 @@ private:
                    double history_match_dt,
                    double residual_norm,
                    double nis,
-                   double gain_consistency_error = std::numeric_limits<double>::quiet_NaN())
+                   double gain_consistency_error = std::numeric_limits<double>::quiet_NaN(),
+                   const AdaptiveUwbInfo &adaptive_uwb = AdaptiveUwbInfo())
     {
         if (!csv_.is_open())
             return;
@@ -639,6 +657,10 @@ private:
              << residual_norm << ","
              << nis << ","
              << gain_consistency_error << ","
+             << adaptive_uwb.noise << ","
+             << adaptive_uwb.scale << ","
+             << adaptive_uwb.anchor_age << ","
+             << adaptive_uwb.reason << ","
              << f.X[0] << "," << f.X[1] << "," << f.X[2] << ","
              << f.X[3] << "," << f.X[4] << "," << f.X[5] << ","
              << f.P(0, 0) << "," << f.P(1, 1) << "," << f.P(2, 2) << ","
@@ -672,13 +694,14 @@ private:
                            double history_match_dt,
                            double residual_norm,
                            double nis,
-                           double gain_consistency_error = std::numeric_limits<double>::quiet_NaN())
+                           double gain_consistency_error = std::numeric_limits<double>::quiet_NaN(),
+                           const AdaptiveUwbInfo &adaptive_uwb = AdaptiveUwbInfo())
     {
         const double obs_stamp =
             obs.stamp.isZero() ? std::numeric_limits<double>::quiet_NaN() : obs.stamp.toSec();
         logCsvRow(event, f, obsTypeName(obs.type), accepted, delayed, p_updated,
                   reason, obs_stamp, age, history_match_dt, residual_norm, nis,
-                  gain_consistency_error);
+                  gain_consistency_error, adaptive_uwb);
     }
 
     void logPublishRow(const Filter &f)
@@ -696,6 +719,90 @@ private:
             return false;
         const double age = (f.stamp - f.last_direction_anchor_stamp).toSec();
         return std::isfinite(age) && age >= 0.0 && age <= uwb_anchor_max_age_;
+    }
+
+    ros::Time latestReplayDirectionAnchorBefore(
+        const std::deque<History_Record> &cache,
+        int start_idx) const
+    {
+        ros::Time anchor_stamp;
+        const int end = std::min(start_idx, static_cast<int>(cache.size()));
+        for (int i = 0; i < end; ++i)
+        {
+            const History_Record &rec = cache[static_cast<size_t>(i)];
+            for (const AppliedObservation &u : rec.updates)
+            {
+                if (u.obs.type == ObsType::DGO ||
+                    u.obs.type == ObsType::CAMERA_BEARING)
+                {
+                    anchor_stamp = rec.stamp;
+                }
+            }
+        }
+        return anchor_stamp;
+    }
+
+    AdaptiveUwbInfo applyAdaptiveUwbNoise(const ros::Time &update_stamp,
+                                          const ros::Time &direction_anchor_stamp,
+                                          const Observation &obs,
+                                          const Eigen::VectorXd &residual,
+                                          Eigen::MatrixXd &R_meas) const
+    {
+        AdaptiveUwbInfo info;
+        if (obs.type != ObsType::UWB_RANGE || R_meas.rows() < 1 || R_meas.cols() < 1)
+            return info;
+
+        double scale = 1.0;
+        std::string reason = "base";
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        double anchor_age = nan;
+
+        if (require_direction_anchor_for_uwb_)
+        {
+            if (direction_anchor_stamp.isZero() || update_stamp.isZero())
+            {
+                scale = std::max(scale, 25.0);
+                reason += "+no_anchor";
+            }
+            else
+            {
+                anchor_age = (update_stamp - direction_anchor_stamp).toSec();
+                if (!std::isfinite(anchor_age) || anchor_age < 0.0)
+                {
+                    scale = std::max(scale, 25.0);
+                    reason += "+invalid_anchor_age";
+                }
+                else if (anchor_age > uwb_anchor_max_age_)
+                {
+                    scale = std::max(scale, 10.0);
+                    reason += "+stale_anchor";
+                }
+                else if (anchor_age > uwb_anchor_max_age_ * 0.5)
+                {
+                    scale = std::max(scale, 3.0);
+                    reason += "+aging_anchor";
+                }
+            }
+        }
+
+        if (residual.size() >= 1 && std::isfinite(residual(0)))
+        {
+            const double abs_res = std::abs(residual(0));
+            if (abs_res > uwb_residual_gate_ * 0.5 && abs_res <= uwb_residual_gate_)
+            {
+                const double ratio = abs_res / uwb_residual_gate_;
+                const double residual_scale = 1.0 + (ratio - 0.5) * 4.0;
+                scale *= residual_scale;
+                reason += "+large_residual";
+            }
+        }
+
+        info.scale = scale;
+        info.noise = sigma_uwb_ * scale;
+        info.anchor_age = anchor_age;
+        info.reason = reason;
+        R_meas(0, 0) = info.noise * info.noise;
+        return info;
     }
 
     void markDirectionAnchor(Filter &f)
@@ -1417,12 +1524,14 @@ private:
                          std::string &fail_reason,
                          double &fail_residual_norm,
                          double &fail_nis,
-                         bool &failed_on_gated_observation)
+                         bool &failed_on_gated_observation,
+                         AdaptiveUwbInfo &gated_adaptive_uwb)
     {
         fail_reason.clear();
         fail_residual_norm = std::numeric_limits<double>::quiet_NaN();
         fail_nis = std::numeric_limits<double>::quiet_NaN();
         failed_on_gated_observation = false;
+        gated_adaptive_uwb = AdaptiveUwbInfo();
         bool saw_gated_observation = !gate_observation;
 
         if (start_idx < 0 || start_idx >= static_cast<int>(cache.size()))
@@ -1430,6 +1539,9 @@ private:
             fail_reason = "replay_invalid_start_idx";
             return false;
         }
+
+        ros::Time replay_direction_anchor_stamp =
+            latestReplayDirectionAnchorBefore(cache, start_idx);
 
         for (int i = start_idx; i < static_cast<int>(cache.size()); ++i)
         {
@@ -1486,6 +1598,19 @@ private:
                 }
 
                 const double residual_norm = residual.norm();
+                AdaptiveUwbInfo adaptive_uwb;
+                if (obs_i.type == ObsType::UWB_RANGE)
+                {
+                    adaptive_uwb =
+                        applyAdaptiveUwbNoise(rec.stamp,
+                                              replay_direction_anchor_stamp,
+                                              obs_i,
+                                              residual,
+                                              R_meas);
+                    if (is_gated_observation)
+                        gated_adaptive_uwb = adaptive_uwb;
+                }
+
                 if (is_gated_observation)
                 {
                     fail_residual_norm = residual_norm;
@@ -1544,6 +1669,12 @@ private:
                 rec.I_KH = I_KH * rec.I_KH;
                 rec.H = Hk;
                 rec.K = K_eff;
+
+                if (obs_i.type == ObsType::DGO ||
+                    obs_i.type == ObsType::CAMERA_BEARING)
+                {
+                    replay_direction_anchor_stamp = rec.stamp;
+                }
             }
         }
 
@@ -1581,47 +1712,13 @@ private:
         }
 
         const double residual_norm = residual.norm();
+        AdaptiveUwbInfo adaptive_uwb;
         if (obs.type == ObsType::UWB_RANGE)
-        {
-            // 自适应 UWB 协方差权重：不硬拒绝，而是按条件膨胀 R_meas
-            double uwb_noise = sigma_uwb_;
-
-            // 1. anchor 不新鲜 → 膨胀
-            if (!f.last_direction_anchor_stamp.isZero() && !f.stamp.isZero())
-            {
-                const double anchor_age = (f.stamp - f.last_direction_anchor_stamp).toSec();
-                if (anchor_age > uwb_anchor_max_age_)
-                {
-                    uwb_noise *= 3.0;
-                }
-                else if (anchor_age > uwb_anchor_max_age_ * 0.5)
-                {
-                    uwb_noise *= 1.5;
-                }
-            }
-
-            // 2. 残差中等偏大但未超 hard gate → 线性膨胀
-            {
-                const double abs_res = std::abs(residual(0));
-                if (abs_res > uwb_residual_gate_ * 0.5 && abs_res <= uwb_residual_gate_)
-                {
-                    const double ratio = abs_res / uwb_residual_gate_;
-                    uwb_noise *= 1.0 + (ratio - 0.5) * 4.0;
-                }
-            }
-
-            // 3. 缓存不足 → 保守
-            if (f.cache.size() < 3)
-                uwb_noise = std::max(uwb_noise, sigma_uwb_ * 2.0);
-
-            R_meas(0, 0) = uwb_noise * uwb_noise;
-
-            if (!hasRecentDirectionAnchor(f))
-            {
-                ROS_DEBUG("[DEKF] uwb no anchor, inflated R=%.4f (noise=%.3f)",
-                          R_meas(0, 0), uwb_noise);
-            }
-        }
+            adaptive_uwb = applyAdaptiveUwbNoise(f.stamp,
+                                                 f.last_direction_anchor_stamp,
+                                                 obs,
+                                                 residual,
+                                                 R_meas);
 
         std::string gate_reason;
         if (!passHardResidualGate(obs, residual, gate_reason))
@@ -1646,7 +1743,9 @@ private:
                               gate_reason, age,
                               std::numeric_limits<double>::quiet_NaN(),
                               residual_norm,
-                              std::numeric_limits<double>::quiet_NaN());
+                              std::numeric_limits<double>::quiet_NaN(),
+                              std::numeric_limits<double>::quiet_NaN(),
+                              adaptive_uwb);
             return UpdateStatus::REJECTED;
         }
 
@@ -1660,7 +1759,9 @@ private:
                               "innovation_cov_not_invertible", age,
                               std::numeric_limits<double>::quiet_NaN(),
                               residual_norm,
-                              std::numeric_limits<double>::quiet_NaN());
+                              std::numeric_limits<double>::quiet_NaN(),
+                              std::numeric_limits<double>::quiet_NaN(),
+                              adaptive_uwb);
             return UpdateStatus::REJECTED;
         }
         const Eigen::MatrixXd S_inv = lu.inverse();
@@ -1686,7 +1787,9 @@ private:
                               "nis_reject", age,
                               std::numeric_limits<double>::quiet_NaN(),
                               residual_norm,
-                              nis);
+                              nis,
+                              std::numeric_limits<double>::quiet_NaN(),
+                              adaptive_uwb);
             return UpdateStatus::REJECTED;
         }
 
@@ -1716,7 +1819,9 @@ private:
                           "accepted", age,
                           std::numeric_limits<double>::quiet_NaN(),
                           residual_norm,
-                          nis);
+                          nis,
+                          std::numeric_limits<double>::quiet_NaN(),
+                          adaptive_uwb);
         return UpdateStatus::ACCEPTED;
     }
 
@@ -1758,12 +1863,6 @@ private:
             return UpdateStatus::REJECTED;
         }
 
-	        if (obs.type == ObsType::UWB_RANGE && !hasRecentDirectionAnchor(f))
-	        {
-	            // 不硬拒绝: 自适应 R 膨胀在后续 applyCurrentUpdate 中处理
-	            ROS_DEBUG("[DEKF] delayed uwb no anchor, will inflate R adaptively");
-	        }
-
         // 原子化 delayed update：
         // 在候选 cache 中插入新观测，并从 best_idx 节点开始 replay。
         // 新 delayed obs 的 hard/NIS gate 在 replay 中、按实际插入顺序执行，
@@ -1778,9 +1877,10 @@ private:
         double replay_residual_norm = std::numeric_limits<double>::quiet_NaN();
         double replay_nis = std::numeric_limits<double>::quiet_NaN();
         bool failed_on_gated_observation = false;
+        AdaptiveUwbInfo replay_adaptive_uwb;
         if (!replayCacheFrom(candidate_cache, best_idx, true, gated_seq,
                              replay_reason, replay_residual_norm, replay_nis,
-                             failed_on_gated_observation))
+                             failed_on_gated_observation, replay_adaptive_uwb))
         {
             obs_seq_ = seq_before;
 
@@ -1804,7 +1904,9 @@ private:
                               "cache_replay_failed_" + replay_reason, age,
                               best_dt,
                               replay_residual_norm,
-                              replay_nis);
+                              replay_nis,
+                              std::numeric_limits<double>::quiet_NaN(),
+                              replay_adaptive_uwb);
             return UpdateStatus::REJECTED;
         }
 
@@ -1818,7 +1920,9 @@ private:
                               "cache_replay_rejected_bad_final_cov", age,
                               best_dt,
                               replay_residual_norm,
-                              replay_nis);
+                              replay_nis,
+                              std::numeric_limits<double>::quiet_NaN(),
+                              replay_adaptive_uwb);
             return UpdateStatus::REJECTED;
         }
 
@@ -1832,7 +1936,9 @@ private:
                           "accepted_replayed", age,
                           best_dt,
                           replay_residual_norm,
-                          replay_nis);
+                          replay_nis,
+                          std::numeric_limits<double>::quiet_NaN(),
+                          replay_adaptive_uwb);
         return UpdateStatus::ACCEPTED;
     }
 
