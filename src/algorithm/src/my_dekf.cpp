@@ -1297,8 +1297,9 @@ private:
                 residual(0) = Z(0) - r;
                 H.resize(1, 6);
                 H << px/r, py/r, pz/r, 0.0, 0.0, 0.0;
+                // 基础 R_meas = sigma_uwb_^2, 自适应膨胀交由调用方处理
                 R_meas.resize(1, 1);
-                R_meas = R_.block(3, 3, 1, 1);
+                R_meas(0, 0) = sigma_uwb_ * sigma_uwb_;
                 return true;
             }
 
@@ -1580,15 +1581,46 @@ private:
         }
 
         const double residual_norm = residual.norm();
-        if (obs.type == ObsType::UWB_RANGE && !hasRecentDirectionAnchor(f))
+        if (obs.type == ObsType::UWB_RANGE)
         {
-            ++f.rejects;
-            logObservationRow("current_update", f, obs, 0, 0, 0,
-                              "uwb_no_recent_direction_anchor", age,
-                              std::numeric_limits<double>::quiet_NaN(),
-                              residual_norm,
-                              std::numeric_limits<double>::quiet_NaN());
-            return UpdateStatus::REJECTED;
+            // 自适应 UWB 协方差权重：不硬拒绝，而是按条件膨胀 R_meas
+            double uwb_noise = sigma_uwb_;
+
+            // 1. anchor 不新鲜 → 膨胀
+            if (!f.last_direction_anchor_stamp.isZero() && !f.stamp.isZero())
+            {
+                const double anchor_age = (f.stamp - f.last_direction_anchor_stamp).toSec();
+                if (anchor_age > uwb_anchor_max_age_)
+                {
+                    uwb_noise *= 3.0;
+                }
+                else if (anchor_age > uwb_anchor_max_age_ * 0.5)
+                {
+                    uwb_noise *= 1.5;
+                }
+            }
+
+            // 2. 残差中等偏大但未超 hard gate → 线性膨胀
+            {
+                const double abs_res = std::abs(residual(0));
+                if (abs_res > uwb_residual_gate_ * 0.5 && abs_res <= uwb_residual_gate_)
+                {
+                    const double ratio = abs_res / uwb_residual_gate_;
+                    uwb_noise *= 1.0 + (ratio - 0.5) * 4.0;
+                }
+            }
+
+            // 3. 缓存不足 → 保守
+            if (f.cache.size() < 3)
+                uwb_noise = std::max(uwb_noise, sigma_uwb_ * 2.0);
+
+            R_meas(0, 0) = uwb_noise * uwb_noise;
+
+            if (!hasRecentDirectionAnchor(f))
+            {
+                ROS_DEBUG("[DEKF] uwb no anchor, inflated R=%.4f (noise=%.3f)",
+                          R_meas(0, 0), uwb_noise);
+            }
         }
 
         std::string gate_reason;
@@ -1726,16 +1758,11 @@ private:
             return UpdateStatus::REJECTED;
         }
 
-        if (obs.type == ObsType::UWB_RANGE && !hasRecentDirectionAnchor(f))
-        {
-            ++f.rejects;
-            logObservationRow("delayed_update", f, obs, 0, 1, 0,
-                              "uwb_no_recent_direction_anchor", age,
-                              best_dt,
-                              std::numeric_limits<double>::quiet_NaN(),
-                              std::numeric_limits<double>::quiet_NaN());
-            return UpdateStatus::REJECTED;
-        }
+	        if (obs.type == ObsType::UWB_RANGE && !hasRecentDirectionAnchor(f))
+	        {
+	            // 不硬拒绝: 自适应 R 膨胀在后续 applyCurrentUpdate 中处理
+	            ROS_DEBUG("[DEKF] delayed uwb no anchor, will inflate R adaptively");
+	        }
 
         // 原子化 delayed update：
         // 在候选 cache 中插入新观测，并从 best_idx 节点开始 replay。
