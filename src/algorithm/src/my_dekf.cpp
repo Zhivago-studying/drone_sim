@@ -116,6 +116,41 @@ public:
         pnh_.param("camera_residual_gate", camera_residual_gate_, 0.5);
         pnh_.param("require_direction_anchor_for_uwb", require_direction_anchor_for_uwb_, true);
         pnh_.param("uwb_anchor_max_age", uwb_anchor_max_age_, 0.50);
+        pnh_.param("mode", fusion_mode_, 4);
+        ROS_DEBUG("[DEKF] param mode=%d", fusion_mode_);
+
+        // 根据 fusion_mode 设置传感器开关
+        enable_dgo_update_ = true;
+        switch (fusion_mode_)
+        {
+            case 1:
+                enable_uwb_update_ = false;
+                enable_camera_update_ = false;
+                break;
+            case 2:
+                enable_uwb_update_ = true;
+                enable_camera_update_ = false;
+                break;
+            case 3:
+                enable_uwb_update_ = false;
+                enable_camera_update_ = true;
+                break;
+            case 4:
+                enable_uwb_update_ = true;
+                enable_camera_update_ = true;
+                break;
+            default:
+                ROS_WARN("[DEKF] invalid fusion_mode=%d, fallback to mode=4 (DGO-UWB-Cam)", fusion_mode_);
+                fusion_mode_ = 4;
+                enable_uwb_update_ = true;
+                enable_camera_update_ = true;
+                break;
+        }
+        ROS_INFO("[DEKF] fusion mode=%d: DGO=%d UWB=%d Camera=%d",
+                 fusion_mode_,
+                 enable_dgo_update_ ? 1 : 0,
+                 enable_uwb_update_ ? 1 : 0,
+                 enable_camera_update_ ? 1 : 0);
         pnh_.param("enable_dgo_recovery", enable_dgo_recovery_, true);
         pnh_.param("dgo_recovery_gate", dgo_recovery_gate_, 3.0);
         pnh_.param("dgo_recovery_count_threshold", dgo_recovery_count_threshold_, 3);
@@ -488,6 +523,10 @@ private:
     double dgo_residual_gate_ = 2.0;
     double camera_residual_gate_ = 0.5;
     bool require_direction_anchor_for_uwb_ = true;
+    int fusion_mode_ = 4;
+    bool enable_dgo_update_ = true;
+    bool enable_uwb_update_ = true;
+    bool enable_camera_update_ = true;
     double uwb_anchor_max_age_ = 0.50;
     bool enable_dgo_recovery_ = true;
     double dgo_recovery_gate_ = 3.0;
@@ -606,7 +645,8 @@ private:
              << "pending_size,cache_size,publish_count,current_updates,delayed_updates,"
              << "dgo_updates,uwb_updates,camera_updates,rejects,delayed_p_skips,"
              << "future_requeues,old_drops,recovery_resets,dgo_recovery_count,"
-             << "last_direction_anchor_age,last_recovery_reset_age\n";
+             << "last_direction_anchor_age,last_recovery_reset_age,"
+             << "fusion_mode,enable_dgo,enable_uwb,enable_camera\n";
 
         ROS_INFO("[DEKF] debug CSV: %s", path.c_str());
     }
@@ -680,7 +720,11 @@ private:
              << f.recovery_resets << ","
              << f.dgo_recovery_count << ","
              << anchor_age << ","
-             << recovery_reset_age << "\n";
+             << recovery_reset_age << ","
+             << fusion_mode_ << ","
+             << (enable_dgo_update_ ? 1 : 0) << ","
+             << (enable_uwb_update_ ? 1 : 0) << ","
+             << (enable_camera_update_ ? 1 : 0) << "\n";
     }
 
     void logObservationRow(const std::string &event,
@@ -1062,6 +1106,9 @@ private:
     // DGO 回调: 收到 /iris_{id}/dgo_estimate 后, 与已缓存的自身 DGO 配对生成观测
     void dgoCallback(const nav_msgs::Odometry::ConstPtr &msg, int id)
     {
+        if (!enable_dgo_update_)
+            return;
+
         DGOSample sample;
         sample.msg = *msg;
         sample.stamp = msg->header.stamp;
@@ -1118,6 +1165,8 @@ private:
     // UWB 回调: 收到 uwb_processed 后, 为每个 target 生成测距观测
     void uwbCallback(const data_process::UwbProcessed::ConstPtr &msg)
     {
+        if (!enable_uwb_update_)
+            return;
         for (size_t i = 0; i < msg->target_ids.size() && i < msg->distances.size(); ++i)
         {
             int target = msg->target_ids[i];
@@ -1140,6 +1189,8 @@ private:
     // Camera 回调: 收到 camera_angle_match 后, 为每个 target 生成角度观测
     void cameraCallback(const data_process::CameraAngleMatch::ConstPtr &msg)
     {
+        if (!enable_camera_update_)
+            return;
         size_t n = std::min(msg->id.size(), std::min(msg->alpha.size(), msg->theta.size()));
         for (size_t i = 0; i < n; ++i)
         {
