@@ -64,6 +64,14 @@ struct PairStats
     std::vector<double> dt_pairs;
 };
 
+struct NormStats
+{
+    double rmse = 0.0;
+    double mean = 0.0;
+    double p95 = 0.0;
+    double max = 0.0;
+};
+
 // ── DEKF 评估节点 ─────────────────────────────────────
 class DekfEvaluator
 {
@@ -116,6 +124,7 @@ public:
         de_ignored_.resize(nt, 0);
         de_reject_model_.resize(nt, 0);
         de_error_norms_.resize(nt);
+        de_stage_error_norms_.resize(nt);
 
         // GT 缓存
         for (const auto &name : all_iris_)
@@ -286,6 +295,7 @@ public:
         de_sum_sq_[idx] += err_norm * err_norm;
         de_sample_count_[idx]++;
         de_error_norms_[idx].push_back(err_norm);
+        de_stage_error_norms_[idx][static_cast<int>(mission_stage_)].push_back(err_norm);
 
         const double Pxx = msg->pose.covariance[0];
         const double Pyy = msg->pose.covariance[7];
@@ -441,23 +451,19 @@ public:
 	    const double err_s_n = std::sqrt(err_s_x*err_s_x + err_s_y*err_s_y + err_s_z*err_s_z);
 	    const double c_n = std::sqrt(c_x*c_x + c_y*c_y + c_z*c_z);
 
+	    const int pair_stage = std::max(s_ab.mission_stage, s_ba.mission_stage);
+
 	    // 累计统计
-	    auto &ps = pair_stats_[key_ab];
-	    ps.samples++;
-	    ps.sum_sq_sym += err_s_n * err_s_n;
-	    ps.sum_sq_consistency += c_n * c_n;
-	    ps.sum_sq_a += err_a_n * err_a_n;
-	    ps.sum_sq_b += err_b_n * err_b_n;
-	    ps.err_sym_norms.push_back(err_s_n);
-	    ps.consistency_norms.push_back(c_n);
-	    ps.dt_pairs.push_back(best_dt);
+	    accumulatePairStats(pair_stats_[key_ab], err_s_n, c_n, err_a_n, err_b_n, best_dt);
+	    accumulatePairStats(pair_stage_stats_[key_ab][pair_stage],
+	                        err_s_n, c_n, err_a_n, err_b_n, best_dt);
 
 	    // 写 CSV
 	    auto csv_it = pair_csv_.find(key_ab);
 	    if (csv_it != pair_csv_.end() && csv_it->second.is_open())
 	    {
 	        csv_it->second << pair_stamp.toSec() << ','
-	                      << std::max(s_ab.mission_stage, s_ba.mission_stage) << ','
+	                      << pair_stage << ','
 	                      << best_dt << ','
 	                      << gt_x << ',' << gt_y << ',' << gt_z << ','
 	                      << r_ab_x << ',' << r_ab_y << ',' << r_ab_z << ','
@@ -474,6 +480,23 @@ public:
 	    s_ab.used = true;
 	    s_ba.used = true;
 	}
+
+    void accumulatePairStats(PairStats &ps,
+                             double err_sym_norm,
+                             double consistency_norm,
+                             double err_a_norm,
+                             double err_b_norm,
+                             double dt_pair)
+    {
+        ps.samples++;
+        ps.sum_sq_sym += err_sym_norm * err_sym_norm;
+        ps.sum_sq_consistency += consistency_norm * consistency_norm;
+        ps.sum_sq_a += err_a_norm * err_a_norm;
+        ps.sum_sq_b += err_b_norm * err_b_norm;
+        ps.err_sym_norms.push_back(err_sym_norm);
+        ps.consistency_norms.push_back(consistency_norm);
+        ps.dt_pairs.push_back(dt_pair);
+    }
 
     // ── GT 对齐 ─────────────────────────────────────────
 
@@ -564,7 +587,9 @@ public:
         reported_ = true;
 
         writeSummaryCsv();
+        writeStageSummaryCsv();
         writePairwiseSummaryCsv();
+        writePairwiseStageSummaryCsv();
 
         // legacy 输出
         fprintf(stdout, "\n=============== DEKF 相对 %s 评估 ===============\n", reference_name_.c_str());
@@ -599,22 +624,8 @@ public:
             size_t n = ps.samples;
             if (n == 0) { fprintf(stdout, "  %s <-> %s: no samples\n", all_iris_[pk.first].c_str(), all_iris_[pk.second].c_str()); continue; }
 
-            auto calc = [](const std::vector<double> &v) -> std::tuple<double,double,double,double> {
-                size_t nn = v.size();
-                double sum_sq = 0.0, sum = 0.0;
-                for (auto d : v) { sum_sq += d*d; sum += d; }
-                double rmse = std::sqrt(sum_sq / nn);
-                double mean = sum / nn;
-                auto s = v;
-                std::sort(s.begin(), s.end());
-                size_t idx = static_cast<size_t>(std::ceil(0.95 * s.size())) - 1;
-                double p95 = s[std::min(idx, s.size() - 1)];
-                double mx = *std::max_element(s.begin(), s.end());
-                return {rmse, mean, p95, mx};
-            };
-
-            auto [sr, sm, sp95, smx] = calc(ps.err_sym_norms);
-            auto [cr, cm, cp95, cmx] = calc(ps.consistency_norms);
+            const NormStats sym = calcNormStats(ps.err_sym_norms);
+            const NormStats con = calcNormStats(ps.consistency_norms);
             double ar = std::sqrt(ps.sum_sq_a / n);
             double br = std::sqrt(ps.sum_sq_b / n);
             double mean_dt = std::accumulate(ps.dt_pairs.begin(), ps.dt_pairs.end(), 0.0) / n;
@@ -626,12 +637,36 @@ public:
                     "    consistency RMSE=%.3f m  p95=%.3f m  max=%.3f m\n",
                     all_iris_[pk.first].c_str(), all_iris_[pk.second].c_str(),
                     static_cast<unsigned long>(n), mean_dt,
-                    sr, sm, sp95, smx,
+                    sym.rmse, sym.mean, sym.p95, sym.max,
                     all_iris_[pk.first].c_str(), all_iris_[pk.second].c_str(), ar,
                     all_iris_[pk.second].c_str(), all_iris_[pk.first].c_str(), br,
-                    cr, cp95, cmx);
+                    con.rmse, con.p95, con.max);
         }
         fprintf(stdout, "===================================================\n\n");
+    }
+
+    NormStats calcNormStats(const std::vector<double> &values) const
+    {
+        NormStats out;
+        const size_t n = values.size();
+        if (n == 0) return out;
+
+        double sum_sq = 0.0, sum = 0.0;
+        for (double v : values)
+        {
+            sum_sq += v * v;
+            sum += v;
+        }
+
+        auto sorted = values;
+        std::sort(sorted.begin(), sorted.end());
+        const size_t p95_idx = static_cast<size_t>(std::ceil(0.95 * sorted.size())) - 1;
+
+        out.rmse = std::sqrt(sum_sq / n);
+        out.mean = sum / n;
+        out.p95 = sorted[std::min(p95_idx, sorted.size() - 1)];
+        out.max = *std::max_element(sorted.begin(), sorted.end());
+        return out;
     }
 
     void writeSummaryCsv()
@@ -667,6 +702,41 @@ public:
         ROS_INFO("[DEKF TEST] summary CSV: %s", path.c_str());
     }
 
+    void writeStageSummaryCsv()
+    {
+        std::string path = csv_dir_ + "/dekf_stage_summary.csv";
+        std::ofstream csv(path.c_str(), std::ios::out | std::ios::trunc);
+        if (!csv.is_open()) { ROS_WARN("[DEKF TEST] cannot open stage summary CSV: %s", path.c_str()); return; }
+        csv << std::fixed << std::setprecision(9);
+        csv << "target,reference,mission_stage,samples,rmse_m,mean_error_m,p95_error_m,max_error_m\n";
+
+        for (size_t i = 0; i < target_names_.size(); ++i)
+        {
+            for (const auto &kv : de_stage_error_norms_[i])
+            {
+                const int stage = kv.first;
+                const auto &errors = kv.second;
+                const size_t n = errors.size();
+                if (n == 0) continue;
+
+                double sum_sq = 0.0, sum = 0.0;
+                for (double e : errors) { sum_sq += e * e; sum += e; }
+                auto sorted = errors;
+                std::sort(sorted.begin(), sorted.end());
+                const size_t p95_idx = static_cast<size_t>(std::ceil(0.95 * sorted.size())) - 1;
+                const double p95 = sorted[std::min(p95_idx, sorted.size() - 1)];
+                const double mx = *std::max_element(sorted.begin(), sorted.end());
+
+                csv << target_names_[i] << ',' << reference_name_ << ','
+                    << stage << ',' << n << ','
+                    << std::sqrt(sum_sq / n) << ','
+                    << sum / n << ','
+                    << p95 << ',' << mx << '\n';
+            }
+        }
+        ROS_INFO("[DEKF TEST] stage summary CSV: %s", path.c_str());
+    }
+
     void writePairwiseSummaryCsv()
     {
         if (!enable_pairwise_eval_) return;
@@ -683,28 +753,58 @@ public:
             const auto &ps = pair_stats_[pk];
             size_t n = ps.samples;
             if (n == 0) continue;
-            auto calc = [](const std::vector<double> &v) -> std::tuple<double,double,double,double> {
-                size_t nn = v.size(); double sum_sq = 0.0, sum = 0.0;
-                for (auto d : v) { sum_sq += d*d; sum += d; }
-                double rmse = std::sqrt(sum_sq / nn), mean = sum / nn;
-                auto s = v; std::sort(s.begin(), s.end());
-                size_t idx = static_cast<size_t>(std::ceil(0.95 * s.size())) - 1;
-                double p95 = s[std::min(idx, s.size() - 1)];
-                double mx = *std::max_element(s.begin(), s.end());
-                return {rmse, mean, p95, mx};
-            };
-            auto [sr, sm, sp95, smx] = calc(ps.err_sym_norms);
-            auto [cr, cm, cp95, cmx] = calc(ps.consistency_norms);
+            const NormStats sym = calcNormStats(ps.err_sym_norms);
+            const NormStats con = calcNormStats(ps.consistency_norms);
             double ar = std::sqrt(ps.sum_sq_a / n);
             double br = std::sqrt(ps.sum_sq_b / n);
             double mean_dt = std::accumulate(ps.dt_pairs.begin(), ps.dt_pairs.end(), 0.0) / n;
             csv << all_iris_[pk.first] << ',' << all_iris_[pk.second] << ','
                 << n << ',' << mean_dt << ','
-                << sr << ',' << sm << ',' << sp95 << ',' << smx << ','
+                << sym.rmse << ',' << sym.mean << ',' << sym.p95 << ',' << sym.max << ','
                 << ar << ',' << br << ','
-                << cr << ',' << cp95 << ',' << cmx << '\n';
+                << con.rmse << ',' << con.p95 << ',' << con.max << '\n';
         }
         ROS_INFO("[DEKF TEST] pairwise summary CSV: %s", path.c_str());
+    }
+
+    void writePairwiseStageSummaryCsv()
+    {
+        if (!enable_pairwise_eval_) return;
+        std::string path = pairwise_dir_ + "/dekf_pairwise_stage_summary.csv";
+        std::ofstream csv(path.c_str(), std::ios::out | std::ios::trunc);
+        if (!csv.is_open()) { ROS_WARN("[DEKF TEST] cannot open pairwise stage summary: %s", path.c_str()); return; }
+        csv << std::fixed << std::setprecision(9);
+        csv << "pair_a,pair_b,mission_stage,samples,mean_pair_dt,"
+            << "sym_rmse,sym_mean,sym_p95,sym_max,"
+            << "one_way_a_rmse,one_way_b_rmse,"
+            << "consistency_rmse,consistency_p95,consistency_max\n";
+
+        for (const auto &pk : pair_keys_)
+        {
+            auto pair_it = pair_stage_stats_.find(pk);
+            if (pair_it == pair_stage_stats_.end()) continue;
+
+            for (const auto &stage_kv : pair_it->second)
+            {
+                const int stage = stage_kv.first;
+                const auto &ps = stage_kv.second;
+                const size_t n = ps.samples;
+                if (n == 0) continue;
+
+                const NormStats sym = calcNormStats(ps.err_sym_norms);
+                const NormStats con = calcNormStats(ps.consistency_norms);
+                double ar = std::sqrt(ps.sum_sq_a / n);
+                double br = std::sqrt(ps.sum_sq_b / n);
+                double mean_dt = std::accumulate(ps.dt_pairs.begin(), ps.dt_pairs.end(), 0.0) / n;
+
+                csv << all_iris_[pk.first] << ',' << all_iris_[pk.second] << ','
+                    << stage << ',' << n << ',' << mean_dt << ','
+                    << sym.rmse << ',' << sym.mean << ',' << sym.p95 << ',' << sym.max << ','
+                    << ar << ',' << br << ','
+                    << con.rmse << ',' << con.p95 << ',' << con.max << '\n';
+            }
+        }
+        ROS_INFO("[DEKF TEST] pairwise stage summary CSV: %s", path.c_str());
     }
 
 private:
@@ -732,6 +832,7 @@ private:
     std::vector<PairKey> pair_keys_;
     std::map<PairKey, std::deque<DekfSample>> dekf_buffers_;
     std::map<PairKey, PairStats> pair_stats_;
+    std::map<PairKey, std::map<int, PairStats>> pair_stage_stats_;
     std::map<PairKey, std::ofstream> pair_csv_;
 
     // GT 缓存
@@ -756,6 +857,7 @@ private:
     std::vector<size_t> de_ignored_;
     std::vector<size_t> de_reject_model_;
     std::vector<std::vector<double>> de_error_norms_;
+    std::vector<std::map<int, std::vector<double>>> de_stage_error_norms_;
     std::vector<std::ofstream> de_csv_;
     bool reported_ = false;
 };

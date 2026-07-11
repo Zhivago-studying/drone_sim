@@ -72,7 +72,7 @@
   <arg name="dekf_delayed_update_gain_weight" default="$(arg dekf_delayed_covariance_weight)" />
   <arg name="dekf_max_nis" default="25.0" />
   <arg name="dekf_max_nis_dgo" default="16.3" />
-  <arg name="dekf_max_nis_uwb" default="9.0" />
+  <arg name="dekf_max_nis_uwb" default="12.0" />
   <arg name="dekf_max_nis_camera_1d" default="9.0" />
   <arg name="dekf_max_nis_camera_2d" default="13.8" />
   <arg name="dekf_uwb_residual_gate" default="0.8" />

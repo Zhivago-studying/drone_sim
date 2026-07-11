@@ -108,7 +108,7 @@ public:
         }
         pnh_.param("max_nis", max_nis_, 25.0);
         pnh_.param("max_nis_dgo", max_nis_dgo_, 16.3);
-        pnh_.param("max_nis_uwb", max_nis_uwb_, 9.0);
+        pnh_.param("max_nis_uwb", max_nis_uwb_, 12.0);
         pnh_.param("max_nis_camera_1d", max_nis_camera_1d_, 9.0);
         pnh_.param("max_nis_camera_2d", max_nis_camera_2d_, 13.8);
         pnh_.param("uwb_residual_gate", uwb_residual_gate_, 0.8);
@@ -465,7 +465,7 @@ private:
     double delayed_update_gain_weight_ = 1.0;
     double max_nis_ = 25.0;
     double max_nis_dgo_ = 16.3;
-    double max_nis_uwb_ = 9.0;
+    double max_nis_uwb_ = 12.0;
     double max_nis_camera_1d_ = 9.0;
     double max_nis_camera_2d_ = 13.8;
     double uwb_residual_gate_ = 0.8;
