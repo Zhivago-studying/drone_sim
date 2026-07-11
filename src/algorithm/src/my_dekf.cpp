@@ -721,6 +721,13 @@ private:
         return std::isfinite(age) && age >= 0.0 && age <= uwb_anchor_max_age_;
     }
 
+    bool hasAnyDirectionAnchor(const Filter &f) const
+    {
+        if (!require_direction_anchor_for_uwb_)
+            return true;
+        return !f.last_direction_anchor_stamp.isZero();
+    }
+
     ros::Time latestReplayDirectionAnchorBefore(
         const std::deque<History_Record> &cache,
         int start_idx) const
@@ -761,8 +768,10 @@ private:
         {
             if (direction_anchor_stamp.isZero() || update_stamp.isZero())
             {
-                scale = std::max(scale, 25.0);
-                reason += "+no_anchor";
+                // no-anchor UWB should be rejected before reaching this function.
+                // Keep this conservative fallback for defensive robustness.
+                scale = std::max(scale, 100.0);
+                reason += "+no_anchor_unexpected";
             }
             else
             {
@@ -1601,6 +1610,21 @@ private:
                 AdaptiveUwbInfo adaptive_uwb;
                 if (obs_i.type == ObsType::UWB_RANGE)
                 {
+                    if (require_direction_anchor_for_uwb_ &&
+                        replay_direction_anchor_stamp.isZero())
+                    {
+                        failed_on_gated_observation = is_gated_observation;
+                        fail_residual_norm = residual_norm;
+                        fail_reason = "uwb_no_direction_anchor";
+                        if (is_gated_observation)
+                        {
+                            gated_adaptive_uwb.reason = "no_anchor_reject";
+                            gated_adaptive_uwb.scale = std::numeric_limits<double>::infinity();
+                            gated_adaptive_uwb.noise = std::numeric_limits<double>::infinity();
+                        }
+                        return false;
+                    }
+
                     adaptive_uwb =
                         applyAdaptiveUwbNoise(rec.stamp,
                                               replay_direction_anchor_stamp,
@@ -1714,11 +1738,30 @@ private:
         const double residual_norm = residual.norm();
         AdaptiveUwbInfo adaptive_uwb;
         if (obs.type == ObsType::UWB_RANGE)
+        {
+            if (!hasAnyDirectionAnchor(f))
+            {
+                adaptive_uwb.reason = "no_anchor_reject";
+                adaptive_uwb.scale = std::numeric_limits<double>::infinity();
+                adaptive_uwb.noise = std::numeric_limits<double>::infinity();
+
+                ++f.rejects;
+                logObservationRow("current_update", f, obs, 0, 0, 0,
+                                  "uwb_no_direction_anchor", age,
+                                  std::numeric_limits<double>::quiet_NaN(),
+                                  residual_norm,
+                                  std::numeric_limits<double>::quiet_NaN(),
+                                  std::numeric_limits<double>::quiet_NaN(),
+                                  adaptive_uwb);
+                return UpdateStatus::REJECTED;
+            }
+
             adaptive_uwb = applyAdaptiveUwbNoise(f.stamp,
                                                  f.last_direction_anchor_stamp,
                                                  obs,
                                                  residual,
                                                  R_meas);
+        }
 
         std::string gate_reason;
         if (!passHardResidualGate(obs, residual, gate_reason))
