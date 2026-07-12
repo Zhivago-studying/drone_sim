@@ -41,7 +41,7 @@
 #include <nav_msgs/Odometry.h>
 #include <std_msgs/UInt8.h>
 #include <geometry_msgs/Point.h>
-#include <geometry_msgs/PoseStamped.h>
+#include <gazebo_msgs/ModelStates.h>
 #include <Eigen/Dense>
 #include <algorithm>
 #include <array>
@@ -348,27 +348,27 @@ public:
 	        camera_sub_ = nh_.subscribe<data_process::CameraAngleMatch>(
 	            "camera_angle_match", 10, &DEKF::cameraCallback, this);
 
-	        // GT 真值订阅 (用于 delayed update 验证)
-	        if (delayed_validation_enabled_)
-	        {
-	            for (int i = 0; i < 4; ++i)
-	            {
-	                const std::string topic =
-	                    "/iris_" + std::to_string(i) + "/mavros/local_position/pose";
-	                gt_subs_[i] = nh_.subscribe<geometry_msgs::PoseStamped>(
-	                    topic, 200,
-	                    boost::bind(&DEKF::gtCallback, this, _1, i));
-	            }
-	        }
+		    // GT 真值订阅 (用于 delayed update 验证, 从 /gazebo/model_states 获取)
+		    if (delayed_validation_enabled_)
+		    {
+		        model_gt_sub_ = nh_.subscribe<gazebo_msgs::ModelStates>(
+		            "/gazebo/model_states", 100,
+		            &DEKF::gtModelStatesCb, this);
+		    }
 
-	        openCsv();
+		    openCsv();
 
 	        // DEKF 定时器
 	        timer_ = nh_.createTimer(ros::Duration(1.0 / rate_),
-	                                 &DEKF::dekfCallback, this);
-	    }
+		                                 &DEKF::dekfCallback, this);
+		    }
 
-private:
+		    ~DEKF()
+		    {
+		        writeDelayedAgeSummary();
+		    }
+
+	private:
     // ═══════════════════════════════════════════════════════════
     //  类型定义
     // ═══════════════════════════════════════════════════════════
@@ -381,14 +381,17 @@ private:
         CAMERA_BEARING   // 相机角度观测
     };
 
-    struct GtSample
-    {
-        ros::Time stamp;
-        Eigen::Vector3d p = Eigen::Vector3d::Zero();
-    };
+	    // GT 真值采样 (来自 /gazebo/model_states, 用于 delayed update 验证)
+	struct GtWorldSample
+	{
+	    ros::Time stamp;
+	    std::array<Eigen::Vector3d, 4> p = {
+	        Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+	        Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero()
+	    };
+	};
 
-
-    enum class UpdateStatus
+	    enum class UpdateStatus
     {
         ACCEPTED,
         REJECTED,
@@ -620,9 +623,14 @@ private:
 	    std::vector<Filter> filters_;
 	    std::vector<std::deque<DGOSample>> dgo_cache_;
 
-	    // GT 真值缓存 (用于 delayed update 验证)
-	    std::array<std::deque<GtSample>, 4> gt_buffers_;
-	    std::array<ros::Subscriber, 4> gt_subs_;
+	    // GT 真值缓存 (来自 /gazebo/model_states, 用于 delayed update 验证)
+	    std::deque<GtWorldSample> model_gt_buffer_;
+	    ros::Subscriber model_gt_sub_;
+	    // 延迟观测 age 统计 (写文件用)
+	    double delayed_attempt_age_sum_ = 0.0;
+	    size_t delayed_attempt_age_count_ = 0;
+	    double delayed_accepted_age_sum_ = 0.0;
+	    size_t delayed_accepted_age_count_ = 0;
 
 	    // 编队初始 offset (用于 DGO 相对位置补齐)
     std::vector<Eigen::Vector3d> initial_offsets_;
@@ -1119,45 +1127,69 @@ private:
     }
 
     // ── GT 插值函数 ──────────────────────────────────────
-    bool interpolateGt(const std::deque<GtSample> &buf,
-                       const ros::Time &stamp,
-                       Eigen::Vector3d &p) const
-    {
-        if (buf.size() < 2) return false;
-        if (stamp < buf.front().stamp || stamp > buf.back().stamp)
-            return false;
+	    bool interpolateGt(const std::deque<GtWorldSample> &buf,
+	                       int uav_id,
+	                       const ros::Time &stamp,
+	                       Eigen::Vector3d &p) const
+	    {
+	        if (buf.empty()) return false;
 
-        for (size_t i = 1; i < buf.size(); ++i)
-        {
-            const auto &a = buf[i - 1];
-            const auto &b = buf[i];
-            if (a.stamp <= stamp && stamp <= b.stamp)
-            {
-		                double dt = (b.stamp - a.stamp).toSec();
-		                if (dt < 1e-9) { p = a.p; return true; }
-		                double da = std::abs((stamp - a.stamp).toSec());
-		                double db = std::abs((b.stamp - stamp).toSec());
-		                if (std::min(da, db) > delayed_validation_gt_max_dt_) return false;
-                double alpha = (stamp - a.stamp).toSec() / dt;
-                p = (1.0 - alpha) * a.p + alpha * b.p;
-                return true;
-            }
-        }
-        return false;
-    }
+	        // 边界外: stamp 稍早于最早 → 用最近邻
+	        if (stamp < buf.front().stamp)
+	        {
+	            double dt = (buf.front().stamp - stamp).toSec();
+	            if (dt <= delayed_validation_gt_max_dt_)
+	            {
+	                p = buf.front().p[uav_id];
+	                return true;
+	            }
+	            return false;
+	        }
 
-    bool getRelativeGroundTruth(int self_id, int target_id,
-                                const ros::Time &stamp,
-                                Eigen::Vector3d &rel_gt) const
-    {
-        if (self_id < 0 || self_id >= 4 || target_id < 0 || target_id >= 4)
-            return false;
-        Eigen::Vector3d p_self, p_target;
-        if (!interpolateGt(gt_buffers_[self_id], stamp, p_self)) return false;
-        if (!interpolateGt(gt_buffers_[target_id], stamp, p_target)) return false;
-        rel_gt = p_target - p_self;
-        return true;
-    }
+	        // 边界外: stamp 稍晚于最晚 → 用最近邻
+	        if (stamp > buf.back().stamp)
+	        {
+	            double dt = (stamp - buf.back().stamp).toSec();
+	            if (dt <= delayed_validation_gt_max_dt_)
+	            {
+	                p = buf.back().p[uav_id];
+	                return true;
+	            }
+	            return false;
+	        }
+
+	        // 正常区间插值
+	        for (size_t i = 1; i < buf.size(); ++i)
+	        {
+	            const auto &a = buf[i - 1];
+	            const auto &b = buf[i];
+	            if (a.stamp <= stamp && stamp <= b.stamp)
+	            {
+	                double dt = (b.stamp - a.stamp).toSec();
+	                if (dt < 1e-9) { p = a.p[uav_id]; return true; }
+	                double da = std::abs((stamp - a.stamp).toSec());
+	                double db = std::abs((b.stamp - stamp).toSec());
+	                if (std::min(da, db) > delayed_validation_gt_max_dt_) return false;
+	                double alpha = (stamp - a.stamp).toSec() / dt;
+	                p = (1.0 - alpha) * a.p[uav_id] + alpha * b.p[uav_id];
+	                return true;
+	            }
+	        }
+	        return false;
+	    }
+
+	    bool getRelativeGroundTruth(int self_id, int target_id,
+	                                const ros::Time &stamp,
+	                                Eigen::Vector3d &rel_gt) const
+	    {
+	        if (self_id < 0 || self_id >= 4 || target_id < 0 || target_id >= 4)
+	            return false;
+	        Eigen::Vector3d p_self, p_target;
+	        if (!interpolateGt(model_gt_buffer_, self_id, stamp, p_self)) return false;
+	        if (!interpolateGt(model_gt_buffer_, target_id, stamp, p_target)) return false;
+	        rel_gt = p_target - p_self;
+	        return true;
+	    }
 
 	    uint64_t recordAcceptedObservation(History_Record &rec,
 	                                       const Observation &obs,
@@ -1357,23 +1389,37 @@ private:
 	    }
 
 	    // ── GT 真值回调 ──────────────────────────────────────
-	    void gtCallback(const geometry_msgs::PoseStamped::ConstPtr &msg, int id)
+	    int findModelIndex(const gazebo_msgs::ModelStates::ConstPtr &msg,
+	                       const std::string &name) const
 	    {
-	        if (id < 0 || id >= 4) return;
+	        for (size_t i = 0; i < msg->name.size(); ++i)
+	            if (msg->name[i] == name) return static_cast<int>(i);
+	        return -1;
+	    }
+
+	    void gtModelStatesCb(const gazebo_msgs::ModelStates::ConstPtr &msg)
+	    {
 	        if (!delayed_validation_enabled_) return;
 
-	        GtSample s;
-	        s.stamp = msg->header.stamp;
-	        s.p << msg->pose.position.x,
-	               msg->pose.position.y,
-	               msg->pose.position.z;
+	        GtWorldSample s;
+	        s.stamp = ros::Time::now();
 
-	        auto &buf = gt_buffers_[id];
-	        buf.push_back(s);
+	        for (int id = 0; id < 4; ++id)
+	        {
+	            const std::string name = "iris_" + std::to_string(id);
+	            const int idx = findModelIndex(msg, name);
+	            if (idx < 0 || idx >= static_cast<int>(msg->pose.size()))
+	                return;  // 本帧不完整, 丢弃
+	            s.p[id] << msg->pose[idx].position.x,
+	                      msg->pose[idx].position.y,
+	                      msg->pose[idx].position.z;
+	        }
 
+	        model_gt_buffer_.push_back(s);
 	        constexpr double kGtKeepSec = 10.0;
-	        while (!buf.empty() && (s.stamp - buf.front().stamp).toSec() > kGtKeepSec)
-	            buf.pop_front();
+	        while (model_gt_buffer_.size() > 2 &&
+	               (s.stamp - model_gt_buffer_.front().stamp).toSec() > kGtKeepSec)
+	            model_gt_buffer_.pop_front();
 	    }
 
 	    // ═══════════════════════════════════════════════════════════
@@ -1442,7 +1488,7 @@ private:
                     f.pending_obs.push_back(obs);
                     while (f.pending_obs.size() > static_cast<size_t>(max_pending_))
                         f.pending_obs.pop_front();
-                    ++f.future_requeues;
+	                    ++f.future_requeues;
                     logObservationRow("requeue_future", f, obs, 0, 0, 0,
                                       "future_observation", age,
                                       std::numeric_limits<double>::quiet_NaN(),
@@ -2168,10 +2214,54 @@ private:
 	        writeDelayedValidationCsv(val);
 	    }
 
-	    UpdateStatus applyDelayedUpdate(Filter &f, const Observation &obs)
-    {
-        const double age = (f.stamp - obs.stamp).toSec();
-        if (f.cache.empty())
+	    void writeDelayedAgeSummary()
+	    {
+	        if (csv_dir_.empty()) return;
+
+	        const std::string self_name = "iris_" + std::to_string(uav_id_);
+	        const std::string path = csv_dir_ + "/" + self_name + "_delayed_avg_age.txt";
+	        std::ofstream f(path.c_str(), std::ios::out | std::ios::trunc);
+	        if (!f.is_open()) return;
+
+	        f << std::fixed << std::setprecision(2);
+
+	        if (delayed_attempt_age_count_ > 0)
+	        {
+	            const double avg_ms = (delayed_attempt_age_sum_ / delayed_attempt_age_count_) * 1000.0;
+	            f << "延迟观测尝试次数：" << delayed_attempt_age_count_ << "\n";
+	            f << "延迟观测平均时间延迟（尝试）：" << avg_ms << " ms\n";
+	        }
+	        else
+	        {
+	            f << "延迟观测尝试次数：0\n";
+	        }
+
+	        if (delayed_accepted_age_count_ > 0)
+	        {
+	            const double avg_ms = (delayed_accepted_age_sum_ / delayed_accepted_age_count_) * 1000.0;
+	            f << "延迟观测接受次数：" << delayed_accepted_age_count_ << "\n";
+	            f << "延迟观测平均时间延迟（接受）：" << avg_ms << " ms\n";
+	        }
+	        else
+	        {
+	            f << "延迟观测接受次数：0\n";
+	        }
+
+	        f.close();
+	    }
+
+		UpdateStatus applyDelayedUpdate(Filter &f, const Observation &obs)
+	    {
+	        const double age = (f.stamp - obs.stamp).toSec();
+
+	        // 统计延迟观测 age
+		        if (std::isfinite(age))
+		        {
+		            delayed_attempt_age_sum_ += age;
+		            delayed_attempt_age_count_++;
+		        }
+
+	        if (f.cache.empty())
         {
             ++f.rejects;
             logObservationRow("delayed_update", f, obs, 0, 1, 0,
@@ -2343,9 +2433,17 @@ private:
                           replay_residual_norm,
                           replay_nis,
                           std::numeric_limits<double>::quiet_NaN(),
-                          replay_adaptive_uwb);
-        return UpdateStatus::ACCEPTED;
-    }
+	                          replay_adaptive_uwb);
+
+	        // 统计被接受的 delayed update age
+	        if (std::isfinite(age))
+	        {
+	            delayed_accepted_age_sum_ += age;
+	            delayed_accepted_age_count_++;
+	        }
+
+	        return UpdateStatus::ACCEPTED;
+	    }
 
     // ═══════════════════════════════════════════════════════════
     //  发布函数
