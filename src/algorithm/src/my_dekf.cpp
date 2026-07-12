@@ -86,9 +86,9 @@ public:
         pnh_.param("sigma_ax", sigma_ax_, 0.80);
         pnh_.param("sigma_ay", sigma_ay_, 0.80);
         pnh_.param("sigma_az", sigma_az_, 0.80);
-        pnh_.param("sigma_px", sigma_px_, 0.18);
-        pnh_.param("sigma_py", sigma_py_, 0.18);
-        pnh_.param("sigma_pz", sigma_pz_, 0.18);
+        pnh_.param("sigma_px", sigma_px_, 0.12);
+        pnh_.param("sigma_py", sigma_py_, 0.12);
+        pnh_.param("sigma_pz", sigma_pz_, 0.12);
         pnh_.param("sigma_uwb", sigma_uwb_, 0.05);
         pnh_.param("sigma_alpha", sigma_alpha_, 0.05);
         pnh_.param("sigma_theta", sigma_theta_, 0.05);
@@ -564,9 +564,9 @@ public:
     Eigen::Matrix3d Q_;
 
     // 噪声参数 (观测噪声)
-    double sigma_px_ = 0.18;
-    double sigma_py_ = 0.18;
-    double sigma_pz_ = 0.18;
+    double sigma_px_ = 0.12;
+    double sigma_py_ = 0.12;
+    double sigma_pz_ = 0.12;
     double sigma_uwb_ = 0.05;
     double sigma_alpha_ = 0.05;
     double sigma_theta_ = 0.05;

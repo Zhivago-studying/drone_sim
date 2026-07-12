@@ -223,6 +223,7 @@ catkin_install_python(PROGRAMS
   scripts/ekf_plot.py
   scripts/ekf_relative_plot.py
   scripts/dgo_ekf_plot.py
+  scripts/dekf_dgo_ekf_plot.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
