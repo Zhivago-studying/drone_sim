@@ -41,8 +41,10 @@
 #include <nav_msgs/Odometry.h>
 #include <std_msgs/UInt8.h>
 #include <geometry_msgs/Point.h>
+#include <geometry_msgs/PoseStamped.h>
 #include <Eigen/Dense>
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
@@ -115,8 +117,10 @@ public:
         pnh_.param("dgo_residual_gate", dgo_residual_gate_, 2.0);
         pnh_.param("camera_residual_gate", camera_residual_gate_, 0.5);
         pnh_.param("require_direction_anchor_for_uwb", require_direction_anchor_for_uwb_, true);
-        pnh_.param("uwb_anchor_max_age", uwb_anchor_max_age_, 0.50);
-        pnh_.param("mode", fusion_mode_, 4);
+	        pnh_.param("uwb_anchor_max_age", uwb_anchor_max_age_, 0.50);
+	        pnh_.param("delayed_validation_enabled", delayed_validation_enabled_, false);
+	        pnh_.param("delayed_validation_gt_max_dt", delayed_validation_gt_max_dt_, 0.05);
+	        pnh_.param("mode", fusion_mode_, 4);
         ROS_DEBUG("[DEKF] param mode=%d", fusion_mode_);
 
         // 根据 fusion_mode 设置传感器开关
@@ -341,10 +345,23 @@ public:
         // UWB / Camera 订阅
         uwb_sub_ = nh_.subscribe<data_process::UwbProcessed>(
             "uwb_processed", 10, &DEKF::uwbCallback, this);
-        camera_sub_ = nh_.subscribe<data_process::CameraAngleMatch>(
-            "camera_angle_match", 10, &DEKF::cameraCallback, this);
+	        camera_sub_ = nh_.subscribe<data_process::CameraAngleMatch>(
+	            "camera_angle_match", 10, &DEKF::cameraCallback, this);
 
-        openCsv();
+	        // GT 真值订阅 (用于 delayed update 验证)
+	        if (delayed_validation_enabled_)
+	        {
+	            for (int i = 0; i < 4; ++i)
+	            {
+	                const std::string topic =
+	                    "/iris_" + std::to_string(i) + "/mavros/local_position/pose";
+	                gt_subs_[i] = nh_.subscribe<geometry_msgs::PoseStamped>(
+	                    topic, 200,
+	                    boost::bind(&DEKF::gtCallback, this, _1, i));
+	            }
+	        }
+
+	        openCsv();
 
 	        // DEKF 定时器
 	        timer_ = nh_.createTimer(ros::Duration(1.0 / rate_),
@@ -363,6 +380,13 @@ private:
         UWB_RANGE,       // UWB 测距观测
         CAMERA_BEARING   // 相机角度观测
     };
+
+    struct GtSample
+    {
+        ros::Time stamp;
+        Eigen::Vector3d p = Eigen::Vector3d::Zero();
+    };
+
 
     enum class UpdateStatus
     {
@@ -411,12 +435,13 @@ private:
 
     // 已经被滤波器接受、需要随 cache replay 重放的观测。
     // 注意：H/K/I_KH 是旧线性化结果，不能替代原始 Observation。
-    struct AppliedObservation
-    {
-        Observation obs;
-        uint64_t seq = 0;          // 同一 cache 节点内保持确定性顺序
-        bool delayed = false;      // 仅用于诊断/调试
-    };
+	    struct AppliedObservation
+	    {
+	        Observation obs;
+	        uint64_t seq = 0;          // 同一 cache 节点内保持确定性顺序
+	        bool delayed = false;      // 仅用于诊断/调试
+	        bool validation_target = false;  // replay 时标记为待验证的 delayed obs
+	    };
 
     // 预测历史缓存 (用于延迟补偿重传播)
     // 语义约定：
@@ -436,9 +461,46 @@ private:
         Eigen::MatrixXd H;       // 观测雅可比 (动态维度, 用于延迟补偿)
         Eigen::MatrixXd K;       // 卡尔曼增益 (用于延迟补偿)
         std::vector<AppliedObservation> updates; // 该 cache 节点已接受的原始观测
-    };
+	    };
 
-    // 滤波器: 本机到 target_id 的相对位姿/速度估计
+	    // 延迟更新验证记录 (delayed_validation_enabled_ 时使用)
+	    struct DelayedUpdateValidation
+	    {
+	        bool enabled = false;
+	        bool accepted = false;
+	        bool replay_ok = false;
+	        bool found_target_update = false;
+
+	        int self_id = -1;
+	        int target_id = -1;
+	        int best_idx = -1;
+	        int cache_size = 0;
+
+	        std::string obs_type;
+	        std::string reason;
+
+	        ros::Time obs_stamp;
+	        ros::Time delayed_update_stamp;
+	        ros::Time current_replay_stamp;
+
+	        Vector6d delayed_update_before = Vector6d::Zero();
+	        Vector6d delayed_update_after  = Vector6d::Zero();
+
+	        Vector6d current_replay_before = Vector6d::Zero();
+	        Vector6d current_replay_after  = Vector6d::Zero();
+
+	        Eigen::Vector3d delayed_update_gt = Eigen::Vector3d::Zero();
+	        Eigen::Vector3d current_replay_gt = Eigen::Vector3d::Zero();
+
+	        bool has_delayed_update_gt = false;
+	        bool has_current_replay_gt = false;
+
+	        double residual_norm = std::numeric_limits<double>::quiet_NaN();
+	        double nis = std::numeric_limits<double>::quiet_NaN();
+	        double gain_weight = std::numeric_limits<double>::quiet_NaN();
+	    };
+
+	    // 滤波器: 本机到 target_id 的相对位姿/速度估计
     struct Filter
     {
         int target_id = -1;
@@ -527,8 +589,10 @@ private:
     bool enable_dgo_update_ = true;
     bool enable_uwb_update_ = true;
     bool enable_camera_update_ = true;
-    double uwb_anchor_max_age_ = 0.50;
-    bool enable_dgo_recovery_ = true;
+	    double uwb_anchor_max_age_ = 0.50;
+	    bool delayed_validation_enabled_ = false;
+	    double delayed_validation_gt_max_dt_ = 0.05;
+	    bool enable_dgo_recovery_ = true;
     double dgo_recovery_gate_ = 3.0;
     int dgo_recovery_count_threshold_ = 3;
     double dgo_recovery_consistency_gate_ = 0.50;
@@ -544,18 +608,23 @@ private:
     bool initialized_ = false;
     uint64_t obs_seq_ = 0;
 
-    // CSV 诊断输出
-    std::string csv_dir_;
-    std::ofstream csv_;
+	    // CSV 诊断输出
+	    std::string csv_dir_;
+	    std::ofstream csv_;
+	    std::ofstream validation_csv_;
 
     // 订阅器 & 数据缓存
     std::vector<ros::Subscriber> dgo_subs_;
     ros::Subscriber uwb_sub_;
     ros::Subscriber camera_sub_;
-    std::vector<Filter> filters_;
-    std::vector<std::deque<DGOSample>> dgo_cache_;
+	    std::vector<Filter> filters_;
+	    std::vector<std::deque<DGOSample>> dgo_cache_;
 
-    // 编队初始 offset (用于 DGO 相对位置补齐)
+	    // GT 真值缓存 (用于 delayed update 验证)
+	    std::array<std::deque<GtSample>, 4> gt_buffers_;
+	    std::array<ros::Subscriber, 4> gt_subs_;
+
+	    // 编队初始 offset (用于 DGO 相对位置补齐)
     std::vector<Eigen::Vector3d> initial_offsets_;
 
     // ═══════════════════════════════════════════════════════════
@@ -648,8 +717,35 @@ private:
              << "last_direction_anchor_age,last_recovery_reset_age,"
              << "fusion_mode,enable_dgo,enable_uwb,enable_camera\n";
 
-        ROS_INFO("[DEKF] debug CSV: %s", path.c_str());
-    }
+	        ROS_INFO("[DEKF] debug CSV: %s", path.c_str());
+
+	        // 延迟更新验证 CSV (仅 delayed_validation_enabled_ 时写入)
+	        if (delayed_validation_enabled_ && csv_.is_open())
+	        {
+	            validation_csv_.open(
+	                (csv_dir_ + "/" + self_name + "_delayed_update_validation.csv").c_str(),
+	                std::ios::out | std::ios::trunc);
+	            if (validation_csv_.is_open())
+	            {
+	                validation_csv_ << std::fixed << std::setprecision(9);
+	                validation_csv_ << "time,self_id,target_id,obs_type,"
+	                                << "accepted,replay_ok,found_target_update,reason,"
+	                                << "obs_stamp,delayed_update_stamp,current_replay_stamp,"
+	                                << "best_idx,cache_size,"
+	                                << "delayed_err_before,delayed_err_after,delayed_err_delta,delayed_improved,"
+	                                << "current_err_before,current_err_after,current_err_delta,current_improved,"
+	                                << "delayed_before_x,delayed_before_y,delayed_before_z,"
+	                                << "delayed_after_x,delayed_after_y,delayed_after_z,"
+	                                << "delayed_gt_x,delayed_gt_y,delayed_gt_z,"
+	                                << "current_before_x,current_before_y,current_before_z,"
+	                                << "current_after_x,current_after_y,current_after_z,"
+	                                << "current_gt_x,current_gt_y,current_gt_z,"
+	                                << "residual_norm,nis,gain_weight,fusion_mode\n";
+	                ROS_INFO("[DEKF] delayed update validation CSV: %s",
+	                         (csv_dir_ + "/" + self_name + "_delayed_update_validation.csv").c_str());
+	            }
+	        }
+	    }
 
     void logCsvRow(const std::string &event,
                    const Filter &f,
@@ -1022,16 +1118,59 @@ private:
         }
     }
 
-    uint64_t recordAcceptedObservation(History_Record &rec,
-                                       const Observation &obs,
-                                       bool delayed)
+    // ── GT 插值函数 ──────────────────────────────────────
+    bool interpolateGt(const std::deque<GtSample> &buf,
+                       const ros::Time &stamp,
+                       Eigen::Vector3d &p) const
     {
-        AppliedObservation applied;
-        applied.obs = obs;
-        applied.seq = obs_seq_++;
-        applied.delayed = delayed;
-        const uint64_t seq = applied.seq;
-        rec.updates.push_back(applied);
+        if (buf.size() < 2) return false;
+        if (stamp < buf.front().stamp || stamp > buf.back().stamp)
+            return false;
+
+        for (size_t i = 1; i < buf.size(); ++i)
+        {
+            const auto &a = buf[i - 1];
+            const auto &b = buf[i];
+            if (a.stamp <= stamp && stamp <= b.stamp)
+            {
+		                double dt = (b.stamp - a.stamp).toSec();
+		                if (dt < 1e-9) { p = a.p; return true; }
+		                double da = std::abs((stamp - a.stamp).toSec());
+		                double db = std::abs((b.stamp - stamp).toSec());
+		                if (std::min(da, db) > delayed_validation_gt_max_dt_) return false;
+                double alpha = (stamp - a.stamp).toSec() / dt;
+                p = (1.0 - alpha) * a.p + alpha * b.p;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool getRelativeGroundTruth(int self_id, int target_id,
+                                const ros::Time &stamp,
+                                Eigen::Vector3d &rel_gt) const
+    {
+        if (self_id < 0 || self_id >= 4 || target_id < 0 || target_id >= 4)
+            return false;
+        Eigen::Vector3d p_self, p_target;
+        if (!interpolateGt(gt_buffers_[self_id], stamp, p_self)) return false;
+        if (!interpolateGt(gt_buffers_[target_id], stamp, p_target)) return false;
+        rel_gt = p_target - p_self;
+        return true;
+    }
+
+	    uint64_t recordAcceptedObservation(History_Record &rec,
+	                                       const Observation &obs,
+	                                       bool delayed,
+	                                       bool validation_target = false)
+	    {
+	        AppliedObservation applied;
+	        applied.obs = obs;
+	        applied.seq = obs_seq_++;
+	        applied.delayed = delayed;
+	        applied.validation_target = validation_target;
+	        const uint64_t seq = applied.seq;
+	        rec.updates.push_back(applied);
 
         std::sort(rec.updates.begin(), rec.updates.end(),
                   [](const AppliedObservation &a, const AppliedObservation &b) {
@@ -1215,11 +1354,31 @@ private:
             while (filters_[target].pending_obs.size() > static_cast<size_t>(max_pending_))
                 filters_[target].pending_obs.pop_front();
         }
-    }
+	    }
 
-    // ═══════════════════════════════════════════════════════════
-    //  DEKF 主循环: 预测 → 观测更新 → 发布
-    // ═══════════════════════════════════════════════════════════
+	    // ── GT 真值回调 ──────────────────────────────────────
+	    void gtCallback(const geometry_msgs::PoseStamped::ConstPtr &msg, int id)
+	    {
+	        if (id < 0 || id >= 4) return;
+	        if (!delayed_validation_enabled_) return;
+
+	        GtSample s;
+	        s.stamp = msg->header.stamp;
+	        s.p << msg->pose.position.x,
+	               msg->pose.position.y,
+	               msg->pose.position.z;
+
+	        auto &buf = gt_buffers_[id];
+	        buf.push_back(s);
+
+	        constexpr double kGtKeepSec = 10.0;
+	        while (!buf.empty() && (s.stamp - buf.front().stamp).toSec() > kGtKeepSec)
+	            buf.pop_front();
+	    }
+
+	    // ═══════════════════════════════════════════════════════════
+	    //  DEKF 主循环: 预测 → 观测更新 → 发布
+	    // ═══════════════════════════════════════════════════════════
 
     // 每个 DEKF 周期执行一次
     void dekfCallback(const ros::TimerEvent &event)
@@ -1577,15 +1736,16 @@ private:
         return true;
     }
 
-    bool replayCacheFrom(std::deque<History_Record> &cache,
-                         int start_idx,
-                         bool gate_observation,
-                         uint64_t gated_seq,
-                         std::string &fail_reason,
-                         double &fail_residual_norm,
-                         double &fail_nis,
-                         bool &failed_on_gated_observation,
-                         AdaptiveUwbInfo &gated_adaptive_uwb)
+	    bool replayCacheFrom(std::deque<History_Record> &cache,
+	                         int start_idx,
+	                         bool gate_observation,
+	                         uint64_t gated_seq,
+	                         std::string &fail_reason,
+	                         double &fail_residual_norm,
+	                         double &fail_nis,
+	                         bool &failed_on_gated_observation,
+	                         AdaptiveUwbInfo &gated_adaptive_uwb,
+	                         DelayedUpdateValidation *validation = nullptr)
     {
         fail_reason.clear();
         fail_residual_norm = std::numeric_limits<double>::quiet_NaN();
@@ -1724,10 +1884,26 @@ private:
                 }
 
                 Eigen::MatrixXd K = rec.P_post * Hk.transpose() * S_inv;
-                const double gain_weight = u.delayed ? delayed_update_gain_weight_ : 1.0;
-                Eigen::MatrixXd K_eff = gain_weight * K;
+	                const double gain_weight = u.delayed ? delayed_update_gain_weight_ : 1.0;
+	                Eigen::MatrixXd K_eff = gain_weight * K;
 
-                rec.X_post += K_eff * residual;
+	                // ── validation tracking ─────────────────────
+	                if (validation && validation->enabled && u.seq == gated_seq)
+	                {
+	                    validation->delayed_update_before = rec.X_post;
+	                    validation->delayed_update_stamp = rec.stamp;
+	                    validation->residual_norm = residual.norm();
+	                    validation->nis = nis;
+	                    validation->gain_weight = gain_weight;
+	                    validation->found_target_update = true;
+	                }
+
+	                rec.X_post += K_eff * residual;
+
+	                if (validation && validation->enabled && u.seq == gated_seq)
+	                {
+	                    validation->delayed_update_after = rec.X_post;
+	                }
                 Matrix6d I_KH = Matrix6d::Identity() - K_eff * Hk;
                 rec.P_post =
                     I_KH * rec.P_post * I_KH.transpose() +
@@ -1917,9 +2093,82 @@ private:
                           std::numeric_limits<double>::quiet_NaN(),
                           adaptive_uwb);
         return UpdateStatus::ACCEPTED;
-    }
+	    }
 
-    UpdateStatus applyDelayedUpdate(Filter &f, const Observation &obs)
+	    // ── delayed update validation ─────────────────────────
+	    void writeDelayedValidationCsv(const DelayedUpdateValidation &val)
+	    {
+	        if (!val.enabled) return;
+	        if (!validation_csv_.is_open()) return;
+
+	        // GT 误差
+	        auto computeErr = [](const Vector6d &x, const Eigen::Vector3d &gt, bool has_gt) -> double {
+	            if (!has_gt) return std::numeric_limits<double>::quiet_NaN();
+	            return (x.head<3>() - gt).norm();
+	        };
+
+	        double delayed_err_before = computeErr(val.delayed_update_before, val.delayed_update_gt, val.has_delayed_update_gt && val.found_target_update);
+	        double delayed_err_after = computeErr(val.delayed_update_after, val.delayed_update_gt, val.has_delayed_update_gt && val.found_target_update);
+	        double delayed_err_delta = (std::isfinite(delayed_err_before) && std::isfinite(delayed_err_after))
+	                                        ? delayed_err_after - delayed_err_before
+	                                        : std::numeric_limits<double>::quiet_NaN();
+	        int delayed_improved = std::isfinite(delayed_err_delta) ? (delayed_err_delta < 0.0 ? 1 : 0) : -1;
+
+	        double current_err_before = computeErr(val.current_replay_before, val.current_replay_gt, val.has_current_replay_gt);
+	        double current_err_after = computeErr(val.current_replay_after, val.current_replay_gt, val.has_current_replay_gt);
+	        double current_err_delta = (std::isfinite(current_err_before) && std::isfinite(current_err_after))
+	                                        ? current_err_after - current_err_before
+	                                        : std::numeric_limits<double>::quiet_NaN();
+		        int current_improved = std::isfinite(current_err_delta) ? (current_err_delta < 0.0 ? 1 : 0) : -1;
+
+		        validation_csv_ << ros::Time::now().toSec() << ','
+	             << val.self_id << ','
+	             << val.target_id << ','
+	             << val.obs_type << ','
+	             << (val.accepted ? 1 : 0) << ','
+	             << (val.replay_ok ? 1 : 0) << ','
+	             << (val.found_target_update ? 1 : 0) << ','
+	             << val.reason << ','
+	             << val.obs_stamp.toSec() << ','
+	             << val.delayed_update_stamp.toSec() << ','
+	             << val.current_replay_stamp.toSec() << ','
+	             << val.best_idx << ','
+	             << val.cache_size << ','
+	             << delayed_err_before << ','
+	             << delayed_err_after << ','
+	             << delayed_err_delta << ','
+	             << delayed_improved << ','
+	             << current_err_before << ','
+	             << current_err_after << ','
+	             << current_err_delta << ','
+	             << current_improved << ','
+	             << val.delayed_update_before(0) << ',' << val.delayed_update_before(1) << ',' << val.delayed_update_before(2) << ','
+	             << val.delayed_update_after(0) << ',' << val.delayed_update_after(1) << ',' << val.delayed_update_after(2) << ','
+	             << val.delayed_update_gt.x() << ',' << val.delayed_update_gt.y() << ',' << val.delayed_update_gt.z() << ','
+	             << val.current_replay_before(0) << ',' << val.current_replay_before(1) << ',' << val.current_replay_before(2) << ','
+	             << val.current_replay_after(0) << ',' << val.current_replay_after(1) << ',' << val.current_replay_after(2) << ','
+	             << val.current_replay_gt.x() << ',' << val.current_replay_gt.y() << ',' << val.current_replay_gt.z() << ','
+	             << val.residual_norm << ','
+	             << val.nis << ','
+	             << val.gain_weight << ','
+	             << fusion_mode_ << '\n';
+	    }
+
+	    void fillDelayedValidationGtAndWrite(DelayedUpdateValidation &val)
+	    {
+	        if (!val.enabled) return;
+	        val.has_delayed_update_gt =
+	            getRelativeGroundTruth(val.self_id, val.target_id,
+	                                   val.delayed_update_stamp,
+	                                   val.delayed_update_gt);
+	        val.has_current_replay_gt =
+	            getRelativeGroundTruth(val.self_id, val.target_id,
+	                                   val.current_replay_stamp,
+	                                   val.current_replay_gt);
+	        writeDelayedValidationCsv(val);
+	    }
+
+	    UpdateStatus applyDelayedUpdate(Filter &f, const Observation &obs)
     {
         const double age = (f.stamp - obs.stamp).toSec();
         if (f.cache.empty())
@@ -1957,40 +2206,74 @@ private:
             return UpdateStatus::REJECTED;
         }
 
-        // 原子化 delayed update：
-        // 在候选 cache 中插入新观测，并从 best_idx 节点开始 replay。
-        // 新 delayed obs 的 hard/NIS gate 在 replay 中、按实际插入顺序执行，
-        // 避免用旧 hist.X_post/P_post 做近似接纳判断。
-        // replay 成功且最终状态/协方差合法后，才提交到真实 filter。
-        std::deque<History_Record> candidate_cache = f.cache;
-        const uint64_t seq_before = obs_seq_;
-        const uint64_t gated_seq =
-            recordAcceptedObservation(candidate_cache[static_cast<size_t>(best_idx)], obs, true);
+        //找到了best_idx
+	        // 原子化 delayed update：
+	        // 在候选 cache 中插入新观测，并从 best_idx 节点开始 replay。
+	        // 新 delayed obs 的 hard/NIS gate 在 replay 中、按实际插入顺序执行，
+	        // 避免用旧 hist.X_post/P_post 做近似接纳判断。
+	        // replay 成功且最终状态/协方差合法后，才提交到真实 filter。
+
+	        // ── delayed update validation ──────────────────────
+	        DelayedUpdateValidation val;
+	        val.enabled = delayed_validation_enabled_;
+	        val.self_id = uav_id_;
+	        val.target_id = obs.target_id;
+	        val.obs_type = obsTypeName(obs.type);
+	        val.obs_stamp = obs.stamp;
+	        val.best_idx = best_idx;
+	        val.cache_size = static_cast<int>(f.cache.size());
+
+	        if (delayed_validation_enabled_)
+	        {
+	            val.current_replay_before = f.cache.back().X_post;
+	            val.current_replay_stamp = f.cache.back().stamp;
+	        }
+
+	        std::deque<History_Record> candidate_cache = f.cache;
+	        const uint64_t seq_before = obs_seq_;
+	        const uint64_t gated_seq =
+	            recordAcceptedObservation(candidate_cache[static_cast<size_t>(best_idx)], obs, true,
+	                                      delayed_validation_enabled_);
 
         std::string replay_reason;
         double replay_residual_norm = std::numeric_limits<double>::quiet_NaN();
         double replay_nis = std::numeric_limits<double>::quiet_NaN();
         bool failed_on_gated_observation = false;
-        AdaptiveUwbInfo replay_adaptive_uwb;
-        if (!replayCacheFrom(candidate_cache, best_idx, true, gated_seq,
-                             replay_reason, replay_residual_norm, replay_nis,
-                             failed_on_gated_observation, replay_adaptive_uwb))
+	        AdaptiveUwbInfo replay_adaptive_uwb;
+	        if (!replayCacheFrom(candidate_cache, best_idx, true, gated_seq,
+	                             replay_reason, replay_residual_norm, replay_nis,
+	                             failed_on_gated_observation, replay_adaptive_uwb,
+	                             delayed_validation_enabled_ ? &val : nullptr))
         {
             obs_seq_ = seq_before;
 
             if (failed_on_gated_observation && std::isfinite(replay_residual_norm))
             {
-                const RecoveryResult recovery =
-                    tryDgoRecovery(f, obs, true, age, best_dt,
-                                   replay_residual_norm, replay_nis, replay_reason);
-                if (recovery == RecoveryResult::RESET)
-                {
-                    return UpdateStatus::RECOVERY_RESET;
-                }
-                if (recovery == RecoveryResult::HANDLED_REJECTED)
-                {
-                    return UpdateStatus::REJECTED;
-                }
+		            const RecoveryResult recovery =
+		                tryDgoRecovery(f, obs, true, age, best_dt,
+		                               replay_residual_norm, replay_nis, replay_reason);
+		            if (recovery == RecoveryResult::RESET)
+		            {
+		                if (delayed_validation_enabled_)
+		                {
+		                    val.accepted = false; val.replay_ok = false;
+		                    val.reason = "recovery_reset_" + replay_reason;
+		                    val.current_replay_after = val.current_replay_before;
+		                    fillDelayedValidationGtAndWrite(val);
+		                }
+		                return UpdateStatus::RECOVERY_RESET;
+		            }
+		            if (recovery == RecoveryResult::HANDLED_REJECTED)
+		            {
+		                if (delayed_validation_enabled_)
+		                {
+		                    val.accepted = false; val.replay_ok = false;
+		                    val.reason = "recovery_rejected_" + replay_reason;
+		                    val.current_replay_after = val.current_replay_before;
+		                    fillDelayedValidationGtAndWrite(val);
+		                }
+		                return UpdateStatus::REJECTED;
+		            }
             }
 
             ++f.rejects;
@@ -2000,11 +2283,18 @@ private:
                               replay_residual_norm,
                               replay_nis,
                               std::numeric_limits<double>::quiet_NaN(),
-                              replay_adaptive_uwb);
-            return UpdateStatus::REJECTED;
-        }
+	                              replay_adaptive_uwb);
+		            if (delayed_validation_enabled_)
+		            {
+		                val.accepted = false; val.replay_ok = false;
+		                val.reason = "cache_replay_failed_" + replay_reason;
+		                val.current_replay_after = val.current_replay_before;
+		                fillDelayedValidationGtAndWrite(val);
+		            }
+	            return UpdateStatus::REJECTED;
+	        }
 
-        const History_Record &final_rec = candidate_cache.back();
+	        const History_Record &final_rec = candidate_cache.back();
         if (!final_rec.X_post.allFinite() || !isBoundedCovariance(final_rec.P_post))
         {
             obs_seq_ = seq_before;
@@ -2016,17 +2306,38 @@ private:
                               replay_residual_norm,
                               replay_nis,
                               std::numeric_limits<double>::quiet_NaN(),
-                              replay_adaptive_uwb);
-            return UpdateStatus::REJECTED;
-        }
+	                              replay_adaptive_uwb);
+	            if (delayed_validation_enabled_)
+		            {
+		                val.accepted = false; val.replay_ok = true;
+		                val.reason = "bad_final_cov";
+		                val.current_replay_after = candidate_cache.back().X_post;
+		                val.current_replay_stamp = candidate_cache.back().stamp;
+		                fillDelayedValidationGtAndWrite(val);
+		            }
+	            return UpdateStatus::REJECTED;
+	        }
 
-        f.cache = std::move(candidate_cache);
-        f.X = f.cache.back().X_post;
-        f.P = f.cache.back().P_post;
-        symmetrizeCov(f.P);
-        incrementAcceptedCounters(f, obs, true);
+	        if (delayed_validation_enabled_)
+	        {
+	            val.current_replay_after = candidate_cache.back().X_post;
+	            val.current_replay_stamp = candidate_cache.back().stamp;
+	        }
 
-        logObservationRow("delayed_update", f, obs, 1, 1, 1,
+	        f.cache = std::move(candidate_cache);
+	        f.X = f.cache.back().X_post;
+	        f.P = f.cache.back().P_post;
+	        symmetrizeCov(f.P);
+	        incrementAcceptedCounters(f, obs, true);
+
+	        if (delayed_validation_enabled_)
+	        {
+	            val.accepted = true; val.replay_ok = true;
+	            val.reason = "accepted";
+	            fillDelayedValidationGtAndWrite(val);
+	        }
+
+	        logObservationRow("delayed_update", f, obs, 1, 1, 1,
                           "accepted_replayed", age,
                           best_dt,
                           replay_residual_norm,

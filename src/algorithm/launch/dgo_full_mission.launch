@@ -78,6 +78,8 @@
   <arg name="dekf_camera_theta_noise_std" default="0.05" />
   <arg name="max_dekf_align_dt" default="0.12" />
   <arg name="mode" default="4" />
+  <arg name="delayed_validation_enabled" default="false" />
+  <arg name="delayed_validation_gt_max_dt" default="0.05" />
   <arg name="run_id" default="" />
 
   <!--
@@ -198,6 +200,8 @@
       <param name="sigma_pz" value="$(arg dekf_dgo_position_noise_std)" />
       <param name="sigma_uwb" value="$(arg dekf_uwb_noise_std)" />
       <param name="mode" value="$(arg mode)" />
+      <param name="delayed_validation_enabled" value="$(arg delayed_validation_enabled)" />
+      <param name="delayed_validation_gt_max_dt" value="$(arg delayed_validation_gt_max_dt)" />
       <param name="sigma_alpha" value="$(arg dekf_camera_alpha_noise_std)" />
       <param name="sigma_theta" value="$(arg dekf_camera_theta_noise_std)" />
       <param name="max_dgo_pair_dt" value="$(arg dekf_max_dgo_pair_dt)" />
@@ -308,6 +312,8 @@
       <param name="sigma_pz" value="$(arg dekf_dgo_position_noise_std)" />
       <param name="sigma_uwb" value="$(arg dekf_uwb_noise_std)" />
       <param name="mode" value="$(arg mode)" />
+      <param name="delayed_validation_enabled" value="$(arg delayed_validation_enabled)" />
+      <param name="delayed_validation_gt_max_dt" value="$(arg delayed_validation_gt_max_dt)" />
       <param name="sigma_alpha" value="$(arg dekf_camera_alpha_noise_std)" />
       <param name="sigma_theta" value="$(arg dekf_camera_theta_noise_std)" />
       <param name="max_dgo_pair_dt" value="$(arg dekf_max_dgo_pair_dt)" />
@@ -418,6 +424,8 @@
       <param name="sigma_pz" value="$(arg dekf_dgo_position_noise_std)" />
       <param name="sigma_uwb" value="$(arg dekf_uwb_noise_std)" />
       <param name="mode" value="$(arg mode)" />
+      <param name="delayed_validation_enabled" value="$(arg delayed_validation_enabled)" />
+      <param name="delayed_validation_gt_max_dt" value="$(arg delayed_validation_gt_max_dt)" />
       <param name="sigma_alpha" value="$(arg dekf_camera_alpha_noise_std)" />
       <param name="sigma_theta" value="$(arg dekf_camera_theta_noise_std)" />
       <param name="max_dgo_pair_dt" value="$(arg dekf_max_dgo_pair_dt)" />
@@ -528,6 +536,8 @@
       <param name="sigma_pz" value="$(arg dekf_dgo_position_noise_std)" />
       <param name="sigma_uwb" value="$(arg dekf_uwb_noise_std)" />
       <param name="mode" value="$(arg mode)" />
+      <param name="delayed_validation_enabled" value="$(arg delayed_validation_enabled)" />
+      <param name="delayed_validation_gt_max_dt" value="$(arg delayed_validation_gt_max_dt)" />
       <param name="sigma_alpha" value="$(arg dekf_camera_alpha_noise_std)" />
       <param name="sigma_theta" value="$(arg dekf_camera_theta_noise_std)" />
       <param name="max_dgo_pair_dt" value="$(arg dekf_max_dgo_pair_dt)" />
