@@ -101,7 +101,7 @@
   <arg name="dekf_max_observation_delay" default="0.60" />
   <arg name="dekf_max_dgo_pair_dt" default="0.12" />
   <arg name="dekf_accel_noise_std" default="0.8" />
-  <arg name="dekf_dgo_position_noise_std" default="0.12" />
+  <arg name="dekf_dgo_position_noise_std" default="0.08" />
   <arg name="dekf_uwb_noise_std" default="$(arg uwb_stddev)" />
   <arg name="dekf_camera_alpha_noise_std" default="0.05" />
   <arg name="dekf_camera_theta_noise_std" default="0.05" />

@@ -86,9 +86,9 @@ public:
         pnh_.param("sigma_ax", sigma_ax_, 0.80);
         pnh_.param("sigma_ay", sigma_ay_, 0.80);
         pnh_.param("sigma_az", sigma_az_, 0.80);
-        pnh_.param("sigma_px", sigma_px_, 0.12);
-        pnh_.param("sigma_py", sigma_py_, 0.12);
-        pnh_.param("sigma_pz", sigma_pz_, 0.12);
+        pnh_.param("sigma_px", sigma_px_, 0.08);
+        pnh_.param("sigma_py", sigma_py_, 0.08);
+        pnh_.param("sigma_pz", sigma_pz_, 0.08);
         pnh_.param("sigma_uwb", sigma_uwb_, 0.05);
         pnh_.param("sigma_alpha", sigma_alpha_, 0.05);
         pnh_.param("sigma_theta", sigma_theta_, 0.05);
@@ -599,9 +599,9 @@ public:
     Eigen::Matrix3d Q_;
 
     // 噪声参数 (观测噪声)
-    double sigma_px_ = 0.12;
-    double sigma_py_ = 0.12;
-    double sigma_pz_ = 0.12;
+    double sigma_px_ = 0.08;
+    double sigma_py_ = 0.08;
+    double sigma_pz_ = 0.08;
     double sigma_uwb_ = 0.05;
     double sigma_alpha_ = 0.05;
     double sigma_theta_ = 0.05;
@@ -1780,14 +1780,33 @@ public:
 	                               Eigen::Vector3d &dgo_rel,
 	                               double &age) const
 	    {
-	        if (target_id < 0 || target_id >= uav_num_) return false;
-	        const auto &cache = dgo_cache_[target_id];
-	        if (cache.empty()) return false;
-	        const DGOSample &s = cache.back();
-	        dgo_rel << s.msg.pose.pose.position.x,
-	                  s.msg.pose.pose.position.y,
-	                  s.msg.pose.pose.position.z;
-	        age = (now - s.stamp).toSec();
+	        if (target_id < 0 || target_id >= uav_num_ ||
+	            uav_id_ < 0 || uav_id_ >= uav_num_)
+	            return false;
+	        const auto &target_cache = dgo_cache_[target_id];
+	        const auto &self_cache   = dgo_cache_[uav_id_];
+	        if (target_cache.empty() || self_cache.empty()) return false;
+
+	        const DGOSample &t = target_cache.back();
+	        const DGOSample &s = self_cache.back();
+
+	        // DGO world-frame position → self-to-target relative
+	        // rel = (init_off_target + dgo_target) - (init_off_self + dgo_self)
+	        const Eigen::Vector3d t_world(t.msg.pose.pose.position.x,
+	                                      t.msg.pose.pose.position.y,
+	                                      t.msg.pose.pose.position.z);
+	        const Eigen::Vector3d s_world(s.msg.pose.pose.position.x,
+	                                      s.msg.pose.pose.position.y,
+	                                      s.msg.pose.pose.position.z);
+
+	        dgo_rel = (initial_offsets_[target_id] + t_world)
+	                - (initial_offsets_[uav_id_] + s_world);
+
+	        // Conservative age: max of both estimates' age
+	        const double age_self   = (now - s.stamp).toSec();
+	        const double age_target = (now - t.stamp).toSec();
+	        age = std::isfinite(age_self) && std::isfinite(age_target)
+	              ? std::max(age_self, age_target) : std::numeric_limits<double>::quiet_NaN();
 	        return std::isfinite(age);
 	    }
 
