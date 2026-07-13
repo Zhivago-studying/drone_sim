@@ -121,6 +121,8 @@ public:
 	        pnh_.param("delayed_validation_enabled", delayed_validation_enabled_, false);
 	        pnh_.param("delayed_validation_gt_max_dt", delayed_validation_gt_max_dt_, 0.05);
 	        pnh_.param("mode", fusion_mode_, 4);
+	        pnh_.param("trace_enabled", trace_enabled_, false);
+	        pnh_.param("trace_dgo_only", trace_dgo_only_, true);
         ROS_DEBUG("[DEKF] param mode=%d", fusion_mode_);
 
         // 根据 fusion_mode 设置传感器开关
@@ -348,13 +350,17 @@ public:
 	        camera_sub_ = nh_.subscribe<data_process::CameraAngleMatch>(
 	            "camera_angle_match", 10, &DEKF::cameraCallback, this);
 
-		    // GT 真值订阅 (用于 delayed update 验证, 从 /gazebo/model_states 获取)
-		    if (delayed_validation_enabled_)
-		    {
-		        model_gt_sub_ = nh_.subscribe<gazebo_msgs::ModelStates>(
-		            "/gazebo/model_states", 100,
-		            &DEKF::gtModelStatesCb, this);
-		    }
+		    // GT 真值订阅 (用于 delayed update 验证 + trace, 从 /gazebo/model_states 获取)
+			    if (delayed_validation_enabled_ || trace_enabled_)
+			    {
+			        model_gt_sub_ = nh_.subscribe<gazebo_msgs::ModelStates>(
+			            "/gazebo/model_states", 100,
+			            &DEKF::gtModelStatesCb, this);
+			    }
+
+		    // 任务阶段订阅
+		    stage_sub_ = nh_.subscribe<std_msgs::UInt8>(
+		        "/formation/stage", 1, &DEKF::stageCallback, this);
 
 		    openCsv();
 
@@ -366,6 +372,9 @@ public:
 		    ~DEKF()
 		    {
 		        writeDelayedAgeSummary();
+		        if (delayed_trace_csv_.is_open()) delayed_trace_csv_.close();
+		        if (replay_trace_csv_.is_open()) replay_trace_csv_.close();
+		        if (state_trace_csv_.is_open()) state_trace_csv_.close();
 		    }
 
 	private:
@@ -386,6 +395,10 @@ public:
 	{
 	    ros::Time stamp;
 	    std::array<Eigen::Vector3d, 4> p = {
+	        Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+	        Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero()
+	    };
+	    std::array<Eigen::Vector3d, 4> v = {
 	        Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
 	        Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero()
 	    };
@@ -503,7 +516,29 @@ public:
 	        double gain_weight = std::numeric_limits<double>::quiet_NaN();
 	    };
 
-	    // 滤波器: 本机到 target_id 的相对位姿/速度估计
+		    // ReplayTraceContext — 在 replayCacheFrom 内部收集 delayed update 信息,
+		    // 供 applyDelayedUpdate 写 replay trace 使用
+		    struct ReplayTraceContext
+		    {
+		        bool enabled = false;
+		        bool found_target_update = false;
+
+		        int self_id = -1;
+		        int target_id = -1;
+		        int stage = -1;
+
+		        ros::Time obs_stamp;
+		        ros::Time hist_stamp;
+		        ros::Time current_stamp;
+
+		        int best_idx = -1;
+		        int cache_size = 0;
+
+		        Vector6d hist_before = Vector6d::Zero();
+		        Vector6d hist_after  = Vector6d::Zero();
+		    };
+
+		    // 滤波器: 本机到 target_id 的相对位姿/速度估计
     struct Filter
     {
         int target_id = -1;
@@ -616,10 +651,21 @@ public:
 	    std::ofstream csv_;
 	    std::ofstream validation_csv_;
 
-    // 订阅器 & 数据缓存
-    std::vector<ros::Subscriber> dgo_subs_;
-    ros::Subscriber uwb_sub_;
-    ros::Subscriber camera_sub_;
+	    // Trace 模块 (详细日志, 默认关闭)
+	    bool trace_enabled_ = false;
+	    bool trace_dgo_only_ = true;
+	    std::ofstream delayed_trace_csv_;
+	    std::ofstream replay_trace_csv_;
+	    std::ofstream state_trace_csv_;
+
+	    // 任务阶段
+	    int mission_stage_ = -1;
+
+	    // 订阅器 & 数据缓存
+	    std::vector<ros::Subscriber> dgo_subs_;
+	    ros::Subscriber uwb_sub_;
+	    ros::Subscriber camera_sub_;
+	    ros::Subscriber stage_sub_;
 	    std::vector<Filter> filters_;
 	    std::vector<std::deque<DGOSample>> dgo_cache_;
 
@@ -753,6 +799,9 @@ public:
 	                         (csv_dir_ + "/" + self_name + "_delayed_update_validation.csv").c_str());
 	            }
 	        }
+
+	        // Trace CSV (可选)
+	        openTraceCsv();
 	    }
 
     void logCsvRow(const std::string &event,
@@ -1178,18 +1227,70 @@ public:
 	        return false;
 	    }
 
-	    bool getRelativeGroundTruth(int self_id, int target_id,
-	                                const ros::Time &stamp,
-	                                Eigen::Vector3d &rel_gt) const
-	    {
-	        if (self_id < 0 || self_id >= 4 || target_id < 0 || target_id >= 4)
-	            return false;
-	        Eigen::Vector3d p_self, p_target;
-	        if (!interpolateGt(model_gt_buffer_, self_id, stamp, p_self)) return false;
-	        if (!interpolateGt(model_gt_buffer_, target_id, stamp, p_target)) return false;
-	        rel_gt = p_target - p_self;
-	        return true;
-	    }
+		    bool getRelativeGroundTruth(int self_id, int target_id,
+		                                const ros::Time &stamp,
+		                                Eigen::Vector3d &rel_gt) const
+		    {
+		        if (self_id < 0 || self_id >= 4 || target_id < 0 || target_id >= 4)
+		            return false;
+		        Eigen::Vector3d p_self, p_target;
+		        if (!interpolateGt(model_gt_buffer_, self_id, stamp, p_self)) return false;
+		        if (!interpolateGt(model_gt_buffer_, target_id, stamp, p_target)) return false;
+		        rel_gt = p_target - p_self;
+		        return true;
+		    }
+
+		    bool interpolateGtVelocity(const std::deque<GtWorldSample> &buf,
+		                               int uav_id,
+		                               const ros::Time &stamp,
+		                               Eigen::Vector3d &v) const
+		    {
+		        if (buf.empty()) return false;
+		        if (stamp < buf.front().stamp)
+		        {
+		            double dt = (buf.front().stamp - stamp).toSec();
+		            if (dt <= delayed_validation_gt_max_dt_)
+		            { v = buf.front().v[uav_id]; return true; }
+		            return false;
+		        }
+		        if (stamp > buf.back().stamp)
+		        {
+		            double dt = (stamp - buf.back().stamp).toSec();
+		            if (dt <= delayed_validation_gt_max_dt_)
+		            { v = buf.back().v[uav_id]; return true; }
+		            return false;
+		        }
+		        for (size_t i = 1; i < buf.size(); ++i)
+		        {
+		            const auto &a = buf[i - 1];
+		            const auto &b = buf[i];
+		            if (a.stamp <= stamp && stamp <= b.stamp)
+		            {
+		                double dt = (b.stamp - a.stamp).toSec();
+		                if (dt < 1e-9) { v = a.v[uav_id]; return true; }
+		                double da = std::abs((stamp - a.stamp).toSec());
+		                double db = std::abs((b.stamp - stamp).toSec());
+		                if (std::min(da, db) > delayed_validation_gt_max_dt_) return false;
+		                double alpha = (stamp - a.stamp).toSec() / dt;
+		                v = (1.0 - alpha) * a.v[uav_id] + alpha * b.v[uav_id];
+		                return true;
+		            }
+		        }
+		        return false;
+		    }
+
+		    bool getRelativeGroundTruthVelocity(int self_id, int target_id,
+		                                         const ros::Time &stamp,
+		                                         Eigen::Vector3d &rel_v) const
+		    {
+		        if (self_id < 0 || self_id >= 4 || target_id < 0 || target_id >= 4)
+		            return false;
+		        Eigen::Vector3d v_self, v_target;
+		        if (!interpolateGtVelocity(model_gt_buffer_, self_id, stamp, v_self)) return false;
+		        if (!interpolateGtVelocity(model_gt_buffer_, target_id, stamp, v_target)) return false;
+		        rel_v = v_target - v_self;
+		        return true;
+		    }
 
 	    uint64_t recordAcceptedObservation(History_Record &rec,
 	                                       const Observation &obs,
@@ -1388,6 +1489,12 @@ public:
         }
 	    }
 
+	    // ── 任务阶段回调 ────────────────────────────────────────
+	    void stageCallback(const std_msgs::UInt8::ConstPtr &msg)
+	    {
+	        mission_stage_ = static_cast<int>(msg->data);
+	    }
+
 	    // ── GT 真值回调 ──────────────────────────────────────
 	    int findModelIndex(const gazebo_msgs::ModelStates::ConstPtr &msg,
 	                       const std::string &name) const
@@ -1398,29 +1505,34 @@ public:
 	    }
 
 	    void gtModelStatesCb(const gazebo_msgs::ModelStates::ConstPtr &msg)
-	    {
-	        if (!delayed_validation_enabled_) return;
+		    {
+		        if (!delayed_validation_enabled_ && !traceActive()) return;
 
-	        GtWorldSample s;
-	        s.stamp = ros::Time::now();
+		        GtWorldSample s;
+		        s.stamp = ros::Time::now();
 
-	        for (int id = 0; id < 4; ++id)
-	        {
-	            const std::string name = "iris_" + std::to_string(id);
-	            const int idx = findModelIndex(msg, name);
-	            if (idx < 0 || idx >= static_cast<int>(msg->pose.size()))
-	                return;  // 本帧不完整, 丢弃
-	            s.p[id] << msg->pose[idx].position.x,
-	                      msg->pose[idx].position.y,
-	                      msg->pose[idx].position.z;
-	        }
+		        for (int id = 0; id < 4; ++id)
+		        {
+		            const std::string name = "iris_" + std::to_string(id);
+		            const int idx = findModelIndex(msg, name);
+		            if (idx < 0 ||
+		                idx >= static_cast<int>(msg->pose.size()) ||
+		                idx >= static_cast<int>(msg->twist.size()))
+		                return;  // 本帧不完整, 丢弃
+		            s.p[id] << msg->pose[idx].position.x,
+		                      msg->pose[idx].position.y,
+		                      msg->pose[idx].position.z;
+		            s.v[id] << msg->twist[idx].linear.x,
+		                      msg->twist[idx].linear.y,
+		                      msg->twist[idx].linear.z;
+		        }
 
-	        model_gt_buffer_.push_back(s);
-	        constexpr double kGtKeepSec = 10.0;
-	        while (model_gt_buffer_.size() > 2 &&
-	               (s.stamp - model_gt_buffer_.front().stamp).toSec() > kGtKeepSec)
-	            model_gt_buffer_.pop_front();
-	    }
+		        model_gt_buffer_.push_back(s);
+		        constexpr double kGtKeepSec = 10.0;
+		        while (model_gt_buffer_.size() > 2 &&
+		               (s.stamp - model_gt_buffer_.front().stamp).toSec() > kGtKeepSec)
+		            model_gt_buffer_.pop_front();
+		    }
 
 	    // ═══════════════════════════════════════════════════════════
 	    //  DEKF 主循环: 预测 → 观测更新 → 发布
@@ -1629,9 +1741,366 @@ public:
         }
     }
 
-    // ═══════════════════════════════════════════════════════════
-    //  观测模型构建: 根据状态 x 和观测类型, 填充 Z, residual, H, R_meas
-    // ═══════════════════════════════════════════════════════════
+	    // ═══════════════════════════════════════════════════════════
+	    //  Trace 模块: 详细日志 (默认关闭)
+	    // ═══════════════════════════════════════════════════════════
+
+	    bool traceActive() const
+	    {
+	        if (!trace_enabled_) return false;
+	        if (trace_dgo_only_ && fusion_mode_ != 1) return false;
+	        if (csv_dir_.empty()) return false;
+	        return true;
+	    }
+
+	    double safeRatio(double num, double den) const
+	    {
+	        if (!std::isfinite(num) || !std::isfinite(den) || std::abs(den) < 1e-12)
+	            return std::numeric_limits<double>::quiet_NaN();
+	        return num / den;
+	    }
+
+	    double safeCosine(const Eigen::Vector3d &a, const Eigen::Vector3d &b) const
+	    {
+	        const double na = a.norm();
+	        const double nb = b.norm();
+	        if (na < 1e-12 || nb < 1e-12)
+	            return std::numeric_limits<double>::quiet_NaN();
+	        return a.dot(b) / (na * nb);
+	    }
+
+	    double getK(const Eigen::MatrixXd &K, int r, int c) const
+	    {
+	        if (r < K.rows() && c < K.cols()) return K(r, c);
+	        return std::numeric_limits<double>::quiet_NaN();
+	    }
+
+	    bool getLatestDgoForTarget(int target_id,
+	                               const ros::Time &now,
+	                               Eigen::Vector3d &dgo_rel,
+	                               double &age) const
+	    {
+	        if (target_id < 0 || target_id >= uav_num_) return false;
+	        const auto &cache = dgo_cache_[target_id];
+	        if (cache.empty()) return false;
+	        const DGOSample &s = cache.back();
+	        dgo_rel << s.msg.pose.pose.position.x,
+	                  s.msg.pose.pose.position.y,
+	                  s.msg.pose.pose.position.z;
+	        age = (now - s.stamp).toSec();
+	        return std::isfinite(age);
+	    }
+
+	    void openTraceCsv()
+	    {
+	        if (!traceActive()) return;
+	        if (!ensureDirectory(csv_dir_))
+	        {
+	            ROS_WARN("[DEKF] trace: cannot create csv_dir=%s", csv_dir_.c_str());
+	            return;
+	        }
+
+	        const std::string self_name = "iris_" + std::to_string(uav_id_);
+
+	        const std::string delayed_path = csv_dir_ + "/" + self_name + "_delayed_update_trace.csv";
+	        delayed_trace_csv_.open(delayed_path.c_str(), std::ios::out | std::ios::trunc);
+	        if (!delayed_trace_csv_.is_open())
+	        {
+	            ROS_WARN("[DEKF] trace: cannot open %s", delayed_path.c_str());
+	        }
+	        else
+	        {
+	            delayed_trace_csv_ << std::fixed << std::setprecision(9);
+		            delayed_trace_csv_
+		                << "time,self_id,target_id,stage,"
+		                << "obs_stamp,filter_stamp,age,hist_stamp,history_match_dt,best_idx,cache_size,"
+		                << "z_x,z_y,z_z,"
+		                << "update_before_x,update_before_y,update_before_z,"
+		                << "pred_x,pred_y,pred_z,"
+		                << "res_x,res_y,res_z,res_norm,"
+	                << "Ppx,Ppy,Ppz,Pvx,Pvy,Pvz,"
+	                << "Sx,Sy,Sz,"
+	                << "Kpx,Kpy,Kpz,Kvx,Kvy,Kvz,"
+	                << "x_before,y_before,z_before,vx_before,vy_before,vz_before,"
+	                << "x_after,y_after,z_after,vx_after,vy_after,vz_after,"
+	                << "delta_x,delta_y,delta_z,delta_vx,delta_vy,delta_vz,"
+	                << "delta_pos_norm,delta_vel_norm,"
+	                << "gt_x,gt_y,gt_z,"
+	                << "err_before_x,err_before_y,err_before_z,"
+	                << "err_after_x,err_after_y,err_after_z,"
+	                << "err_before_norm,err_after_norm,err_delta,"
+	                << "correction_dot_error,correction_cos_error,"
+	                << "correction_norm_over_residual,"
+	                << "gain_weight\n";
+	            ROS_INFO("[DEKF] trace delayed_update CSV: %s", delayed_path.c_str());
+	        }
+
+	        const std::string replay_path = csv_dir_ + "/" + self_name + "_replay_trace.csv";
+	        replay_trace_csv_.open(replay_path.c_str(), std::ios::out | std::ios::trunc);
+	        if (!replay_trace_csv_.is_open())
+	        {
+	            ROS_WARN("[DEKF] trace: cannot open %s", replay_path.c_str());
+	        }
+	        else
+	        {
+	            replay_trace_csv_ << std::fixed << std::setprecision(9);
+	            replay_trace_csv_
+	                << "time,self_id,target_id,stage,"
+	                << "obs_stamp,hist_stamp,current_stamp,"
+	                << "best_idx,cache_size,replay_nodes,replay_duration,"
+	                << "hist_delta_pos_norm,hist_delta_vel_norm,"
+	                << "current_delta_x,current_delta_y,current_delta_z,"
+	                << "current_delta_vx,current_delta_vy,current_delta_vz,"
+	                << "current_delta_pos_norm,current_delta_vel_norm,"
+	                << "propagation_gain_pos,propagation_gain_vel,"
+	                << "current_before_x,current_before_y,current_before_z,"
+	                << "current_before_vx,current_before_vy,current_before_vz,"
+	                << "current_after_x,current_after_y,current_after_z,"
+	                << "current_after_vx,current_after_vy,current_after_vz,"
+	                << "current_gt_x,current_gt_y,current_gt_z,"
+	                << "current_err_before_x,current_err_before_y,current_err_before_z,"
+	                << "current_err_after_x,current_err_after_y,current_err_after_z,"
+	                << "current_err_before_norm,current_err_after_norm,current_err_delta\n";
+	            ROS_INFO("[DEKF] trace replay CSV: %s", replay_path.c_str());
+	        }
+
+	        const std::string state_path = csv_dir_ + "/" + self_name + "_state_trace.csv";
+	        state_trace_csv_.open(state_path.c_str(), std::ios::out | std::ios::trunc);
+	        if (!state_trace_csv_.is_open())
+	        {
+	            ROS_WARN("[DEKF] trace: cannot open %s", state_path.c_str());
+	        }
+	        else
+	        {
+	            state_trace_csv_ << std::fixed << std::setprecision(9);
+	            state_trace_csv_
+	                << "time,self_id,target_id,stage,"
+	                << "x,y,z,vx,vy,vz,"
+	                << "Pxx,Pyy,Pzz,Pvxvx,Pvyvy,Pvzvz,"
+	                << "gt_x,gt_y,gt_z,"
+	                << "gt_vx,gt_vy,gt_vz,"
+	                << "latest_dgo_x,latest_dgo_y,latest_dgo_z,latest_dgo_age,"
+	                << "err_gt_x,err_gt_y,err_gt_z,err_gt_norm,"
+	                << "err_dgo_x,err_dgo_y,err_dgo_z,err_dgo_norm,"
+	                << "est_rel_speed_norm,gt_rel_speed_norm,"
+	                << "vel_err_x,vel_err_y,vel_err_z,vel_err_norm\n";
+	            ROS_INFO("[DEKF] trace state CSV: %s", state_path.c_str());
+	        }
+	    }
+
+	    void writeStateTrace(const Filter &f)
+	    {
+	        if (!state_trace_csv_.is_open()) return;
+	        if (!traceActive()) return;
+
+	        const double t = f.stamp.isZero() ? ros::Time::now().toSec() : f.stamp.toSec();
+	        const int target = f.target_id;
+	        const double nan = std::numeric_limits<double>::quiet_NaN();
+
+	        // GT
+	        Eigen::Vector3d gt_rel = Eigen::Vector3d::Constant(nan);
+	        (void)getRelativeGroundTruth(uav_id_, target, f.stamp, gt_rel);
+	        Eigen::Vector3d gt_rel_v = Eigen::Vector3d::Constant(nan);
+	        (void)getRelativeGroundTruthVelocity(uav_id_, target, f.stamp, gt_rel_v);
+
+	        // Latest DGO
+	        Eigen::Vector3d dgo_rel = Eigen::Vector3d::Constant(nan);
+	        double dgo_age = nan;
+	        (void)getLatestDgoForTarget(target, f.stamp, dgo_rel, dgo_age);
+
+	        // Errors
+	        const Eigen::Vector3d pos = f.X.segment<3>(0);
+	        const Eigen::Vector3d vel = f.X.segment<3>(3);
+	        const Eigen::Vector3d err_gt = pos - gt_rel;
+	        const Eigen::Vector3d err_dgo = pos - dgo_rel;
+	        const double err_gt_norm = err_gt.allFinite() ? err_gt.norm() : nan;
+	        const double err_dgo_norm = err_dgo.allFinite() ? err_dgo.norm() : nan;
+	        const Eigen::Vector3d vel_err = vel - gt_rel_v;
+	        const double vel_err_norm = vel_err.allFinite() ? vel_err.norm() : nan;
+	        const double est_speed = vel.allFinite() ? vel.norm() : nan;
+	        const double gt_speed = gt_rel_v.allFinite() ? gt_rel_v.norm() : nan;
+
+	        state_trace_csv_
+	            << t << ","
+	            << uav_id_ << "," << target << "," << mission_stage_ << ","
+	            << pos(0) << "," << pos(1) << "," << pos(2) << ","
+	            << vel(0) << "," << vel(1) << "," << vel(2) << ","
+	            << f.P(0,0) << "," << f.P(1,1) << "," << f.P(2,2) << ","
+	            << f.P(3,3) << "," << f.P(4,4) << "," << f.P(5,5) << ","
+	            << gt_rel(0) << "," << gt_rel(1) << "," << gt_rel(2) << ","
+	            << gt_rel_v(0) << "," << gt_rel_v(1) << "," << gt_rel_v(2) << ","
+	            << dgo_rel(0) << "," << dgo_rel(1) << "," << dgo_rel(2) << "," << dgo_age << ","
+	            << err_gt(0) << "," << err_gt(1) << "," << err_gt(2) << "," << err_gt_norm << ","
+	            << err_dgo(0) << "," << err_dgo(1) << "," << err_dgo(2) << "," << err_dgo_norm << ","
+	            << est_speed << "," << gt_speed << ","
+	            << vel_err(0) << "," << vel_err(1) << "," << vel_err(2) << "," << vel_err_norm << "\n";
+	    }
+
+	    void writeDelayedUpdateTrace(
+	        double t,
+	        const ros::Time &obs_stamp,
+	        const ros::Time &filter_stamp,
+	        const ros::Time &hist_stamp,
+	        int target_id,
+	        double age,
+	        double history_match_dt,
+	        int best_idx,
+	        int cache_size,
+	        const Vector6d &x_before,
+	        const Vector6d &x_after,
+	        const Eigen::VectorXd &Zk,
+	        const Eigen::VectorXd &residual,
+	        const Eigen::MatrixXd &K_eff,
+	        const Eigen::MatrixXd &S,
+	        const Vector6d &P_diag,
+	        double gain_weight_val)
+	    {
+	        if (!delayed_trace_csv_.is_open()) return;
+	        if (!traceActive()) return;
+
+	        const double nan = std::numeric_limits<double>::quiet_NaN();
+
+	        // GT
+	        Eigen::Vector3d gt_rel = Eigen::Vector3d::Constant(nan);
+	        (void)getRelativeGroundTruth(uav_id_, target_id, hist_stamp, gt_rel);
+
+	        const Eigen::Vector3d delta_pos = x_after.head<3>() - x_before.head<3>();
+	        const Eigen::Vector3d delta_vel = x_after.tail<3>() - x_before.tail<3>();
+	        const double delta_pos_norm = delta_pos.norm();
+	        const double delta_vel_norm = delta_vel.norm();
+
+	        Eigen::Vector3d z3 = Eigen::Vector3d::Constant(nan);
+	        Eigen::Vector3d res3 = Eigen::Vector3d::Constant(nan);
+	        if (Zk.size() >= 3) z3 = Zk.head<3>();
+	        if (residual.size() >= 3) res3 = residual.head<3>();
+
+	        const Eigen::Vector3d pred3 = z3 - res3;
+
+	        // P diag
+	        const double Ppx = P_diag.size() > 0 ? P_diag(0) : nan;
+	        const double Ppy = P_diag.size() > 1 ? P_diag(1) : nan;
+	        const double Ppz = P_diag.size() > 2 ? P_diag(2) : nan;
+
+	        // S diag
+	        const double Sx = S.rows() > 0 ? S(0,0) : nan;
+	        const double Sy = S.rows() > 1 ? S(1,1) : nan;
+	        const double Sz = S.rows() > 2 ? S(2,2) : nan;
+
+	        // K diag
+	        const double Kpx = getK(K_eff, 0, 0);
+	        const double Kpy = getK(K_eff, 1, 1);
+	        const double Kpz = getK(K_eff, 2, 2);
+	        const double Kvx = getK(K_eff, 3, 0);
+	        const double Kvy = getK(K_eff, 4, 1);
+	        const double Kvz = getK(K_eff, 5, 2);
+
+	        const Eigen::Vector3d err_before = x_before.head<3>() - gt_rel;
+	        const Eigen::Vector3d err_after  = x_after.head<3>()  - gt_rel;
+	        const double err_before_norm = err_before.allFinite() ? err_before.norm() : nan;
+	        const double err_after_norm  = err_after.allFinite()  ? err_after.norm()  : nan;
+	        const double err_delta = (err_before.allFinite() && err_after.allFinite())
+	                                 ? (err_after_norm - err_before_norm) : nan;
+
+	        const double correction_dot = delta_pos.allFinite() && err_before.allFinite()
+	                                      ? delta_pos.dot(err_before) : nan;
+	        const double correction_cos = safeCosine(delta_pos, err_before);
+
+	        const double residual_norm = residual.allFinite() ? residual.norm() : nan;
+	        const double corr_over_res = safeRatio(delta_pos_norm, residual_norm);
+
+	        delayed_trace_csv_
+	            << t << ","
+	            << uav_id_ << "," << target_id << "," << mission_stage_ << ","
+	            << obs_stamp.toSec() << "," << filter_stamp.toSec() << "," << age << ","
+	            << hist_stamp.toSec() << "," << history_match_dt << "," << best_idx << "," << cache_size << ","
+	            << z3(0) << "," << z3(1) << "," << z3(2) << ","
+	            << x_before(0) << "," << x_before(1) << "," << x_before(2) << ","
+	            << pred3(0) << "," << pred3(1) << "," << pred3(2) << ","
+	            << res3(0) << "," << res3(1) << "," << res3(2) << "," << residual_norm << ","
+	<< Ppx << "," << Ppy << "," << Ppz << ","
+	            << P_diag(3) << "," << P_diag(4) << "," << P_diag(5) << ","
+	            << Sx << "," << Sy << "," << Sz << ","
+	            << Kpx << "," << Kpy << "," << Kpz << ","
+	            << Kvx << "," << Kvy << "," << Kvz << ","
+	            << x_before(0) << "," << x_before(1) << "," << x_before(2) << ","
+	            << x_before(3) << "," << x_before(4) << "," << x_before(5) << ","
+	            << x_after(0) << "," << x_after(1) << "," << x_after(2) << ","
+	            << x_after(3) << "," << x_after(4) << "," << x_after(5) << ","
+	            << delta_pos(0) << "," << delta_pos(1) << "," << delta_pos(2) << ","
+	            << delta_vel(0) << "," << delta_vel(1) << "," << delta_vel(2) << ","
+	            << delta_pos_norm << "," << delta_vel_norm << ","
+	            << gt_rel(0) << "," << gt_rel(1) << "," << gt_rel(2) << ","
+	            << err_before(0) << "," << err_before(1) << "," << err_before(2) << ","
+	            << err_after(0) << "," << err_after(1) << "," << err_after(2) << ","
+	            << err_before_norm << "," << err_after_norm << "," << err_delta << ","
+	            << correction_dot << "," << correction_cos << ","
+	            << corr_over_res << ","
+	            << gain_weight_val << "\n";
+	    }
+
+	    void writeReplayTrace(
+	        const Filter &f,
+	        const Observation &obs,
+	        const ReplayTraceContext &ctx,
+	        const Vector6d &current_before,
+	        const Vector6d &current_after,
+	        int replay_nodes,
+	        double replay_duration)
+	    {
+	        if (!replay_trace_csv_.is_open()) return;
+	        if (!traceActive()) return;
+
+	        const double t = f.stamp.isZero() ? ros::Time::now().toSec() : f.stamp.toSec();
+	        const double nan = std::numeric_limits<double>::quiet_NaN();
+
+	        // GT for current state
+	        Eigen::Vector3d current_gt = Eigen::Vector3d::Constant(nan);
+	        (void)getRelativeGroundTruth(uav_id_, f.target_id, f.stamp, current_gt);
+
+	        const Eigen::Vector3d hist_delta = ctx.hist_after.head<3>() - ctx.hist_before.head<3>();
+	        const Eigen::Vector3d hist_delta_vel = ctx.hist_after.tail<3>() - ctx.hist_before.tail<3>();
+	        const double hist_delta_pos_norm = hist_delta.norm();
+	        const double hist_delta_vel_norm = hist_delta_vel.norm();
+
+	        const Eigen::Vector3d current_delta = current_after.head<3>() - current_before.head<3>();
+	        const Eigen::Vector3d current_delta_vel = current_after.tail<3>() - current_before.tail<3>();
+	        const double current_delta_pos_norm = current_delta.norm();
+	        const double current_delta_vel_norm = current_delta_vel.norm();
+
+	        const double prop_gain_pos = safeRatio(current_delta_pos_norm, hist_delta_pos_norm);
+	        const double prop_gain_vel = safeRatio(current_delta_vel_norm, hist_delta_vel_norm);
+
+	        const Eigen::Vector3d err_before = current_before.head<3>() - current_gt;
+	        const Eigen::Vector3d err_after  = current_after.head<3>()  - current_gt;
+	        const double err_before_norm = err_before.allFinite() ? err_before.norm() : nan;
+	        const double err_after_norm  = err_after.allFinite()  ? err_after.norm()  : nan;
+	        const double err_delta_val = (std::isfinite(err_before_norm) && std::isfinite(err_after_norm))
+	                                     ? (err_after_norm - err_before_norm) : nan;
+
+	        replay_trace_csv_
+	            << t << ","
+	            << uav_id_ << "," << f.target_id << "," << mission_stage_ << ","
+	            << ctx.obs_stamp.toSec() << "," << ctx.hist_stamp.toSec() << ","
+	            << ctx.current_stamp.toSec() << ","
+	            << ctx.best_idx << "," << ctx.cache_size << "," << replay_nodes << "," << replay_duration << ","
+	            << hist_delta_pos_norm << "," << hist_delta_vel_norm << ","
+	            << current_delta(0) << "," << current_delta(1) << "," << current_delta(2) << ","
+	            << current_delta_vel(0) << "," << current_delta_vel(1) << "," << current_delta_vel(2) << ","
+	            << current_delta_pos_norm << "," << current_delta_vel_norm << ","
+	            << prop_gain_pos << "," << prop_gain_vel << ","
+	            << current_before(0) << "," << current_before(1) << "," << current_before(2) << ","
+	            << current_before(3) << "," << current_before(4) << "," << current_before(5) << ","
+	            << current_after(0) << "," << current_after(1) << "," << current_after(2) << ","
+	            << current_after(3) << "," << current_after(4) << "," << current_after(5) << ","
+	            << current_gt(0) << "," << current_gt(1) << "," << current_gt(2) << ","
+	            << err_before(0) << "," << err_before(1) << "," << err_before(2) << ","
+	            << err_after(0) << "," << err_after(1) << "," << err_after(2) << ","
+	            << err_before_norm << "," << err_after_norm << "," << err_delta_val << "\n";
+	    }
+
+	    // ═══════════════════════════════════════════════════════════
+	    //  观测模型构建: 根据状态 x 和观测类型, 填充 Z, residual, H, R_meas
+	    // ═══════════════════════════════════════════════════════════
 
     bool buildObsModel(const Vector6d &x,
                        const Observation &obs,
@@ -1791,7 +2260,8 @@ public:
 	                         double &fail_nis,
 	                         bool &failed_on_gated_observation,
 	                         AdaptiveUwbInfo &gated_adaptive_uwb,
-	                         DelayedUpdateValidation *validation = nullptr)
+	                         DelayedUpdateValidation *validation = nullptr,
+	                         ReplayTraceContext *trace_ctx = nullptr)
     {
         fail_reason.clear();
         fail_residual_norm = std::numeric_limits<double>::quiet_NaN();
@@ -1933,23 +2403,72 @@ public:
 	                const double gain_weight = u.delayed ? delayed_update_gain_weight_ : 1.0;
 	                Eigen::MatrixXd K_eff = gain_weight * K;
 
-	                // ── validation tracking ─────────────────────
-	                if (validation && validation->enabled && u.seq == gated_seq)
-	                {
-	                    validation->delayed_update_before = rec.X_post;
-	                    validation->delayed_update_stamp = rec.stamp;
-	                    validation->residual_norm = residual.norm();
-	                    validation->nis = nis;
-	                    validation->gain_weight = gain_weight;
-	                    validation->found_target_update = true;
-	                }
+		                // ── validation tracking ─────────────────────
+		                if (validation && validation->enabled && u.seq == gated_seq)
+		                {
+		                    validation->delayed_update_before = rec.X_post;
+		                    validation->delayed_update_stamp = rec.stamp;
+		                    validation->residual_norm = residual.norm();
+		                    validation->nis = nis;
+		                    validation->gain_weight = gain_weight;
+		                    validation->found_target_update = true;
+		                }
 
-	                rec.X_post += K_eff * residual;
+		                // ── trace: delayed update ───────────────────
+		                if (trace_ctx && trace_ctx->enabled && u.seq == gated_seq)
+		                {
+		                    trace_ctx->found_target_update = true;
+		                    trace_ctx->hist_before = rec.X_post;
+		                    trace_ctx->hist_stamp = rec.stamp;
 
-	                if (validation && validation->enabled && u.seq == gated_seq)
-	                {
-	                    validation->delayed_update_after = rec.X_post;
-	                }
+		                    // 在 apply update 前记录 delayed_update_trace
+		                    Vector6d x_before = rec.X_post;
+		                    (void)x_before; // used after update
+		                }
+
+		                rec.X_post += K_eff * residual;
+
+		                if (validation && validation->enabled && u.seq == gated_seq)
+		                {
+		                    validation->delayed_update_after = rec.X_post;
+		                }
+
+		                // ── trace: delayed update after ────────────
+		                if (trace_ctx && trace_ctx->enabled && u.seq == gated_seq)
+			                {
+			                    trace_ctx->hist_after = rec.X_post;
+
+			                    // 写 delayed update trace
+			                    Vector6d x_before = trace_ctx->hist_before;
+			                    Vector6d x_after = rec.X_post;
+
+			                    // 构建 P_diag 向量 (协方差对角)
+			                    Vector6d P_diag;
+			                    P_diag << rec.P_post(0,0), rec.P_post(1,1), rec.P_post(2,2),
+			                              rec.P_post(3,3), rec.P_post(4,4), rec.P_post(5,5);
+
+			                    const double trace_t = rec.stamp.isZero()
+			                        ? ros::Time::now().toSec() : rec.stamp.toSec();
+
+			                    writeDelayedUpdateTrace(
+			                        trace_t,
+			                        obs_i.stamp,
+			                        trace_ctx->current_stamp,  // filter_stamp: 当前滤波器时间
+			                        rec.stamp,                 // hist_stamp: 缓存节点时间
+			                        obs_i.target_id,
+			                        (trace_ctx->current_stamp - obs_i.stamp).toSec(),  // age
+			                        (rec.stamp - obs_i.stamp).toSec(),  // history_match_dt
+			                        start_idx,       // best_idx
+			                        static_cast<int>(cache.size()),  // cache_size
+			                        x_before,
+			                        x_after,
+			                        Zk,
+			                        residual,
+			                        K_eff,
+			                        S,
+			                        P_diag,
+			                        gain_weight);
+		                }
                 Matrix6d I_KH = Matrix6d::Identity() - K_eff * Hk;
                 rec.P_post =
                     I_KH * rec.P_post * I_KH.transpose() +
@@ -2197,7 +2716,7 @@ public:
 	             << val.residual_norm << ','
 	             << val.nis << ','
 	             << val.gain_weight << ','
-	             << fusion_mode_ << '\n';
+	             << mission_stage_ << '\n';
 	    }
 
 	    void fillDelayedValidationGtAndWrite(DelayedUpdateValidation &val)
@@ -2313,27 +2832,44 @@ public:
 	        val.best_idx = best_idx;
 	        val.cache_size = static_cast<int>(f.cache.size());
 
-	        if (delayed_validation_enabled_)
-	        {
-	            val.current_replay_before = f.cache.back().X_post;
-	            val.current_replay_stamp = f.cache.back().stamp;
-	        }
+		        if (delayed_validation_enabled_)
+		        {
+		            val.current_replay_before = f.cache.back().X_post;
+		            val.current_replay_stamp = f.cache.back().stamp;
+		        }
 
-	        std::deque<History_Record> candidate_cache = f.cache;
-	        const uint64_t seq_before = obs_seq_;
-	        const uint64_t gated_seq =
-	            recordAcceptedObservation(candidate_cache[static_cast<size_t>(best_idx)], obs, true,
-	                                      delayed_validation_enabled_);
+		        // ── 保存 replay 前当前状态 (供 replay trace 使用) ──
+		        const Vector6d current_before_replay = f.cache.back().X_post;
+		        const ros::Time current_stamp_before = f.cache.back().stamp;
 
-        std::string replay_reason;
-        double replay_residual_norm = std::numeric_limits<double>::quiet_NaN();
-        double replay_nis = std::numeric_limits<double>::quiet_NaN();
-        bool failed_on_gated_observation = false;
-	        AdaptiveUwbInfo replay_adaptive_uwb;
+		        std::deque<History_Record> candidate_cache = f.cache;
+		        const uint64_t seq_before = obs_seq_;
+		        const uint64_t gated_seq =
+		            recordAcceptedObservation(candidate_cache[static_cast<size_t>(best_idx)], obs, true,
+		                                      delayed_validation_enabled_);
+
+		        std::string replay_reason;
+		        double replay_residual_norm = std::numeric_limits<double>::quiet_NaN();
+		        double replay_nis = std::numeric_limits<double>::quiet_NaN();
+		        bool failed_on_gated_observation = false;
+		        AdaptiveUwbInfo replay_adaptive_uwb;
+
+		        // ── ReplayTraceContext ────────────────────────────────
+		        ReplayTraceContext trace_ctx;
+		        trace_ctx.enabled = traceActive();
+		        trace_ctx.self_id = uav_id_;
+		        trace_ctx.target_id = obs.target_id;
+		        trace_ctx.stage = mission_stage_;
+		        trace_ctx.obs_stamp = obs.stamp;
+		        trace_ctx.best_idx = best_idx;
+		        trace_ctx.cache_size = static_cast<int>(f.cache.size());
+		        trace_ctx.current_stamp = current_stamp_before;
+
 	        if (!replayCacheFrom(candidate_cache, best_idx, true, gated_seq,
 	                             replay_reason, replay_residual_norm, replay_nis,
 	                             failed_on_gated_observation, replay_adaptive_uwb,
-	                             delayed_validation_enabled_ ? &val : nullptr))
+	                             delayed_validation_enabled_ ? &val : nullptr,
+	                             traceActive() ? &trace_ctx : nullptr))
         {
             obs_seq_ = seq_before;
 
@@ -2414,21 +2950,37 @@ public:
 	            val.current_replay_stamp = candidate_cache.back().stamp;
 	        }
 
-	        f.cache = std::move(candidate_cache);
-	        f.X = f.cache.back().X_post;
-	        f.P = f.cache.back().P_post;
-	        symmetrizeCov(f.P);
-	        incrementAcceptedCounters(f, obs, true);
+		        f.cache = std::move(candidate_cache);
+		        f.X = f.cache.back().X_post;
+		        f.P = f.cache.back().P_post;
+		        symmetrizeCov(f.P);
+		        incrementAcceptedCounters(f, obs, true);
 
-	        if (delayed_validation_enabled_)
-	        {
-	            val.accepted = true; val.replay_ok = true;
-	            val.reason = "accepted";
-	            fillDelayedValidationGtAndWrite(val);
-	        }
+		        if (delayed_validation_enabled_)
+		        {
+		            val.accepted = true; val.replay_ok = true;
+		            val.reason = "accepted";
+		            fillDelayedValidationGtAndWrite(val);
+		        }
 
-	        logObservationRow("delayed_update", f, obs, 1, 1, 1,
-                          "accepted_replayed", age,
+	        // ── write replay trace ─────────────────────────────
+		        if (traceActive() && trace_ctx.found_target_update)
+		        {
+		            const Vector6d &current_before = current_before_replay;
+		            const Vector6d &current_after = f.cache.back().X_post;
+
+		            const int replay_nodes = static_cast<int>(f.cache.size()) - 1 - best_idx;
+		            const double replay_duration = current_stamp_before.isZero()
+		                ? 0.0 : (current_stamp_before - trace_ctx.hist_stamp).toSec();
+
+		            writeReplayTrace(
+		                f, obs, trace_ctx,
+		                current_before, current_after,
+		                std::max(replay_nodes, 0), std::abs(replay_duration));
+		        }
+
+		logObservationRow("delayed_update", f, obs, 1, 1, 1,
+	                          "accepted_replayed", age,
                           best_dt,
                           replay_residual_norm,
                           replay_nis,
@@ -2479,10 +3031,14 @@ public:
             }
         }
 
-        f.pub.publish(msg);
-        ++f.publish_count;
-        logPublishRow(f);
-    }
+	        f.pub.publish(msg);
+	        ++f.publish_count;
+	        logPublishRow(f);
+
+	        // state trace (每 publish 一次记录)
+	        if (traceActive())
+	            writeStateTrace(f);
+	    }
 };
 
 // ═══════════════════════════════════════════════════════════
