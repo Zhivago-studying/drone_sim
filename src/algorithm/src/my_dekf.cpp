@@ -92,6 +92,8 @@ public:
         pnh_.param("sigma_uwb", sigma_uwb_, 0.05);
         pnh_.param("sigma_alpha", sigma_alpha_, 0.05);
         pnh_.param("sigma_theta", sigma_theta_, 0.05);
+        pnh_.param("use_dgo_velocity", use_dgo_velocity_, false);
+        pnh_.param("dgo_velocity_noise_std", dgo_velocity_noise_std_, 0.25);
         pnh_.param("max_dgo_pair_dt", max_dgo_pair_dt_, 0.12);
         pnh_.param("max_observation_delay", max_observation_delay_, 0.60);
         pnh_.param("current_delay_threshold", current_delay_threshold_, 0.020);
@@ -115,6 +117,7 @@ public:
         pnh_.param("max_nis_camera_2d", max_nis_camera_2d_, 13.8);
         pnh_.param("uwb_residual_gate", uwb_residual_gate_, 0.8);
         pnh_.param("dgo_residual_gate", dgo_residual_gate_, 2.0);
+        pnh_.param("dgo_velocity_residual_gate", dgo_velocity_residual_gate_, 2.0);
         pnh_.param("camera_residual_gate", camera_residual_gate_, 0.5);
         pnh_.param("require_direction_anchor_for_uwb", require_direction_anchor_for_uwb_, true);
 	        pnh_.param("uwb_anchor_max_age", uwb_anchor_max_age_, 0.50);
@@ -227,6 +230,7 @@ public:
                 ok = false;
             }
             if (uwb_residual_gate_ <= 0.0 || dgo_residual_gate_ <= 0.0 ||
+                dgo_velocity_residual_gate_ <= 0.0 ||
                 camera_residual_gate_ <= 0.0)
             {
                 ROS_FATAL("[DEKF] residual gates must be > 0");
@@ -254,6 +258,14 @@ public:
                 ros::shutdown();
                 return;
             }
+        }
+
+        // use_dgo_velocity 参数合法性检查
+        if (use_dgo_velocity_ && dgo_velocity_noise_std_ <= 0.0)
+        {
+            ROS_FATAL("[DEKF] dgo_velocity_noise_std must be positive when use_dgo_velocity is true");
+            ros::shutdown();
+            return;
         }
 
         dgo_cache_.resize(uav_num_);
@@ -605,6 +617,8 @@ public:
     double sigma_uwb_ = 0.05;
     double sigma_alpha_ = 0.05;
     double sigma_theta_ = 0.05;
+    bool use_dgo_velocity_ = false;
+    double dgo_velocity_noise_std_ = 0.25;
     Matrix6d R_;
 
     // 延迟补偿参数
@@ -621,6 +635,7 @@ public:
     double max_nis_camera_2d_ = 13.8;
     double uwb_residual_gate_ = 0.8;
     double dgo_residual_gate_ = 2.0;
+    double dgo_velocity_residual_gate_ = 2.0;
     double camera_residual_gate_ = 0.5;
     bool require_direction_anchor_for_uwb_ = true;
     int fusion_mode_ = 4;
@@ -1341,12 +1356,24 @@ public:
         switch (obs.type)
         {
             case ObsType::DGO:
-                if (residual.norm() > dgo_residual_gate_)
+            {
+                const double pos_res = residual.head(3).norm();
+                if (pos_res > dgo_residual_gate_)
                 {
                     reason = "dgo_residual_gate_reject";
                     return false;
                 }
+                if (residual.size() >= 6)
+                {
+                    const double vel_res = residual.segment(3, 3).norm();
+                    if (vel_res > dgo_velocity_residual_gate_)
+                    {
+                        reason = "dgo_velocity_residual_gate_reject";
+                        return false;
+                    }
+                }
                 return true;
+            }
 
             case ObsType::UWB_RANGE:
                 if (residual.size() < 1 ||
@@ -1836,10 +1863,10 @@ public:
 		                << "z_x,z_y,z_z,"
 		                << "update_before_x,update_before_y,update_before_z,"
 		                << "pred_x,pred_y,pred_z,"
-		                << "res_x,res_y,res_z,res_norm,"
+		                << "res_x,res_y,res_z,res_norm,pos_res_norm,vel_res_norm,"
 	                << "Ppx,Ppy,Ppz,Pvx,Pvy,Pvz,"
 	                << "Sx,Sy,Sz,"
-	                << "Kpx,Kpy,Kpz,Kvx,Kvy,Kvz,"
+		                << "Kpx,Kpy,Kpz,Kvx,Kvy,Kvz,Kvv_x,Kvv_y,Kvv_z,"
 	                << "x_before,y_before,z_before,vx_before,vy_before,vz_before,"
 	                << "x_after,y_after,z_after,vx_after,vy_after,vz_after,"
 	                << "delta_x,delta_y,delta_z,delta_vx,delta_vy,delta_vz,"
@@ -2024,8 +2051,18 @@ public:
 	                                      ? delta_pos.dot(err_before) : nan;
 	        const double correction_cos = safeCosine(delta_pos, err_before);
 
-	        const double residual_norm = residual.allFinite() ? residual.norm() : nan;
-	        const double corr_over_res = safeRatio(delta_pos_norm, residual_norm);
+        const double residual_norm = residual.allFinite() ? residual.norm() : nan;
+        const double pos_res_norm = residual.size() >= 3 && residual.head(3).allFinite()
+                                    ? residual.head(3).norm() : nan;
+        const double vel_res_norm = residual.size() >= 6 && residual.segment(3,3).allFinite()
+                                    ? residual.segment(3,3).norm() : nan;
+
+        // Kvv: velocity-residual → velocity-state gain (6D 模式下 velocity diagonal)
+        const double Kvv_x = getK(K_eff, 3, 3);
+        const double Kvv_y = getK(K_eff, 4, 4);
+        const double Kvv_z = getK(K_eff, 5, 5);
+
+        const double corr_over_res = safeRatio(delta_pos_norm, residual_norm);
 
 	        delayed_trace_csv_
 	            << t << ","
@@ -2035,12 +2072,14 @@ public:
 	            << z3(0) << "," << z3(1) << "," << z3(2) << ","
 	            << x_before(0) << "," << x_before(1) << "," << x_before(2) << ","
 	            << pred3(0) << "," << pred3(1) << "," << pred3(2) << ","
-	            << res3(0) << "," << res3(1) << "," << res3(2) << "," << residual_norm << ","
-	<< Ppx << "," << Ppy << "," << Ppz << ","
-	            << P_diag(3) << "," << P_diag(4) << "," << P_diag(5) << ","
-	            << Sx << "," << Sy << "," << Sz << ","
-	            << Kpx << "," << Kpy << "," << Kpz << ","
-	            << Kvx << "," << Kvy << "," << Kvz << ","
+            << res3(0) << "," << res3(1) << "," << res3(2) << "," << residual_norm << ","
+            << pos_res_norm << "," << vel_res_norm << ","
+            << Ppx << "," << Ppy << "," << Ppz << ","
+            << P_diag(3) << "," << P_diag(4) << "," << P_diag(5) << ","
+            << Sx << "," << Sy << "," << Sz << ","
+            << Kpx << "," << Kpy << "," << Kpz << ","
+            << Kvx << "," << Kvy << "," << Kvz << ","
+            << Kvv_x << "," << Kvv_y << "," << Kvv_z << ","
 	            << x_before(0) << "," << x_before(1) << "," << x_before(2) << ","
 	            << x_before(3) << "," << x_before(4) << "," << x_before(5) << ","
 	            << x_after(0) << "," << x_after(1) << "," << x_after(2) << ","
@@ -2132,15 +2171,36 @@ public:
         {
             case ObsType::DGO:
             {
-                Z.resize(3);
-                residual.resize(3);
-                Z << obs.position(0), obs.position(1), obs.position(2);
-                residual = Z - x.segment(0, 3);
-                H.resize(3, 6);
-                H.block(0, 0, 3, 3) = Eigen::Matrix3d::Identity();
-                H.block(0, 3, 3, 3) = Eigen::Matrix3d::Zero();
-                R_meas.resize(3, 3);
-                R_meas = R_.block(0, 0, 3, 3);
+                if (use_dgo_velocity_ && obs.velocity.allFinite())
+                {
+                    // position + velocity
+                    Z.resize(6);
+                    Z << obs.position(0), obs.position(1), obs.position(2),
+                         obs.velocity(0), obs.velocity(1), obs.velocity(2);
+                    residual = Z - x;
+                    H.resize(6, 6);
+                    H.setIdentity();
+                    R_meas.resize(6, 6);
+                    R_meas.setZero();
+                    R_meas(0, 0) = sigma_px_ * sigma_px_;
+                    R_meas(1, 1) = sigma_py_ * sigma_py_;
+                    R_meas(2, 2) = sigma_pz_ * sigma_pz_;
+                    const double sv2 = dgo_velocity_noise_std_ * dgo_velocity_noise_std_;
+                    R_meas(3, 3) = sv2;
+                    R_meas(4, 4) = sv2;
+                    R_meas(5, 5) = sv2;
+                }
+                else
+                {
+                    Z.resize(3);
+                    Z << obs.position(0), obs.position(1), obs.position(2);
+                    residual = Z - x.segment(0, 3);
+                    H.resize(3, 6);
+                    H.block(0, 0, 3, 3) = Eigen::Matrix3d::Identity();
+                    H.block(0, 3, 3, 3) = Eigen::Matrix3d::Zero();
+                    R_meas.resize(3, 3);
+                    R_meas = R_.block(0, 0, 3, 3);
+                }
                 return true;
             }
 

@@ -69,8 +69,10 @@
   <arg name="dekf_dgo_position_noise_std" default="0.08" />
   <arg name="dekf_uwb_noise_std" default="$(arg uwb_stddev)" />
   <arg name="dekf_camera_alpha_noise_std" default="0.05" />
-  <arg name="dekf_camera_theta_noise_std" default="0.05" />
-  <arg name="run_id" default="" />
+	  <arg name="dekf_camera_theta_noise_std" default="0.05" />
+	  <arg name="dekf_use_dgo_velocity" default="false" />
+	  <arg name="dekf_dgo_velocity_noise_std" default="0.25" />
+	  <arg name="run_id" default="" />
 
   <!-- Alias launch: the full mission launch owns the evaluator node. -->
   <include file="$(find algorithm)/launch/dgo_full_mission.launch">
@@ -144,7 +146,9 @@
     <arg name="dekf_dgo_position_noise_std" value="$(arg dekf_dgo_position_noise_std)" />
     <arg name="dekf_uwb_noise_std" value="$(arg dekf_uwb_noise_std)" />
     <arg name="dekf_camera_alpha_noise_std" value="$(arg dekf_camera_alpha_noise_std)" />
-    <arg name="dekf_camera_theta_noise_std" value="$(arg dekf_camera_theta_noise_std)" />
-    <arg name="run_id" value="$(arg run_id)" />
+	    <arg name="dekf_camera_theta_noise_std" value="$(arg dekf_camera_theta_noise_std)" />
+	    <arg name="dekf_use_dgo_velocity" value="$(arg dekf_use_dgo_velocity)" />
+	    <arg name="dekf_dgo_velocity_noise_std" value="$(arg dekf_dgo_velocity_noise_std)" />
+	    <arg name="run_id" value="$(arg run_id)" />
   </include>
 </launch>

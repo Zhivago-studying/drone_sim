@@ -74,9 +74,11 @@
   <arg name="dekf_accel_noise_std" default="0.8" />
   <arg name="dekf_dgo_position_noise_std" default="0.08" />
   <arg name="dekf_uwb_noise_std" default="$(arg uwb_stddev)" />
-  <arg name="dekf_camera_alpha_noise_std" default="0.05" />
-  <arg name="dekf_camera_theta_noise_std" default="0.05" />
-  <arg name="max_dekf_align_dt" default="0.12" />
+	  <arg name="dekf_camera_alpha_noise_std" default="0.05" />
+	  <arg name="dekf_camera_theta_noise_std" default="0.05" />
+	  <arg name="dekf_use_dgo_velocity" default="false" />
+	  <arg name="dekf_dgo_velocity_noise_std" default="0.25" />
+	  <arg name="max_dekf_align_dt" default="0.12" />
   <arg name="mode" default="4" />
 	  <arg name="delayed_validation_enabled" default="false" />
 	  <arg name="delayed_validation_gt_max_dt" default="0.05" />
@@ -208,6 +210,8 @@
       <param name="trace_dgo_only" value="$(arg dekf_trace_dgo_only)" />
       <param name="sigma_alpha" value="$(arg dekf_camera_alpha_noise_std)" />
       <param name="sigma_theta" value="$(arg dekf_camera_theta_noise_std)" />
+      <param name="use_dgo_velocity" value="$(arg dekf_use_dgo_velocity)" />
+      <param name="dgo_velocity_noise_std" value="$(arg dekf_dgo_velocity_noise_std)" />
       <param name="max_dgo_pair_dt" value="$(arg dekf_max_dgo_pair_dt)" />
       <param name="max_observation_delay" value="$(arg dekf_max_observation_delay)" />
       <param name="current_delay_threshold" value="$(arg dekf_delay_threshold)" />
@@ -322,6 +326,8 @@
       <param name="trace_dgo_only" value="$(arg dekf_trace_dgo_only)" />
       <param name="sigma_alpha" value="$(arg dekf_camera_alpha_noise_std)" />
       <param name="sigma_theta" value="$(arg dekf_camera_theta_noise_std)" />
+      <param name="use_dgo_velocity" value="$(arg dekf_use_dgo_velocity)" />
+      <param name="dgo_velocity_noise_std" value="$(arg dekf_dgo_velocity_noise_std)" />
       <param name="max_dgo_pair_dt" value="$(arg dekf_max_dgo_pair_dt)" />
       <param name="max_observation_delay" value="$(arg dekf_max_observation_delay)" />
       <param name="current_delay_threshold" value="$(arg dekf_delay_threshold)" />
@@ -436,6 +442,8 @@
       <param name="trace_dgo_only" value="$(arg dekf_trace_dgo_only)" />
       <param name="sigma_alpha" value="$(arg dekf_camera_alpha_noise_std)" />
       <param name="sigma_theta" value="$(arg dekf_camera_theta_noise_std)" />
+      <param name="use_dgo_velocity" value="$(arg dekf_use_dgo_velocity)" />
+      <param name="dgo_velocity_noise_std" value="$(arg dekf_dgo_velocity_noise_std)" />
       <param name="max_dgo_pair_dt" value="$(arg dekf_max_dgo_pair_dt)" />
       <param name="max_observation_delay" value="$(arg dekf_max_observation_delay)" />
       <param name="current_delay_threshold" value="$(arg dekf_delay_threshold)" />
@@ -550,6 +558,8 @@
       <param name="trace_dgo_only" value="$(arg dekf_trace_dgo_only)" />
       <param name="sigma_alpha" value="$(arg dekf_camera_alpha_noise_std)" />
       <param name="sigma_theta" value="$(arg dekf_camera_theta_noise_std)" />
+      <param name="use_dgo_velocity" value="$(arg dekf_use_dgo_velocity)" />
+      <param name="dgo_velocity_noise_std" value="$(arg dekf_dgo_velocity_noise_std)" />
       <param name="max_dgo_pair_dt" value="$(arg dekf_max_dgo_pair_dt)" />
       <param name="max_observation_delay" value="$(arg dekf_max_observation_delay)" />
       <param name="current_delay_threshold" value="$(arg dekf_delay_threshold)" />

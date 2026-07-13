@@ -95,8 +95,10 @@
 	  <arg name="delayed_validation_enabled" default="false" />
 	  <arg name="delayed_validation_gt_max_dt" default="0.05" />
 	  <arg name="dekf_trace_enabled" default="false" />
-	  <arg name="dekf_trace_dgo_only" default="true" />
-  <arg name="dekf_max_pending" default="100" />
+		  <arg name="dekf_trace_dgo_only" default="true" />
+	  <arg name="dekf_use_dgo_velocity" default="false" />
+	  <arg name="dekf_dgo_velocity_noise_std" default="0.25" />
+	  <arg name="dekf_max_pending" default="100" />
   <arg name="dekf_max_history_match_dt" default="0.06" />
   <arg name="dekf_max_observation_delay" default="0.60" />
   <arg name="dekf_max_dgo_pair_dt" default="0.12" />
@@ -189,7 +191,9 @@
     <arg name="dekf_dgo_position_noise_std" value="$(arg dekf_dgo_position_noise_std)" />
     <arg name="dekf_uwb_noise_std" value="$(arg dekf_uwb_noise_std)" />
     <arg name="dekf_camera_alpha_noise_std" value="$(arg dekf_camera_alpha_noise_std)" />
-    <arg name="dekf_camera_theta_noise_std" value="$(arg dekf_camera_theta_noise_std)" />
-    <arg name="max_dekf_align_dt" value="$(arg max_dekf_align_dt)" />
+	    <arg name="dekf_camera_theta_noise_std" value="$(arg dekf_camera_theta_noise_std)" />
+	    <arg name="dekf_use_dgo_velocity" value="$(arg dekf_use_dgo_velocity)" />
+	    <arg name="dekf_dgo_velocity_noise_std" value="$(arg dekf_dgo_velocity_noise_std)" />
+	    <arg name="max_dekf_align_dt" value="$(arg max_dekf_align_dt)" />
   </include>
 </launch>
