@@ -93,7 +93,11 @@ public:
         pnh_.param("sigma_alpha", sigma_alpha_, 0.05);
         pnh_.param("sigma_theta", sigma_theta_, 0.05);
         pnh_.param("use_dgo_velocity", use_dgo_velocity_, false);
-        pnh_.param("dgo_velocity_noise_std", dgo_velocity_noise_std_, 0.25);
+        pnh_.param("dgo_velocity_noise_std", dgo_velocity_noise_std_, 0.35);
+        pnh_.param("use_dgo_velocity_stage_gate", use_dgo_velocity_stage_gate_, true);
+        pnh_.param("dgo_velocity_noise_std_dynamic", dgo_velocity_noise_std_dynamic_, 0.35);
+        pnh_.param("dgo_velocity_noise_std_landing", dgo_velocity_noise_std_landing_, 0.70);
+        pnh_.param("disable_dgo_velocity_in_landing", disable_dgo_velocity_in_landing_, true);
         pnh_.param("max_dgo_pair_dt", max_dgo_pair_dt_, 0.12);
         pnh_.param("max_observation_delay", max_observation_delay_, 0.60);
         pnh_.param("current_delay_threshold", current_delay_threshold_, 0.020);
@@ -111,7 +115,8 @@ public:
             }
         }
         pnh_.param("max_nis", max_nis_, 25.0);
-        pnh_.param("max_nis_dgo", max_nis_dgo_, 16.3);
+        pnh_.param("max_nis_dgo", max_nis_dgo_, 11.34);
+        pnh_.param("max_nis_dgo_velocity", max_nis_dgo_velocity_, 16.27);
         pnh_.param("max_nis_uwb", max_nis_uwb_, 12.0);
         pnh_.param("max_nis_camera_1d", max_nis_camera_1d_, 9.0);
         pnh_.param("max_nis_camera_2d", max_nis_camera_2d_, 13.8);
@@ -223,7 +228,8 @@ public:
                           delayed_update_gain_weight_);
                 ok = false;
             }
-            if (max_nis_dgo_ <= 0.0 || max_nis_uwb_ <= 0.0 ||
+            if (max_nis_dgo_ <= 0.0 || max_nis_dgo_velocity_ <= 0.0 ||
+                max_nis_uwb_ <= 0.0 ||
                 max_nis_camera_1d_ <= 0.0 || max_nis_camera_2d_ <= 0.0)
             {
                 ROS_FATAL("[DEKF] per-observation NIS gates must be > 0");
@@ -261,9 +267,12 @@ public:
         }
 
         // use_dgo_velocity 参数合法性检查
-        if (use_dgo_velocity_ && dgo_velocity_noise_std_ <= 0.0)
+        if (use_dgo_velocity_ &&
+            (dgo_velocity_noise_std_ <= 0.0 ||
+             dgo_velocity_noise_std_dynamic_ <= 0.0 ||
+             dgo_velocity_noise_std_landing_ <= 0.0))
         {
-            ROS_FATAL("[DEKF] dgo_velocity_noise_std must be positive when use_dgo_velocity is true");
+            ROS_FATAL("[DEKF] all DGO velocity noise stddevs must be positive when velocity updates are enabled");
             ros::shutdown();
             return;
         }
@@ -309,6 +318,19 @@ public:
                  allow_dgo_x_only_on_bad_cov_ ? 1 : 0);
         ROS_INFO("[DEKF] covariance bounds: max_position_cov=%.3f max_velocity_cov=%.3f",
                  max_position_cov_, max_velocity_cov_);
+        ROS_INFO("[DEKF] DGO split updates: velocity=%d stage_gate=%d landing_disabled=%d "
+                 "sigma_v_base=%.3f dynamic=%.3f landing=%.3f "
+                 "nis_pos=%.2f nis_vel=%.2f residual_gate_pos=%.2f residual_gate_vel=%.2f",
+                 use_dgo_velocity_ ? 1 : 0,
+                 use_dgo_velocity_stage_gate_ ? 1 : 0,
+                 disable_dgo_velocity_in_landing_ ? 1 : 0,
+                 dgo_velocity_noise_std_,
+                 dgo_velocity_noise_std_dynamic_,
+                 dgo_velocity_noise_std_landing_,
+                 max_nis_dgo_,
+                 max_nis_dgo_velocity_,
+                 dgo_residual_gate_,
+                 dgo_velocity_residual_gate_);
 
         // 过程噪声矩阵 Q
         Q_.setZero();
@@ -363,7 +385,7 @@ public:
 	            "camera_angle_match", 10, &DEKF::cameraCallback, this);
 
 		    // GT 真值订阅 (用于 delayed update 验证 + trace, 从 /gazebo/model_states 获取)
-			    if (delayed_validation_enabled_ || trace_enabled_)
+			    if (delayed_validation_enabled_ || trace_enabled_ || use_dgo_velocity_)
 			    {
 			        model_gt_sub_ = nh_.subscribe<gazebo_msgs::ModelStates>(
 			            "/gazebo/model_states", 100,
@@ -384,9 +406,11 @@ public:
 		    ~DEKF()
 		    {
 		        writeDelayedAgeSummary();
+		        writeDgoVelocityUpdateSummary();
 		        if (delayed_trace_csv_.is_open()) delayed_trace_csv_.close();
 		        if (replay_trace_csv_.is_open()) replay_trace_csv_.close();
 		        if (state_trace_csv_.is_open()) state_trace_csv_.close();
+		        if (dgo_velocity_source_csv_.is_open()) dgo_velocity_source_csv_.close();
 		    }
 
 	private:
@@ -397,7 +421,8 @@ public:
     // 观测类型枚举
     enum class ObsType
     {
-        DGO,             // DGO 相对位姿观测
+        DGO,             // DGO position-only 相对位置观测
+        DGO_VELOCITY,    // DGO velocity-only 相对速度观测
         UWB_RANGE,       // UWB 测距观测
         CAMERA_BEARING   // 相机角度观测
     };
@@ -439,6 +464,11 @@ public:
         double value = 0.0;                      // UWB 测距值
         Eigen::Vector3d position = Eigen::Vector3d::Zero();  // DGO 相对位置
         Eigen::Vector3d velocity = Eigen::Vector3d::Zero();  // DGO 相对速度
+        int mission_stage = -1;
+        ros::Time self_dgo_stamp;
+        ros::Time target_dgo_stamp;
+        Eigen::Vector3d self_velocity = Eigen::Vector3d::Zero();
+        Eigen::Vector3d target_velocity = Eigen::Vector3d::Zero();
         double alpha = 0.0;
         double theta = 0.0;
         bool has_alpha = false;
@@ -548,6 +578,8 @@ public:
 
 		        Vector6d hist_before = Vector6d::Zero();
 		        Vector6d hist_after  = Vector6d::Zero();
+		        Eigen::Vector3d gated_kvv = Eigen::Vector3d::Constant(
+		            std::numeric_limits<double>::quiet_NaN());
 		    };
 
 		    // 滤波器: 本机到 target_id 的相对位姿/速度估计
@@ -567,6 +599,16 @@ public:
         size_t current_updates = 0;
         size_t delayed_updates = 0;
         size_t dgo_updates = 0;
+        size_t dgo_velocity_attempts = 0;
+        size_t dgo_velocity_updates = 0;
+        std::array<size_t, 8> dgo_velocity_stage_attempts = {};
+        std::array<size_t, 8> dgo_velocity_stage_updates = {};
+        double dgo_velocity_residual_sum = 0.0;
+        size_t dgo_velocity_residual_count = 0;
+        double dgo_velocity_nis_sum = 0.0;
+        size_t dgo_velocity_nis_count = 0;
+        Eigen::Vector3d dgo_velocity_kvv_sum = Eigen::Vector3d::Zero();
+        size_t dgo_velocity_kvv_count = 0;
         size_t uwb_updates = 0;
         size_t camera_updates = 0;
         size_t rejects = 0;
@@ -618,7 +660,11 @@ public:
     double sigma_alpha_ = 0.05;
     double sigma_theta_ = 0.05;
     bool use_dgo_velocity_ = false;
-    double dgo_velocity_noise_std_ = 0.25;
+    double dgo_velocity_noise_std_ = 0.35;
+    bool use_dgo_velocity_stage_gate_ = true;
+    double dgo_velocity_noise_std_dynamic_ = 0.35;
+    double dgo_velocity_noise_std_landing_ = 0.70;
+    bool disable_dgo_velocity_in_landing_ = true;
     Matrix6d R_;
 
     // 延迟补偿参数
@@ -629,7 +675,8 @@ public:
     double future_tolerance_ = 0.02;
     double delayed_update_gain_weight_ = 1.0;
     double max_nis_ = 25.0;
-    double max_nis_dgo_ = 16.3;
+    double max_nis_dgo_ = 11.34;
+    double max_nis_dgo_velocity_ = 16.27;
     double max_nis_uwb_ = 12.0;
     double max_nis_camera_1d_ = 9.0;
     double max_nis_camera_2d_ = 13.8;
@@ -672,6 +719,7 @@ public:
 	    std::ofstream delayed_trace_csv_;
 	    std::ofstream replay_trace_csv_;
 	    std::ofstream state_trace_csv_;
+	    std::ofstream dgo_velocity_source_csv_;
 
 	    // 任务阶段
 	    int mission_stage_ = -1;
@@ -687,11 +735,15 @@ public:
 	    // GT 真值缓存 (来自 /gazebo/model_states, 用于 delayed update 验证)
 	    std::deque<GtWorldSample> model_gt_buffer_;
 	    ros::Subscriber model_gt_sub_;
-	    // 延迟观测 age 统计 (写文件用)
-	    double delayed_attempt_age_sum_ = 0.0;
-	    size_t delayed_attempt_age_count_ = 0;
-	    double delayed_accepted_age_sum_ = 0.0;
-	    size_t delayed_accepted_age_count_ = 0;
+	    struct DelayedAgeStats
+	    {
+	        double attempt_sum = 0.0;
+	        size_t attempt_count = 0;
+	        double accepted_sum = 0.0;
+	        size_t accepted_count = 0;
+	    };
+	    DelayedAgeStats delayed_position_age_;
+	    DelayedAgeStats delayed_velocity_age_;
 
 	    // 编队初始 offset (用于 DGO 相对位置补齐)
     std::vector<Eigen::Vector3d> initial_offsets_;
@@ -746,12 +798,34 @@ public:
         {
             case ObsType::DGO:
                 return "dgo";
+            case ObsType::DGO_VELOCITY:
+                return "dgo_velocity";
             case ObsType::UWB_RANGE:
                 return "uwb";
             case ObsType::CAMERA_BEARING:
                 return "camera";
         }
         return "unknown";
+    }
+
+    bool shouldUseDgoVelocity(int stage) const
+    {
+        if (!use_dgo_velocity_)
+            return false;
+        if (!use_dgo_velocity_stage_gate_)
+            return true;
+        if (stage == 6 && disable_dgo_velocity_in_landing_)
+            return false;
+        return stage == 3 || stage == 5;
+    }
+
+    double effectiveDgoVelocityNoise(int stage) const
+    {
+        if (stage == 6)
+            return dgo_velocity_noise_std_landing_;
+        if (stage == 3 || stage == 5)
+            return dgo_velocity_noise_std_dynamic_;
+        return dgo_velocity_noise_std_;
     }
 
     void openCsv()
@@ -776,12 +850,14 @@ public:
 
         csv_ << "time,event,target,obs_type,accepted,delayed,p_updated,reason,"
              << "obs_stamp,filter_stamp,age,history_match_dt,residual_norm,nis,"
+             << "pos_res_norm,vel_res_norm,sigma_v_eff,Kvv_x,Kvv_y,Kvv_z,"
              << "gain_consistency_error,"
              << "uwb_noise_eff,uwb_noise_scale,uwb_anchor_age,uwb_adaptive_reason,"
              << "x,y,z,vx,vy,vz,"
              << "Pxx,Pyy,Pzz,Pvxvx,Pvyvy,Pvzvz,"
              << "pending_size,cache_size,publish_count,current_updates,delayed_updates,"
-             << "dgo_updates,uwb_updates,camera_updates,rejects,delayed_p_skips,"
+             << "dgo_updates,dgo_velocity_attempts,dgo_velocity_updates,"
+             << "uwb_updates,camera_updates,rejects,delayed_p_skips,"
              << "future_requeues,old_drops,recovery_resets,dgo_recovery_count,"
              << "last_direction_anchor_age,last_recovery_reset_age,"
              << "fusion_mode,enable_dgo,enable_uwb,enable_camera\n";
@@ -815,9 +891,10 @@ public:
 	            }
 	        }
 
-	        // Trace CSV (可选)
-	        openTraceCsv();
-	    }
+		        // Trace CSV (可选)
+		        openTraceCsv();
+		        openDgoVelocitySourceCsv();
+		    }
 
     void logCsvRow(const std::string &event,
                    const Filter &f,
@@ -832,7 +909,12 @@ public:
                    double residual_norm,
                    double nis,
                    double gain_consistency_error = std::numeric_limits<double>::quiet_NaN(),
-                   const AdaptiveUwbInfo &adaptive_uwb = AdaptiveUwbInfo())
+                   const AdaptiveUwbInfo &adaptive_uwb = AdaptiveUwbInfo(),
+                   double pos_res_norm = std::numeric_limits<double>::quiet_NaN(),
+                   double vel_res_norm = std::numeric_limits<double>::quiet_NaN(),
+                   double sigma_v_eff = std::numeric_limits<double>::quiet_NaN(),
+                   const Eigen::Vector3d &kvv = Eigen::Vector3d::Constant(
+                       std::numeric_limits<double>::quiet_NaN()))
     {
         if (!csv_.is_open())
             return;
@@ -864,6 +946,10 @@ public:
              << history_match_dt << ","
              << residual_norm << ","
              << nis << ","
+             << pos_res_norm << ","
+             << vel_res_norm << ","
+             << sigma_v_eff << ","
+             << kvv.x() << "," << kvv.y() << "," << kvv.z() << ","
              << gain_consistency_error << ","
              << adaptive_uwb.noise << ","
              << adaptive_uwb.scale << ","
@@ -879,6 +965,8 @@ public:
              << f.current_updates << ","
              << f.delayed_updates << ","
              << f.dgo_updates << ","
+             << f.dgo_velocity_attempts << ","
+             << f.dgo_velocity_updates << ","
              << f.uwb_updates << ","
              << f.camera_updates << ","
              << f.rejects << ","
@@ -907,13 +995,21 @@ public:
                            double residual_norm,
                            double nis,
                            double gain_consistency_error = std::numeric_limits<double>::quiet_NaN(),
-                           const AdaptiveUwbInfo &adaptive_uwb = AdaptiveUwbInfo())
+                           const AdaptiveUwbInfo &adaptive_uwb = AdaptiveUwbInfo(),
+                           const Eigen::Vector3d &kvv = Eigen::Vector3d::Constant(
+                               std::numeric_limits<double>::quiet_NaN()))
     {
+        const double nan = std::numeric_limits<double>::quiet_NaN();
         const double obs_stamp =
-            obs.stamp.isZero() ? std::numeric_limits<double>::quiet_NaN() : obs.stamp.toSec();
+            obs.stamp.isZero() ? nan : obs.stamp.toSec();
+        const double pos_res_norm = obs.type == ObsType::DGO ? residual_norm : nan;
+        const double vel_res_norm = obs.type == ObsType::DGO_VELOCITY ? residual_norm : nan;
+        const double sigma_v_eff = obs.type == ObsType::DGO_VELOCITY
+            ? effectiveDgoVelocityNoise(obs.mission_stage) : nan;
         logCsvRow(event, f, obsTypeName(obs.type), accepted, delayed, p_updated,
                   reason, obs_stamp, age, history_match_dt, residual_norm, nis,
-                  gain_consistency_error, adaptive_uwb);
+                  gain_consistency_error, adaptive_uwb,
+                  pos_res_norm, vel_res_norm, sigma_v_eff, kvv);
     }
 
     void logPublishRow(const Filter &f)
@@ -1180,6 +1276,11 @@ public:
                 ++f.dgo_updates;
                 markDirectionAnchor(f);
                 break;
+            case ObsType::DGO_VELOCITY:
+                ++f.dgo_velocity_updates;
+                if (obs.mission_stage >= 0 && obs.mission_stage < 8)
+                    ++f.dgo_velocity_stage_updates[static_cast<size_t>(obs.mission_stage)];
+                break;
             case ObsType::UWB_RANGE:
                 ++f.uwb_updates;
                 break;
@@ -1187,6 +1288,42 @@ public:
                 ++f.camera_updates;
                 markDirectionAnchor(f);
                 break;
+        }
+    }
+
+    void noteDgoVelocityAttempt(Filter &f, const Observation &obs)
+    {
+        if (obs.type != ObsType::DGO_VELOCITY)
+            return;
+        ++f.dgo_velocity_attempts;
+        if (obs.mission_stage >= 0 && obs.mission_stage < 8)
+            ++f.dgo_velocity_stage_attempts[static_cast<size_t>(obs.mission_stage)];
+    }
+
+    void noteDgoVelocityMetrics(Filter &f,
+                                const Observation &obs,
+                                double residual_norm,
+                                double nis,
+                                const Eigen::Vector3d &kvv =
+                                    Eigen::Vector3d::Constant(
+                                        std::numeric_limits<double>::quiet_NaN()))
+    {
+        if (obs.type != ObsType::DGO_VELOCITY)
+            return;
+        if (std::isfinite(residual_norm))
+        {
+            f.dgo_velocity_residual_sum += residual_norm;
+            ++f.dgo_velocity_residual_count;
+        }
+        if (std::isfinite(nis))
+        {
+            f.dgo_velocity_nis_sum += nis;
+            ++f.dgo_velocity_nis_count;
+        }
+        if (kvv.allFinite())
+        {
+            f.dgo_velocity_kvv_sum += kvv;
+            ++f.dgo_velocity_kvv_count;
         }
     }
 
@@ -1335,6 +1472,8 @@ public:
         {
             case ObsType::DGO:
                 return max_nis_dgo_;
+            case ObsType::DGO_VELOCITY:
+                return max_nis_dgo_velocity_;
             case ObsType::UWB_RANGE:
                 return max_nis_uwb_;
             case ObsType::CAMERA_BEARING:
@@ -1357,20 +1496,22 @@ public:
         {
             case ObsType::DGO:
             {
-                const double pos_res = residual.head(3).norm();
+                const double pos_res = residual.norm();
                 if (pos_res > dgo_residual_gate_)
                 {
-                    reason = "dgo_residual_gate_reject";
+                    reason = "dgo_position_residual_gate_reject";
                     return false;
                 }
-                if (residual.size() >= 6)
+                return true;
+            }
+
+            case ObsType::DGO_VELOCITY:
+            {
+                const double vel_res = residual.norm();
+                if (vel_res > dgo_velocity_residual_gate_)
                 {
-                    const double vel_res = residual.segment(3, 3).norm();
-                    if (vel_res > dgo_velocity_residual_gate_)
-                    {
-                        reason = "dgo_velocity_residual_gate_reject";
-                        return false;
-                    }
+                    reason = "dgo_velocity_residual_gate_reject";
+                    return false;
                 }
                 return true;
             }
@@ -1438,24 +1579,42 @@ public:
 
             ros::Time obs_stamp = self.stamp < peer.stamp ? self.stamp : peer.stamp;
 
-            Observation obs;
-            obs.type = ObsType::DGO;
-            obs.target_id = target;
-            obs.stamp = obs_stamp;
-            obs.position.x() = (initial_offsets_[target].x() - initial_offsets_[self_id].x())
+            Observation pos_obs;
+            pos_obs.type = ObsType::DGO;
+            pos_obs.target_id = target;
+            pos_obs.stamp = obs_stamp;
+            pos_obs.mission_stage = mission_stage_;
+            pos_obs.self_dgo_stamp = self.stamp;
+            pos_obs.target_dgo_stamp = peer.stamp;
+            pos_obs.position.x() = (initial_offsets_[target].x() - initial_offsets_[self_id].x())
                              + peer.msg.pose.pose.position.x - self.msg.pose.pose.position.x;
-            obs.position.y() = (initial_offsets_[target].y() - initial_offsets_[self_id].y())
+            pos_obs.position.y() = (initial_offsets_[target].y() - initial_offsets_[self_id].y())
                              + peer.msg.pose.pose.position.y - self.msg.pose.pose.position.y;
-            obs.position.z() = (initial_offsets_[target].z() - initial_offsets_[self_id].z())
+            pos_obs.position.z() = (initial_offsets_[target].z() - initial_offsets_[self_id].z())
                              + peer.msg.pose.pose.position.z - self.msg.pose.pose.position.z;
-            obs.velocity.x() = peer.msg.twist.twist.linear.x - self.msg.twist.twist.linear.x;
-            obs.velocity.y() = peer.msg.twist.twist.linear.y - self.msg.twist.twist.linear.y;
-            obs.velocity.z() = peer.msg.twist.twist.linear.z - self.msg.twist.twist.linear.z;
+            pos_obs.self_velocity << self.msg.twist.twist.linear.x,
+                                     self.msg.twist.twist.linear.y,
+                                     self.msg.twist.twist.linear.z;
+            pos_obs.target_velocity << peer.msg.twist.twist.linear.x,
+                                       peer.msg.twist.twist.linear.y,
+                                       peer.msg.twist.twist.linear.z;
+            // Assumption: both DGO twists are expressed in the common ENU/map frame.
+            pos_obs.velocity = pos_obs.target_velocity - pos_obs.self_velocity;
 
-            if (!obs.position.allFinite() || !obs.velocity.allFinite())
+            if (!pos_obs.position.allFinite())
                 continue;
 
-            filters_[target].pending_obs.push_back(obs);
+            // Position is always queued first and is independent of velocity validity.
+            filters_[target].pending_obs.push_back(pos_obs);
+            if (pos_obs.velocity.allFinite())
+                writeDgoVelocitySourceTrace(pos_obs);
+            if (shouldUseDgoVelocity(pos_obs.mission_stage) &&
+                pos_obs.velocity.allFinite())
+            {
+                Observation vel_obs = pos_obs;
+                vel_obs.type = ObsType::DGO_VELOCITY;
+                filters_[target].pending_obs.push_back(vel_obs);
+            }
             while (filters_[target].pending_obs.size() > static_cast<size_t>(max_pending_))
                 filters_[target].pending_obs.pop_front();
         }
@@ -1533,7 +1692,7 @@ public:
 
 	    void gtModelStatesCb(const gazebo_msgs::ModelStates::ConstPtr &msg)
 		    {
-		        if (!delayed_validation_enabled_ && !traceActive()) return;
+		        if (!delayed_validation_enabled_ && !traceActive() && !use_dgo_velocity_) return;
 
 		        GtWorldSample s;
 		        s.stamp = ros::Time::now();
@@ -1608,7 +1767,7 @@ public:
             }
 
             // 3. 按 obs.stamp 排序
-            std::sort(batch.begin(), batch.end(),
+            std::stable_sort(batch.begin(), batch.end(),
                     [](const Observation &a, const Observation &b) {
                         return a.stamp < b.stamp;
                     });
@@ -1768,6 +1927,110 @@ public:
         }
     }
 
+	    void openDgoVelocitySourceCsv()
+	    {
+	        if (!use_dgo_velocity_ || csv_dir_.empty()) return;
+	        const std::string self_name = "iris_" + std::to_string(uav_id_);
+	        const std::string path = csv_dir_ + "/" + self_name +
+	                                 "_dgo_velocity_source_trace.csv";
+	        dgo_velocity_source_csv_.open(path.c_str(), std::ios::out | std::ios::trunc);
+	        if (!dgo_velocity_source_csv_.is_open())
+	        {
+	            ROS_WARN("[DEKF] cannot open DGO velocity source trace: %s", path.c_str());
+	            return;
+	        }
+	        dgo_velocity_source_csv_ << std::fixed << std::setprecision(9)
+	            << "time,self_id,target_id,stage,velocity_enabled_for_stage,"
+	            << "self_dgo_stamp,target_dgo_stamp,pair_dt,obs_stamp,"
+	            << "self_vx,self_vy,self_vz,target_vx,target_vy,target_vz,"
+	            << "rel_vx,rel_vy,rel_vz,gt_rel_vx,gt_rel_vy,gt_rel_vz,"
+	            << "err_vx,err_vy,err_vz,err_norm,frame_assumption\n";
+	        ROS_INFO("[DEKF] DGO velocity source trace: %s", path.c_str());
+	    }
+
+	    void writeDgoVelocitySourceTrace(const Observation &obs)
+	    {
+	        if (!dgo_velocity_source_csv_.is_open() || !obs.velocity.allFinite()) return;
+	        const double nan = std::numeric_limits<double>::quiet_NaN();
+	        Eigen::Vector3d gt_rel = Eigen::Vector3d::Constant(nan);
+	        (void)getRelativeGroundTruthVelocity(uav_id_, obs.target_id,
+	                                             obs.stamp, gt_rel);
+	        const Eigen::Vector3d error = obs.velocity - gt_rel;
+	        const double error_norm = error.allFinite() ? error.norm() : nan;
+	        dgo_velocity_source_csv_
+	            << ros::Time::now().toSec() << ',' << uav_id_ << ',' << obs.target_id << ','
+	            << obs.mission_stage << ',' << (shouldUseDgoVelocity(obs.mission_stage) ? 1 : 0) << ','
+	            << obs.self_dgo_stamp.toSec() << ',' << obs.target_dgo_stamp.toSec() << ','
+	            << (obs.target_dgo_stamp - obs.self_dgo_stamp).toSec() << ','
+	            << obs.stamp.toSec() << ','
+	            << obs.self_velocity.x() << ',' << obs.self_velocity.y() << ',' << obs.self_velocity.z() << ','
+	            << obs.target_velocity.x() << ',' << obs.target_velocity.y() << ',' << obs.target_velocity.z() << ','
+	            << obs.velocity.x() << ',' << obs.velocity.y() << ',' << obs.velocity.z() << ','
+	            << gt_rel.x() << ',' << gt_rel.y() << ',' << gt_rel.z() << ','
+	            << error.x() << ',' << error.y() << ',' << error.z() << ',' << error_norm << ','
+	            << "ENU_map_common\n";
+	    }
+
+	    void writeDgoVelocityUpdateSummary()
+	    {
+	        if (csv_dir_.empty() || !use_dgo_velocity_) return;
+	        const std::string self_name = "iris_" + std::to_string(uav_id_);
+	        const std::string path = csv_dir_ + "/" + self_name +
+	                                 "_dgo_velocity_update_summary.txt";
+	        std::ofstream output(path.c_str(), std::ios::out | std::ios::trunc);
+	        if (!output.is_open()) return;
+
+	        size_t position_accepted = 0, attempts = 0, accepted = 0;
+	        size_t residual_count = 0, nis_count = 0, kvv_count = 0;
+	        double residual_sum = 0.0, nis_sum = 0.0;
+	        Eigen::Vector3d kvv_sum = Eigen::Vector3d::Zero();
+	        std::array<size_t, 8> stage_attempts = {};
+	        std::array<size_t, 8> stage_accepted = {};
+	        for (const Filter &f : filters_)
+	        {
+	            position_accepted += f.dgo_updates;
+	            attempts += f.dgo_velocity_attempts;
+	            accepted += f.dgo_velocity_updates;
+	            residual_sum += f.dgo_velocity_residual_sum;
+	            residual_count += f.dgo_velocity_residual_count;
+	            nis_sum += f.dgo_velocity_nis_sum;
+	            nis_count += f.dgo_velocity_nis_count;
+	            kvv_sum += f.dgo_velocity_kvv_sum;
+	            kvv_count += f.dgo_velocity_kvv_count;
+	            for (size_t stage = 0; stage < stage_attempts.size(); ++stage)
+	            {
+	                stage_attempts[stage] += f.dgo_velocity_stage_attempts[stage];
+	                stage_accepted[stage] += f.dgo_velocity_stage_updates[stage];
+	            }
+	        }
+	        const size_t rejected = attempts >= accepted ? attempts - accepted : 0;
+	        output << std::fixed << std::setprecision(6)
+	               << "position update accepted: " << position_accepted << '\n'
+	               << "velocity update attempts: " << attempts << '\n'
+	               << "velocity update accepted: " << accepted << '\n'
+	               << "velocity update rejected: " << rejected << '\n'
+	               << "velocity update reject rate: "
+	               << (attempts > 0 ? static_cast<double>(rejected) / attempts : 0.0) << '\n'
+	               << "mean vel_res_norm: "
+	               << (residual_count > 0 ? residual_sum / residual_count
+	                                      : std::numeric_limits<double>::quiet_NaN()) << '\n'
+	               << "mean vel_nis: "
+	               << (nis_count > 0 ? nis_sum / nis_count
+	                                  : std::numeric_limits<double>::quiet_NaN()) << '\n';
+	        Eigen::Vector3d mean_kvv = Eigen::Vector3d::Constant(
+	            std::numeric_limits<double>::quiet_NaN());
+	        if (kvv_count > 0)
+	            mean_kvv = kvv_sum / static_cast<double>(kvv_count);
+	        output << "mean Kvv: " << mean_kvv.x() << ',' << mean_kvv.y() << ','
+	               << mean_kvv.z() << '\n';
+	        for (int stage : {3, 5, 6})
+	        {
+	            output << "stage " << stage << " accepted/rejected: "
+	                   << stage_accepted[stage] << '/'
+	                   << (stage_attempts[stage] - stage_accepted[stage]) << '\n';
+	        }
+	    }
+
 	    // ═══════════════════════════════════════════════════════════
 	    //  Trace 模块: 详细日志 (默认关闭)
 	    // ═══════════════════════════════════════════════════════════
@@ -1858,12 +2121,12 @@ public:
 	        {
 	            delayed_trace_csv_ << std::fixed << std::setprecision(9);
 		            delayed_trace_csv_
-		                << "time,self_id,target_id,stage,"
+		                << "time,self_id,target_id,stage,obs_type,"
 		                << "obs_stamp,filter_stamp,age,hist_stamp,history_match_dt,best_idx,cache_size,"
 		                << "z_x,z_y,z_z,"
 		                << "update_before_x,update_before_y,update_before_z,"
 		                << "pred_x,pred_y,pred_z,"
-		                << "res_x,res_y,res_z,res_norm,pos_res_norm,vel_res_norm,"
+		                << "res_x,res_y,res_z,res_norm,pos_res_norm,vel_res_norm,nis,sigma_v_eff,"
 	                << "Ppx,Ppy,Ppz,Pvx,Pvy,Pvz,"
 	                << "Sx,Sy,Sz,"
 		                << "Kpx,Kpy,Kpz,Kvx,Kvy,Kvz,Kvv_x,Kvv_y,Kvv_z,"
@@ -1992,6 +2255,7 @@ public:
 	        double history_match_dt,
 	        int best_idx,
 	        int cache_size,
+	        const Observation &obs,
 	        const Vector6d &x_before,
 	        const Vector6d &x_after,
 	        const Eigen::VectorXd &Zk,
@@ -1999,6 +2263,7 @@ public:
 	        const Eigen::MatrixXd &K_eff,
 	        const Eigen::MatrixXd &S,
 	        const Vector6d &P_diag,
+	        double nis,
 	        double gain_weight_val)
 	    {
 	        if (!delayed_trace_csv_.is_open()) return;
@@ -2052,28 +2317,28 @@ public:
 	        const double correction_cos = safeCosine(delta_pos, err_before);
 
         const double residual_norm = residual.allFinite() ? residual.norm() : nan;
-        const double pos_res_norm = residual.size() >= 3 && residual.head(3).allFinite()
-                                    ? residual.head(3).norm() : nan;
-        const double vel_res_norm = residual.size() >= 6 && residual.segment(3,3).allFinite()
-                                    ? residual.segment(3,3).norm() : nan;
+	        const double pos_res_norm = obs.type == ObsType::DGO ? residual_norm : nan;
+	        const double vel_res_norm = obs.type == ObsType::DGO_VELOCITY ? residual_norm : nan;
+	        const double sigma_v_eff = obs.type == ObsType::DGO_VELOCITY
+	            ? effectiveDgoVelocityNoise(obs.mission_stage) : nan;
 
-        // Kvv: velocity-residual → velocity-state gain (6D 模式下 velocity diagonal)
-        const double Kvv_x = getK(K_eff, 3, 3);
-        const double Kvv_y = getK(K_eff, 4, 4);
-        const double Kvv_z = getK(K_eff, 5, 5);
+	        const double Kvv_x = obs.type == ObsType::DGO_VELOCITY ? getK(K_eff, 3, 0) : nan;
+	        const double Kvv_y = obs.type == ObsType::DGO_VELOCITY ? getK(K_eff, 4, 1) : nan;
+	        const double Kvv_z = obs.type == ObsType::DGO_VELOCITY ? getK(K_eff, 5, 2) : nan;
 
         const double corr_over_res = safeRatio(delta_pos_norm, residual_norm);
 
 	        delayed_trace_csv_
 	            << t << ","
-	            << uav_id_ << "," << target_id << "," << mission_stage_ << ","
+		            << uav_id_ << "," << target_id << "," << obs.mission_stage << ","
+		            << obsTypeName(obs.type) << ","
 	            << obs_stamp.toSec() << "," << filter_stamp.toSec() << "," << age << ","
 	            << hist_stamp.toSec() << "," << history_match_dt << "," << best_idx << "," << cache_size << ","
 	            << z3(0) << "," << z3(1) << "," << z3(2) << ","
 	            << x_before(0) << "," << x_before(1) << "," << x_before(2) << ","
 	            << pred3(0) << "," << pred3(1) << "," << pred3(2) << ","
             << res3(0) << "," << res3(1) << "," << res3(2) << "," << residual_norm << ","
-            << pos_res_norm << "," << vel_res_norm << ","
+	            << pos_res_norm << "," << vel_res_norm << "," << nis << "," << sigma_v_eff << ","
             << Ppx << "," << Ppy << "," << Ppz << ","
             << P_diag(3) << "," << P_diag(4) << "," << P_diag(5) << ","
             << Sx << "," << Sy << "," << Sz << ","
@@ -2171,36 +2436,32 @@ public:
         {
             case ObsType::DGO:
             {
-                if (use_dgo_velocity_ && obs.velocity.allFinite())
-                {
-                    // position + velocity
-                    Z.resize(6);
-                    Z << obs.position(0), obs.position(1), obs.position(2),
-                         obs.velocity(0), obs.velocity(1), obs.velocity(2);
-                    residual = Z - x;
-                    H.resize(6, 6);
-                    H.setIdentity();
-                    R_meas.resize(6, 6);
-                    R_meas.setZero();
-                    R_meas(0, 0) = sigma_px_ * sigma_px_;
-                    R_meas(1, 1) = sigma_py_ * sigma_py_;
-                    R_meas(2, 2) = sigma_pz_ * sigma_pz_;
-                    const double sv2 = dgo_velocity_noise_std_ * dgo_velocity_noise_std_;
-                    R_meas(3, 3) = sv2;
-                    R_meas(4, 4) = sv2;
-                    R_meas(5, 5) = sv2;
-                }
-                else
-                {
-                    Z.resize(3);
-                    Z << obs.position(0), obs.position(1), obs.position(2);
-                    residual = Z - x.segment(0, 3);
-                    H.resize(3, 6);
-                    H.block(0, 0, 3, 3) = Eigen::Matrix3d::Identity();
-                    H.block(0, 3, 3, 3) = Eigen::Matrix3d::Zero();
-                    R_meas.resize(3, 3);
-                    R_meas = R_.block(0, 0, 3, 3);
-                }
+                Z = obs.position;
+                residual = Z - x.segment<3>(0);
+                H.resize(3, 6);
+                H.setZero();
+                H.block<3, 3>(0, 0).setIdentity();
+                R_meas.resize(3, 3);
+                R_meas.setZero();
+                R_meas(0, 0) = sigma_px_ * sigma_px_;
+                R_meas(1, 1) = sigma_py_ * sigma_py_;
+                R_meas(2, 2) = sigma_pz_ * sigma_pz_;
+                return true;
+            }
+
+            case ObsType::DGO_VELOCITY:
+            {
+                if (!use_dgo_velocity_ || !obs.velocity.allFinite())
+                    return false;
+                Z = obs.velocity;
+                residual = Z - x.segment<3>(3);
+                H.resize(3, 6);
+                H.setZero();
+                H.block<3, 3>(0, 3).setIdentity();
+                const double sigma_v = effectiveDgoVelocityNoise(obs.mission_stage);
+                R_meas.resize(3, 3);
+                R_meas.setZero();
+                R_meas.diagonal().setConstant(sigma_v * sigma_v);
                 return true;
             }
 
@@ -2473,7 +2734,8 @@ public:
                     if (nis > nis_gate)
                     {
                         failed_on_gated_observation = true;
-                        fail_reason = "nis_reject";
+                        fail_reason = obs_i.type == ObsType::DGO_VELOCITY
+                            ? "dgo_velocity_nis_reject" : "nis_reject";
                         return false;
                     }
                 }
@@ -2494,11 +2756,18 @@ public:
 		                }
 
 		                // ── trace: delayed update ───────────────────
-		                if (trace_ctx && trace_ctx->enabled && u.seq == gated_seq)
-		                {
-		                    trace_ctx->found_target_update = true;
-		                    trace_ctx->hist_before = rec.X_post;
-		                    trace_ctx->hist_stamp = rec.stamp;
+			                if (trace_ctx && u.seq == gated_seq)
+			                {
+			                    if (trace_ctx->enabled)
+			                    {
+			                        trace_ctx->found_target_update = true;
+			                        trace_ctx->hist_before = rec.X_post;
+			                        trace_ctx->hist_stamp = rec.stamp;
+			                    }
+			                    if (obs_i.type == ObsType::DGO_VELOCITY)
+			                    {
+			                        trace_ctx->gated_kvv << K_eff(3, 0), K_eff(4, 1), K_eff(5, 2);
+			                    }
 
 		                    // 在 apply update 前记录 delayed_update_trace
 		                    Vector6d x_before = rec.X_post;
@@ -2539,6 +2808,7 @@ public:
 			                        (rec.stamp - obs_i.stamp).toSec(),  // history_match_dt
 			                        start_idx,       // best_idx
 			                        static_cast<int>(cache.size()),  // cache_size
+			                        obs_i,
 			                        x_before,
 			                        x_after,
 			                        Zk,
@@ -2546,6 +2816,7 @@ public:
 			                        K_eff,
 			                        S,
 			                        P_diag,
+			                        nis,
 			                        gain_weight);
 		                }
                 Matrix6d I_KH = Matrix6d::Identity() - K_eff * Hk;
@@ -2589,6 +2860,7 @@ public:
     // 当前时刻 EKF 更新: 观测时间 ≈ 当前预测时间, 直接执行标准 EKF 更新
     UpdateStatus applyCurrentUpdate(Filter &f, const Observation &obs)
     {
+        noteDgoVelocityAttempt(f, obs);
         const double age = (f.stamp - obs.stamp).toSec();
         Eigen::VectorXd Z;
         Eigen::VectorXd residual;
@@ -2637,6 +2909,8 @@ public:
         std::string gate_reason;
         if (!passHardResidualGate(obs, residual, gate_reason))
         {
+            noteDgoVelocityMetrics(f, obs, residual_norm,
+                                   std::numeric_limits<double>::quiet_NaN());
             const RecoveryResult recovery =
                 tryDgoRecovery(f, obs, false, age,
                                std::numeric_limits<double>::quiet_NaN(),
@@ -2668,6 +2942,8 @@ public:
         Eigen::FullPivLU<Eigen::MatrixXd> lu(S);
         if (!lu.isInvertible())
         {
+            noteDgoVelocityMetrics(f, obs, residual_norm,
+                                   std::numeric_limits<double>::quiet_NaN());
             ++f.rejects;
             logObservationRow("current_update", f, obs, 0, 0, 0,
                               "innovation_cov_not_invertible", age,
@@ -2683,10 +2959,13 @@ public:
         const double nis_gate = nisGateForObservation(obs, residual.size());
         if (nis > nis_gate)
         {
+            noteDgoVelocityMetrics(f, obs, residual_norm, nis);
             const RecoveryResult recovery =
                 tryDgoRecovery(f, obs, false, age,
                                std::numeric_limits<double>::quiet_NaN(),
-                               residual_norm, nis, "nis_reject");
+                               residual_norm, nis,
+                               obs.type == ObsType::DGO_VELOCITY
+                                   ? "dgo_velocity_nis_reject" : "nis_reject");
             if (recovery == RecoveryResult::RESET)
             {
                 return UpdateStatus::RECOVERY_RESET;
@@ -2698,7 +2977,8 @@ public:
 
             ++f.rejects;
             logObservationRow("current_update", f, obs, 0, 0, 0,
-                              "nis_reject", age,
+                              obs.type == ObsType::DGO_VELOCITY
+                                  ? "dgo_velocity_nis_reject" : "nis_reject", age,
                               std::numeric_limits<double>::quiet_NaN(),
                               residual_norm,
                               nis,
@@ -2709,12 +2989,17 @@ public:
 
         // 标准卡尔曼增益: K = P * H^T * (H * P * H^T + R)^{-1}
         Eigen::MatrixXd K = f.P * H.transpose() * S_inv;
+        Eigen::Vector3d kvv = Eigen::Vector3d::Constant(
+            std::numeric_limits<double>::quiet_NaN());
+        if (obs.type == ObsType::DGO_VELOCITY)
+            kvv << K(3, 0), K(4, 1), K(5, 2);
         f.X += K * residual;
 
         // Joseph 形式协方差更新 (数值稳定性优于标准形式)
         Eigen::MatrixXd I_KH = Eigen::MatrixXd::Identity(6, 6) - K * H;
         f.P = I_KH * f.P * I_KH.transpose() + K * R_meas * K.transpose();
         symmetrizeCov(f.P);
+        noteDgoVelocityMetrics(f, obs, residual_norm, nis, kvv);
         incrementAcceptedCounters(f, obs, false);
 
         // 缓存 H, K, I_KH 到最新的历史记录 (用于延迟补偿重传播)
@@ -2729,13 +3014,15 @@ public:
             f.cache.back().P_post = f.P;
         }
 
-        logObservationRow("current_update", f, obs, 1, 0, 1,
+        logObservationRow("current_update", f, obs, 1, 0,
+                          obs.type == ObsType::DGO_VELOCITY ? 0 : 1,
                           "accepted", age,
                           std::numeric_limits<double>::quiet_NaN(),
                           residual_norm,
                           nis,
                           std::numeric_limits<double>::quiet_NaN(),
-                          adaptive_uwb);
+                          adaptive_uwb,
+                          kvv);
         return UpdateStatus::ACCEPTED;
 	    }
 
@@ -2821,43 +3108,46 @@ public:
 	        std::ofstream f(path.c_str(), std::ios::out | std::ios::trunc);
 	        if (!f.is_open()) return;
 
-	        f << std::fixed << std::setprecision(2);
+	        f << std::fixed << std::setprecision(2)
+	          << "scope: DGO position and DGO velocity are reported separately; "
+	          << "UWB/camera observations are excluded\n";
 
-	        if (delayed_attempt_age_count_ > 0)
-	        {
-	            const double avg_ms = (delayed_attempt_age_sum_ / delayed_attempt_age_count_) * 1000.0;
-	            f << "延迟观测尝试次数：" << delayed_attempt_age_count_ << "\n";
-	            f << "延迟观测平均时间延迟（尝试）：" << avg_ms << " ms\n";
-	        }
-	        else
-	        {
-	            f << "延迟观测尝试次数：0\n";
-	        }
+	        auto write_stats = [&f](const char *label, const DelayedAgeStats &stats) {
+	            f << label << " attempts: " << stats.attempt_count << "\n";
+	            f << label << " average age (attempts): ";
+	            if (stats.attempt_count > 0)
+	                f << (stats.attempt_sum / stats.attempt_count) * 1000.0 << " ms\n";
+	            else
+	                f << "nan ms\n";
+	            f << label << " accepted: " << stats.accepted_count << "\n";
+	            f << label << " average age (accepted): ";
+	            if (stats.accepted_count > 0)
+	                f << (stats.accepted_sum / stats.accepted_count) * 1000.0 << " ms\n";
+	            else
+	                f << "nan ms\n";
+	        };
 
-	        if (delayed_accepted_age_count_ > 0)
-	        {
-	            const double avg_ms = (delayed_accepted_age_sum_ / delayed_accepted_age_count_) * 1000.0;
-	            f << "延迟观测接受次数：" << delayed_accepted_age_count_ << "\n";
-	            f << "延迟观测平均时间延迟（接受）：" << avg_ms << " ms\n";
-	        }
-	        else
-	        {
-	            f << "延迟观测接受次数：0\n";
-	        }
+	        write_stats("DGO position delayed", delayed_position_age_);
+	        write_stats("DGO velocity delayed", delayed_velocity_age_);
 
 	        f.close();
 	    }
 
 		UpdateStatus applyDelayedUpdate(Filter &f, const Observation &obs)
 	    {
+	        noteDgoVelocityAttempt(f, obs);
 	        const double age = (f.stamp - obs.stamp).toSec();
 
-	        // 统计延迟观测 age
-		        if (std::isfinite(age))
-		        {
-		            delayed_attempt_age_sum_ += age;
-		            delayed_attempt_age_count_++;
-		        }
+	        DelayedAgeStats *age_stats = nullptr;
+	        if (obs.type == ObsType::DGO)
+	            age_stats = &delayed_position_age_;
+	        else if (obs.type == ObsType::DGO_VELOCITY)
+	            age_stats = &delayed_velocity_age_;
+	        if (age_stats && std::isfinite(age))
+	        {
+	            age_stats->attempt_sum += age;
+	            ++age_stats->attempt_count;
+	        }
 
 	        if (f.cache.empty())
         {
@@ -2902,8 +3192,10 @@ public:
 	        // replay 成功且最终状态/协方差合法后，才提交到真实 filter。
 
 	        // ── delayed update validation ──────────────────────
+	        const bool validate_position_update =
+	            delayed_validation_enabled_ && obs.type == ObsType::DGO;
 	        DelayedUpdateValidation val;
-	        val.enabled = delayed_validation_enabled_;
+	        val.enabled = validate_position_update;
 	        val.self_id = uav_id_;
 	        val.target_id = obs.target_id;
 	        val.obs_type = obsTypeName(obs.type);
@@ -2911,7 +3203,7 @@ public:
 	        val.best_idx = best_idx;
 	        val.cache_size = static_cast<int>(f.cache.size());
 
-		        if (delayed_validation_enabled_)
+		        if (validate_position_update)
 		        {
 		            val.current_replay_before = f.cache.back().X_post;
 		            val.current_replay_stamp = f.cache.back().stamp;
@@ -2925,7 +3217,7 @@ public:
 		        const uint64_t seq_before = obs_seq_;
 		        const uint64_t gated_seq =
 		            recordAcceptedObservation(candidate_cache[static_cast<size_t>(best_idx)], obs, true,
-		                                      delayed_validation_enabled_);
+		                                      validate_position_update);
 
 		        std::string replay_reason;
 		        double replay_residual_norm = std::numeric_limits<double>::quiet_NaN();
@@ -2938,7 +3230,7 @@ public:
 		        trace_ctx.enabled = traceActive();
 		        trace_ctx.self_id = uav_id_;
 		        trace_ctx.target_id = obs.target_id;
-		        trace_ctx.stage = mission_stage_;
+		        trace_ctx.stage = obs.mission_stage;
 		        trace_ctx.obs_stamp = obs.stamp;
 		        trace_ctx.best_idx = best_idx;
 		        trace_ctx.cache_size = static_cast<int>(f.cache.size());
@@ -2947,10 +3239,12 @@ public:
 	        if (!replayCacheFrom(candidate_cache, best_idx, true, gated_seq,
 	                             replay_reason, replay_residual_norm, replay_nis,
 	                             failed_on_gated_observation, replay_adaptive_uwb,
-	                             delayed_validation_enabled_ ? &val : nullptr,
-	                             traceActive() ? &trace_ctx : nullptr))
-        {
+	                             validate_position_update ? &val : nullptr,
+	                             &trace_ctx))
+	        {
             obs_seq_ = seq_before;
+            noteDgoVelocityMetrics(f, obs, replay_residual_norm, replay_nis,
+                                   trace_ctx.gated_kvv);
 
             if (failed_on_gated_observation && std::isfinite(replay_residual_norm))
             {
@@ -2959,7 +3253,7 @@ public:
 		                               replay_residual_norm, replay_nis, replay_reason);
 		            if (recovery == RecoveryResult::RESET)
 		            {
-		                if (delayed_validation_enabled_)
+		                if (validate_position_update)
 		                {
 		                    val.accepted = false; val.replay_ok = false;
 		                    val.reason = "recovery_reset_" + replay_reason;
@@ -2970,7 +3264,7 @@ public:
 		            }
 		            if (recovery == RecoveryResult::HANDLED_REJECTED)
 		            {
-		                if (delayed_validation_enabled_)
+		                if (validate_position_update)
 		                {
 		                    val.accepted = false; val.replay_ok = false;
 		                    val.reason = "recovery_rejected_" + replay_reason;
@@ -2989,7 +3283,7 @@ public:
                               replay_nis,
                               std::numeric_limits<double>::quiet_NaN(),
 	                              replay_adaptive_uwb);
-		            if (delayed_validation_enabled_)
+		            if (validate_position_update)
 		            {
 		                val.accepted = false; val.replay_ok = false;
 		                val.reason = "cache_replay_failed_" + replay_reason;
@@ -3003,6 +3297,8 @@ public:
         if (!final_rec.X_post.allFinite() || !isBoundedCovariance(final_rec.P_post))
         {
             obs_seq_ = seq_before;
+            noteDgoVelocityMetrics(f, obs, replay_residual_norm, replay_nis,
+                                   trace_ctx.gated_kvv);
             ++f.delayed_p_skips;
             ++f.rejects;
             logObservationRow("delayed_update", f, obs, 0, 1, 0,
@@ -3012,7 +3308,7 @@ public:
                               replay_nis,
                               std::numeric_limits<double>::quiet_NaN(),
 	                              replay_adaptive_uwb);
-	            if (delayed_validation_enabled_)
+	            if (validate_position_update)
 		            {
 		                val.accepted = false; val.replay_ok = true;
 		                val.reason = "bad_final_cov";
@@ -3023,7 +3319,7 @@ public:
 	            return UpdateStatus::REJECTED;
 	        }
 
-	        if (delayed_validation_enabled_)
+	        if (validate_position_update)
 	        {
 	            val.current_replay_after = candidate_cache.back().X_post;
 	            val.current_replay_stamp = candidate_cache.back().stamp;
@@ -3033,9 +3329,11 @@ public:
 		        f.X = f.cache.back().X_post;
 		        f.P = f.cache.back().P_post;
 		        symmetrizeCov(f.P);
+		        noteDgoVelocityMetrics(f, obs, replay_residual_norm, replay_nis,
+		                               trace_ctx.gated_kvv);
 		        incrementAcceptedCounters(f, obs, true);
 
-		        if (delayed_validation_enabled_)
+		        if (validate_position_update)
 		        {
 		            val.accepted = true; val.replay_ok = true;
 		            val.reason = "accepted";
@@ -3058,19 +3356,20 @@ public:
 		                std::max(replay_nodes, 0), std::abs(replay_duration));
 		        }
 
-		logObservationRow("delayed_update", f, obs, 1, 1, 1,
-	                          "accepted_replayed", age,
+		logObservationRow("delayed_update", f, obs, 1, 1,
+		                          obs.type == ObsType::DGO_VELOCITY ? 0 : 1,
+		                          "accepted_replayed", age,
                           best_dt,
                           replay_residual_norm,
                           replay_nis,
                           std::numeric_limits<double>::quiet_NaN(),
-	                          replay_adaptive_uwb);
+	                          replay_adaptive_uwb,
+	                          trace_ctx.gated_kvv);
 
-	        // 统计被接受的 delayed update age
-	        if (std::isfinite(age))
+	        if (age_stats && std::isfinite(age))
 	        {
-	            delayed_accepted_age_sum_ += age;
-	            delayed_accepted_age_count_++;
+	            age_stats->accepted_sum += age;
+	            ++age_stats->accepted_count;
 	        }
 
 	        return UpdateStatus::ACCEPTED;

@@ -177,21 +177,20 @@ target_link_libraries(${PROJECT_NAME}_dgo_node
 )
 
 ## DEKF node
-add_executable(${PROJECT_NAME}_dekf_node src/dekf.cpp)
-
-set_target_properties(${PROJECT_NAME}_dekf_node PROPERTIES
-  OUTPUT_NAME dekf
-  PREFIX ""
-)
-
-add_dependencies(${PROJECT_NAME}_dekf_node
-  ${${PROJECT_NAME}_EXPORTED_TARGETS}
-  ${catkin_EXPORTED_TARGETS}
-)
-
-target_link_libraries(${PROJECT_NAME}_dekf_node
-  ${catkin_LIBRARIES}
-)
+# The legacy src/dekf.cpp node has been retired. The active implementation is
+# my_dekf below.
+# add_executable(${PROJECT_NAME}_dekf_node src/dekf.cpp)
+# set_target_properties(${PROJECT_NAME}_dekf_node PROPERTIES
+#   OUTPUT_NAME dekf
+#   PREFIX ""
+# )
+# add_dependencies(${PROJECT_NAME}_dekf_node
+#   ${${PROJECT_NAME}_EXPORTED_TARGETS}
+#   ${catkin_EXPORTED_TARGETS}
+# )
+# target_link_libraries(${PROJECT_NAME}_dekf_node
+#   ${catkin_LIBRARIES}
+# )
 
 ## my_DEKF node
 add_executable(${PROJECT_NAME}_my_dekf_node src/my_dekf.cpp)

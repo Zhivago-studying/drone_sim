@@ -2101,6 +2101,7 @@ private:
         if (has_ins_)
         {
             msg.pose.pose.orientation = best_ins_.msg.pose.pose.orientation;
+            // ins_eskf publishes linear velocity in the common ENU/map frame.
             msg.twist = best_ins_.msg.twist;
             msg.pose.covariance = best_ins_.msg.pose.covariance;
             msg.twist.covariance = best_ins_.msg.twist.covariance;
@@ -2141,6 +2142,7 @@ private:
         if (has_ins_)
         {
             msg.pose.pose.orientation = best_ins_.msg.pose.pose.orientation;
+            // ins_eskf publishes linear velocity in the common ENU/map frame.
             msg.twist = best_ins_.msg.twist;
             msg.pose.covariance = best_ins_.msg.pose.covariance;
             msg.twist.covariance = best_ins_.msg.twist.covariance;

@@ -71,12 +71,14 @@
   <arg name="dekf_delayed_covariance_weight" default="1.0" />
   <arg name="dekf_delayed_update_gain_weight" default="$(arg dekf_delayed_covariance_weight)" />
   <arg name="dekf_max_nis" default="25.0" />
-  <arg name="dekf_max_nis_dgo" default="16.3" />
+  <arg name="dekf_max_nis_dgo" default="11.34" />
+  <arg name="dekf_max_nis_dgo_velocity" default="16.27" />
   <arg name="dekf_max_nis_uwb" default="12.0" />
   <arg name="dekf_max_nis_camera_1d" default="9.0" />
   <arg name="dekf_max_nis_camera_2d" default="13.8" />
   <arg name="dekf_uwb_residual_gate" default="0.8" />
   <arg name="dekf_dgo_residual_gate" default="2.0" />
+  <arg name="dekf_dgo_velocity_residual_gate" default="2.0" />
   <arg name="dekf_camera_residual_gate" default="0.5" />
   <arg name="dekf_require_direction_anchor_for_uwb" default="true" />
   <arg name="dekf_uwb_anchor_max_age" default="0.50" />
@@ -97,7 +99,11 @@
 	  <arg name="dekf_trace_enabled" default="false" />
 		  <arg name="dekf_trace_dgo_only" default="true" />
 	  <arg name="dekf_use_dgo_velocity" default="false" />
-	  <arg name="dekf_dgo_velocity_noise_std" default="0.25" />
+	  <arg name="dekf_dgo_velocity_noise_std" default="0.35" />
+	  <arg name="dekf_use_dgo_velocity_stage_gate" default="true" />
+	  <arg name="dekf_dgo_velocity_noise_std_dynamic" default="0.35" />
+	  <arg name="dekf_dgo_velocity_noise_std_landing" default="0.70" />
+	  <arg name="dekf_disable_dgo_velocity_in_landing" default="true" />
 	  <arg name="dekf_max_pending" default="100" />
   <arg name="dekf_max_history_match_dt" default="0.06" />
   <arg name="dekf_max_observation_delay" default="0.60" />
@@ -159,11 +165,13 @@
     <arg name="dekf_delayed_update_gain_weight" value="$(arg dekf_delayed_update_gain_weight)" />
     <arg name="dekf_max_nis" value="$(arg dekf_max_nis)" />
     <arg name="dekf_max_nis_dgo" value="$(arg dekf_max_nis_dgo)" />
+    <arg name="dekf_max_nis_dgo_velocity" value="$(arg dekf_max_nis_dgo_velocity)" />
     <arg name="dekf_max_nis_uwb" value="$(arg dekf_max_nis_uwb)" />
     <arg name="dekf_max_nis_camera_1d" value="$(arg dekf_max_nis_camera_1d)" />
     <arg name="dekf_max_nis_camera_2d" value="$(arg dekf_max_nis_camera_2d)" />
     <arg name="dekf_uwb_residual_gate" value="$(arg dekf_uwb_residual_gate)" />
     <arg name="dekf_dgo_residual_gate" value="$(arg dekf_dgo_residual_gate)" />
+    <arg name="dekf_dgo_velocity_residual_gate" value="$(arg dekf_dgo_velocity_residual_gate)" />
     <arg name="dekf_camera_residual_gate" value="$(arg dekf_camera_residual_gate)" />
     <arg name="dekf_require_direction_anchor_for_uwb" value="$(arg dekf_require_direction_anchor_for_uwb)" />
     <arg name="dekf_uwb_anchor_max_age" value="$(arg dekf_uwb_anchor_max_age)" />
@@ -194,6 +202,10 @@
 	    <arg name="dekf_camera_theta_noise_std" value="$(arg dekf_camera_theta_noise_std)" />
 	    <arg name="dekf_use_dgo_velocity" value="$(arg dekf_use_dgo_velocity)" />
 	    <arg name="dekf_dgo_velocity_noise_std" value="$(arg dekf_dgo_velocity_noise_std)" />
+	    <arg name="dekf_use_dgo_velocity_stage_gate" value="$(arg dekf_use_dgo_velocity_stage_gate)" />
+	    <arg name="dekf_dgo_velocity_noise_std_dynamic" value="$(arg dekf_dgo_velocity_noise_std_dynamic)" />
+	    <arg name="dekf_dgo_velocity_noise_std_landing" value="$(arg dekf_dgo_velocity_noise_std_landing)" />
+	    <arg name="dekf_disable_dgo_velocity_in_landing" value="$(arg dekf_disable_dgo_velocity_in_landing)" />
 	    <arg name="max_dekf_align_dt" value="$(arg max_dekf_align_dt)" />
   </include>
 </launch>

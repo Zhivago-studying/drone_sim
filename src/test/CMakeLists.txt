@@ -225,6 +225,7 @@ catkin_install_python(PROGRAMS
   scripts/dgo_ekf_plot.py
   scripts/dekf_dgo_ekf_plot.py
   scripts/estimate_dgo_process_noise.py
+  scripts/analyze_dgo_velocity_trace.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
