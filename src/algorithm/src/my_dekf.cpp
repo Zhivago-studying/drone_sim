@@ -92,8 +92,8 @@ public:
         pnh_.param("sigma_uwb", sigma_uwb_, 0.05);
         pnh_.param("sigma_alpha", sigma_alpha_, 0.05);
         pnh_.param("sigma_theta", sigma_theta_, 0.05);
-	pnh_.param("use_dgo_velocity", use_dgo_velocity_, false);
-	pnh_.param("dgo_velocity_noise_std", dgo_velocity_noise_std_, 0.35);
+        pnh_.param("use_dgo_velocity", use_dgo_velocity_, true);
+        pnh_.param("dgo_velocity_noise_std", dgo_velocity_noise_std_, 0.25);
         pnh_.param("use_dgo_velocity_stage_gate", use_dgo_velocity_stage_gate_, true);
         pnh_.param("dgo_velocity_noise_std_dynamic", dgo_velocity_noise_std_dynamic_, 0.35);
         pnh_.param("dgo_velocity_noise_std_landing", dgo_velocity_noise_std_landing_, 0.70);
@@ -132,8 +132,20 @@ public:
 	        pnh_.param("delayed_validation_gt_max_dt", delayed_validation_gt_max_dt_, 0.05);
 	        pnh_.param("mode", fusion_mode_, 4);
 	        pnh_.param("trace_enabled", trace_enabled_, false);
-	        pnh_.param("trace_dgo_only", trace_dgo_only_, true);
-        ROS_DEBUG("[DEKF] param mode=%d", fusion_mode_);
+		        pnh_.param("trace_dgo_only", trace_dgo_only_, true);
+	        // Position covariance floor
+	        pnh_.param("enable_position_cov_floor", enable_position_cov_floor_, false);
+	        pnh_.param("position_cov_floor_std", position_cov_floor_std_, 0.08);
+	        pnh_.param("position_cov_floor_stage_dynamic_only", position_cov_floor_stage_dynamic_only_, true);
+	        // Stage-dependent Q
+	        pnh_.param("enable_stage_dependent_q", enable_stage_dependent_q_, false);
+	        pnh_.param("dynamic_q_scale", dynamic_q_scale_, 1.5);
+	        pnh_.param("landing_q_scale", landing_q_scale_, 1.0);
+	        // Stage-dependent DGO position R
+	        pnh_.param("enable_stage_dependent_dgo_r", enable_stage_dependent_dgo_r_, false);
+	        pnh_.param("dynamic_dgo_position_noise_std", dynamic_dgo_position_noise_std_, 0.07);
+	        pnh_.param("landing_dgo_position_noise_std", landing_dgo_position_noise_std_, 0.10);
+	        ROS_DEBUG("[DEKF] param mode=%d", fusion_mode_);
 
         // 根据 fusion_mode 设置传感器开关
         enable_dgo_update_ = true;
@@ -510,10 +522,11 @@ public:
     //   X_post/P_post:   从 prior 顺序重放 updates 之后的状态。
     // 下一节点预测必须从上一节点 X_post/P_post 出发；延迟 replay 必须从
     // best_idx 节点开始，以确保新插入的 delayed obs 真正作用到该节点。
-    struct History_Record
-    {
-        ros::Time stamp;         // 记录时间戳
-        Vector6d X_prior;        // X_{i|i-1} 或该节点 replay 前状态
+	    struct History_Record
+	    {
+	        ros::Time stamp;         // 记录时间戳
+	        int mission_stage = -1;  // 创建该节点时的任务阶段
+	        Vector6d X_prior;        // X_{i|i-1} 或该节点 replay 前状态
         Matrix6d P_prior;        // P_{i|i-1} 或该节点 replay 前协方差
         Vector6d X_post;         // X_{i|i}，重放本节点 updates 后状态
         Matrix6d P_post;         // P_{i|i}，重放本节点 updates 后协方差
@@ -663,8 +676,8 @@ public:
     double sigma_uwb_ = 0.05;
     double sigma_alpha_ = 0.05;
     double sigma_theta_ = 0.05;
-    bool use_dgo_velocity_ = false;
-    double dgo_velocity_noise_std_ = 0.35;
+    bool use_dgo_velocity_ = true;
+    double dgo_velocity_noise_std_ = 0.25;
     bool use_dgo_velocity_stage_gate_ = true;
     double dgo_velocity_noise_std_dynamic_ = 0.35;
     double dgo_velocity_noise_std_landing_ = 0.70;
@@ -727,6 +740,21 @@ public:
 	    std::ofstream replay_trace_csv_;
 	    std::ofstream state_trace_csv_;
 	    std::ofstream dgo_velocity_source_csv_;
+
+	    // Position covariance floor
+	    bool enable_position_cov_floor_ = false;
+	    double position_cov_floor_std_ = 0.08;
+	    bool position_cov_floor_stage_dynamic_only_ = true;
+
+	    // Stage-dependent Q
+	    bool enable_stage_dependent_q_ = false;
+	    double dynamic_q_scale_ = 1.5;
+	    double landing_q_scale_ = 1.0;
+
+	    // Stage-dependent DGO position R
+	    bool enable_stage_dependent_dgo_r_ = false;
+	    double dynamic_dgo_position_noise_std_ = 0.07;
+	    double landing_dgo_position_noise_std_ = 0.10;
 
 	    // 任务阶段
 	    int mission_stage_ = -1;
@@ -1650,11 +1678,12 @@ public:
             if (!std::isfinite(msg->distances[i]) || msg->distances[i] < 0.05)
                 continue;
 
-            Observation obs;
-            obs.type = ObsType::UWB_RANGE;
-            obs.target_id = target;
-            obs.stamp = msg->header.stamp;
-            obs.value = msg->distances[i];
+	            Observation obs;
+	            obs.type = ObsType::UWB_RANGE;
+	            obs.target_id = target;
+	            obs.stamp = msg->header.stamp;
+	            obs.mission_stage = mission_stage_;
+	            obs.value = msg->distances[i];
             filters_[target].pending_obs.push_back(obs);
             while (filters_[target].pending_obs.size() > static_cast<size_t>(max_pending_))
                 filters_[target].pending_obs.pop_front();
@@ -1673,11 +1702,12 @@ public:
             if (target < 0 || target >= uav_num_ || target == uav_id_)
                 continue;
 
-            Observation obs;
-            obs.type = ObsType::CAMERA_BEARING;
-            obs.target_id = target;
-            obs.stamp = msg->header.stamp;
-            obs.has_alpha = std::isfinite(msg->alpha[i]);
+	            Observation obs;
+	            obs.type = ObsType::CAMERA_BEARING;
+	            obs.target_id = target;
+	            obs.stamp = msg->header.stamp;
+	            obs.mission_stage = mission_stage_;
+	            obs.has_alpha = std::isfinite(msg->alpha[i]);
             obs.has_theta = std::isfinite(msg->theta[i]);
             if (obs.has_alpha)
                 obs.alpha = msg->alpha[i];
@@ -1909,12 +1939,15 @@ public:
         // 构造噪声耦合矩阵 G
         Eigen::Matrix<double,6,3> G;
         G.block<3,3>(0,0) = 0.5 * Eigen::Matrix3d::Identity() * dt * dt;
-        G.block<3,3>(3,0) = Eigen::Matrix3d::Identity() * dt;
+	G.block<3,3>(3,0) = Eigen::Matrix3d::Identity() * dt;
 
-        // X_{k+1|k} = A_k * X_k
-        rec.X_prior = rec.A * f.X;
-        // P_{k+1|k} = A_k * P_k * A_k^T + G_k * Q * G_k^T
-        rec.P_prior = rec.A * f.P * rec.A.transpose() + G * Q_ * G.transpose();
+	        // X_{k+1|k} = A_k * X_k
+	        rec.X_prior = rec.A * f.X;
+	        rec.mission_stage = mission_stage_;
+	        // P_{k+1|k} = A_k * P_k * A_k^T + G_k * Q * G_k^T
+	        const double q_scale_pred = qScaleForStage(mission_stage_);
+	        rec.P_prior = rec.A * f.P * rec.A.transpose()
+	                    + G * (q_scale_pred * q_scale_pred * Q_) * G.transpose();
         symmetrizeCov(rec.P_prior);
         rec.X_post = rec.X_prior;
         rec.P_post = rec.P_prior;
@@ -1964,6 +1997,57 @@ public:
 	            << "err_vx,err_vy,err_vz,err_norm,frame_assumption\n";
 	        ROS_INFO("[DEKF] DGO velocity source trace: %s", path.c_str());
 	    }
+
+	// ═══════════════════════════════════════════════════════════
+	//  Stage / covariance floor helpers
+	// ═══════════════════════════════════════════════════════════
+
+	bool isDynamicStage(int stage) const
+	{
+	    return stage == 3 || stage == 5;
+	}
+
+	void applyPositionCovarianceFloor(Matrix6d &P, int stage)
+	{
+	    if (!enable_position_cov_floor_)
+	        return;
+	    if (position_cov_floor_stage_dynamic_only_ && !isDynamicStage(stage))
+	        return;
+
+	    const double floor_var = position_cov_floor_std_ * position_cov_floor_std_;
+	    for (int i = 0; i < 3; ++i)
+	    {
+	        if (P(i, i) < floor_var)
+	            P(i, i) = floor_var;
+	    }
+	    symmetrizeCov(P);
+	}
+
+	double qScaleForStage(int stage) const
+	{
+	    if (!enable_stage_dependent_q_)
+	        return 1.0;
+	    if (stage == 3 || stage == 5)
+	        return dynamic_q_scale_;
+	    if (stage == 6)
+	        return landing_q_scale_;
+	    return 1.0;
+	}
+
+	double dgoPositionNoiseStdForStage(int stage) const
+	{
+	    if (!enable_stage_dependent_dgo_r_)
+	        return sigma_px_;
+	    if (stage == 3 || stage == 5)
+	        return dynamic_dgo_position_noise_std_;
+	    if (stage == 6)
+	        return landing_dgo_position_noise_std_;
+	    return sigma_px_;
+	}
+
+	// ═══════════════════════════════════════════════════════════
+	//  Trace / 日志输出
+	// ═══════════════════════════════════════════════════════════
 
 	    void writeDgoVelocitySourceTrace(const Observation &obs)
 	    {
@@ -2156,8 +2240,8 @@ public:
 	                << "err_after_x,err_after_y,err_after_z,"
 	                << "err_before_norm,err_after_norm,err_delta,"
 	                << "correction_dot_error,correction_cos_error,"
-	                << "correction_norm_over_residual,"
-	                << "gain_weight\n";
+		                << "correction_norm_over_residual,"
+		                << "gain_weight,sigma_p_eff\n";
 	            ROS_INFO("[DEKF] trace delayed_update CSV: %s", delayed_path.c_str());
 	        }
 
@@ -2209,7 +2293,8 @@ public:
 	                << "err_gt_x,err_gt_y,err_gt_z,err_gt_norm,"
 	                << "err_dgo_x,err_dgo_y,err_dgo_z,err_dgo_norm,"
 	                << "est_rel_speed_norm,gt_rel_speed_norm,"
-	                << "vel_err_x,vel_err_y,vel_err_z,vel_err_norm\n";
+		                << "vel_err_x,vel_err_y,vel_err_z,vel_err_norm,"
+		                << "Ppos_min,position_cov_floor_active,q_scale,sigma_p_effective\n";
 	            ROS_INFO("[DEKF] trace state CSV: %s", state_path.c_str());
 	        }
 	    }
@@ -2257,9 +2342,13 @@ public:
 	            << gt_rel_v(0) << "," << gt_rel_v(1) << "," << gt_rel_v(2) << ","
 	            << dgo_rel(0) << "," << dgo_rel(1) << "," << dgo_rel(2) << "," << dgo_age << ","
 	            << err_gt(0) << "," << err_gt(1) << "," << err_gt(2) << "," << err_gt_norm << ","
-	            << err_dgo(0) << "," << err_dgo(1) << "," << err_dgo(2) << "," << err_dgo_norm << ","
-	            << est_speed << "," << gt_speed << ","
-	            << vel_err(0) << "," << vel_err(1) << "," << vel_err(2) << "," << vel_err_norm << "\n";
+            << err_dgo(0) << "," << err_dgo(1) << "," << err_dgo(2) << "," << err_dgo_norm << ","
+            << est_speed << "," << gt_speed << ","
+            << vel_err(0) << "," << vel_err(1) << "," << vel_err(2) << "," << vel_err_norm << ","
+            << std::min({f.P(0,0), f.P(1,1), f.P(2,2)}) << ","
+            << (enable_position_cov_floor_ && (!position_cov_floor_stage_dynamic_only_ || isDynamicStage(mission_stage_)) ? 1 : 0) << ","
+            << qScaleForStage(mission_stage_) << ","
+            << dgoPositionNoiseStdForStage(mission_stage_) << "\n";
 	    }
 
 	    void writeDelayedUpdateTrace(
@@ -2374,8 +2463,9 @@ public:
 	            << err_after(0) << "," << err_after(1) << "," << err_after(2) << ","
 	            << err_before_norm << "," << err_after_norm << "," << err_delta << ","
 	            << correction_dot << "," << correction_cos << ","
-	            << corr_over_res << ","
-	            << gain_weight_val << "\n";
+            << corr_over_res << ","
+            << gain_weight_val << ","
+            << dgoPositionNoiseStdForStage(obs.mission_stage) << "\n";
 	    }
 
 	    void writeReplayTrace(
@@ -2458,12 +2548,15 @@ public:
                 H.resize(3, 6);
                 H.setZero();
                 H.block<3, 3>(0, 0).setIdentity();
-                R_meas.resize(3, 3);
-                R_meas.setZero();
-                R_meas(0, 0) = sigma_px_ * sigma_px_;
-                R_meas(1, 1) = sigma_py_ * sigma_py_;
-                R_meas(2, 2) = sigma_pz_ * sigma_pz_;
-                return true;
+	                R_meas.resize(3, 3);
+	                R_meas.setZero();
+	                {
+	                    const double eff_sigma_p = dgoPositionNoiseStdForStage(obs.mission_stage);
+	                    R_meas(0, 0) = eff_sigma_p * eff_sigma_p;
+	                    R_meas(1, 1) = eff_sigma_p * eff_sigma_p;
+	                    R_meas(2, 2) = eff_sigma_p * eff_sigma_p;
+	                }
+	                return true;
             }
 
             case ObsType::DGO_VELOCITY:
@@ -2654,8 +2747,10 @@ public:
                 G.block<3,3>(0,0) = 0.5 * Eigen::Matrix3d::Identity() * dt * dt;
                 G.block<3,3>(3,0) = Eigen::Matrix3d::Identity() * dt;
 
-                rec.X_prior = rec.A * prev.X_post;
-                rec.P_prior = rec.A * prev.P_post * rec.A.transpose() + G * Q_ * G.transpose();
+	                rec.X_prior = rec.A * prev.X_post;
+	                const double q_scale_replay = qScaleForStage(rec.mission_stage);
+	                rec.P_prior = rec.A * prev.P_post * rec.A.transpose()
+                            + G * (q_scale_replay * q_scale_replay * Q_) * G.transpose();
                 symmetrizeCov(rec.P_prior);
                 if (!rec.X_prior.allFinite() || !isUsableCovariance(rec.P_prior))
                 {
@@ -2838,9 +2933,10 @@ public:
 		                }
                 Matrix6d I_KH = Matrix6d::Identity() - K_eff * Hk;
                 rec.P_post =
-                    I_KH * rec.P_post * I_KH.transpose() +
-                    K_eff * R_meas * K_eff.transpose();
-                symmetrizeCov(rec.P_post);
+	                I_KH * rec.P_post * I_KH.transpose() +
+	                K_eff * R_meas * K_eff.transpose();
+	            symmetrizeCov(rec.P_post);
+	            applyPositionCovarianceFloor(rec.P_post, u.obs.mission_stage);
 
                 if (!rec.X_post.allFinite() || !isUsableCovariance(rec.P_post))
                 {
@@ -3046,8 +3142,9 @@ public:
 
         // Joseph 形式协方差更新 (数值稳定性优于标准形式)
         Eigen::MatrixXd I_KH = Eigen::MatrixXd::Identity(6, 6) - K * H;
-        f.P = I_KH * f.P * I_KH.transpose() + K * R_meas * K.transpose();
-        symmetrizeCov(f.P);
+	        f.P = I_KH * f.P * I_KH.transpose() + K * R_meas * K.transpose();
+	        symmetrizeCov(f.P);
+	        applyPositionCovarianceFloor(f.P, obs.mission_stage);
         noteDgoVelocityMetrics(f, obs, residual_norm, nis, kvv);
         incrementAcceptedCounters(f, obs, false);
 

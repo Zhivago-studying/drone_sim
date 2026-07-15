@@ -75,12 +75,21 @@
   <arg name="dekf_uwb_noise_std" default="$(arg uwb_stddev)" />
   <arg name="dekf_camera_alpha_noise_std" default="0.05" />
 	  <arg name="dekf_camera_theta_noise_std" default="0.05" />
-	  <arg name="dekf_use_dgo_velocity" default="false" />
-	  <arg name="dekf_dgo_velocity_noise_std" default="0.35" />
+	  <arg name="dekf_use_dgo_velocity" default="true" />
+	  <arg name="dekf_dgo_velocity_noise_std" default="0.25" />
 	  <arg name="dekf_use_dgo_velocity_stage_gate" default="true" />
 	  <arg name="dekf_dgo_velocity_noise_std_dynamic" default="0.35" />
 	  <arg name="dekf_dgo_velocity_noise_std_landing" default="0.70" />
-	  <arg name="dekf_disable_dgo_velocity_in_landing" default="true" />
+		  <arg name="dekf_disable_dgo_velocity_in_landing" default="true" />
+	  <arg name="dekf_enable_position_cov_floor" default="false" />
+	  <arg name="dekf_position_cov_floor_std" default="0.08" />
+	  <arg name="dekf_position_cov_floor_stage_dynamic_only" default="true" />
+	  <arg name="dekf_enable_stage_dependent_q" default="false" />
+	  <arg name="dekf_dynamic_q_scale" default="1.5" />
+	  <arg name="dekf_landing_q_scale" default="1.0" />
+	  <arg name="dekf_enable_stage_dependent_dgo_r" default="false" />
+	  <arg name="dekf_dynamic_dgo_position_noise_std" default="0.07" />
+	  <arg name="dekf_landing_dgo_position_noise_std" default="0.10" />
 	  <arg name="run_id" default="" />
 
   <!-- Alias launch: the full mission launch owns the evaluator node. -->
@@ -166,7 +175,16 @@
 	    <arg name="dekf_use_dgo_velocity_stage_gate" value="$(arg dekf_use_dgo_velocity_stage_gate)" />
 	    <arg name="dekf_dgo_velocity_noise_std_dynamic" value="$(arg dekf_dgo_velocity_noise_std_dynamic)" />
 	    <arg name="dekf_dgo_velocity_noise_std_landing" value="$(arg dekf_dgo_velocity_noise_std_landing)" />
-	    <arg name="dekf_disable_dgo_velocity_in_landing" value="$(arg dekf_disable_dgo_velocity_in_landing)" />
-	    <arg name="run_id" value="$(arg run_id)" />
+		    <arg name="dekf_disable_dgo_velocity_in_landing" value="$(arg dekf_disable_dgo_velocity_in_landing)" />
+		    <arg name="dekf_enable_position_cov_floor" value="$(arg dekf_enable_position_cov_floor)" />
+		    <arg name="dekf_position_cov_floor_std" value="$(arg dekf_position_cov_floor_std)" />
+		    <arg name="dekf_position_cov_floor_stage_dynamic_only" value="$(arg dekf_position_cov_floor_stage_dynamic_only)" />
+		    <arg name="dekf_enable_stage_dependent_q" value="$(arg dekf_enable_stage_dependent_q)" />
+		    <arg name="dekf_dynamic_q_scale" value="$(arg dekf_dynamic_q_scale)" />
+		    <arg name="dekf_landing_q_scale" value="$(arg dekf_landing_q_scale)" />
+		    <arg name="dekf_enable_stage_dependent_dgo_r" value="$(arg dekf_enable_stage_dependent_dgo_r)" />
+		    <arg name="dekf_dynamic_dgo_position_noise_std" value="$(arg dekf_dynamic_dgo_position_noise_std)" />
+		    <arg name="dekf_landing_dgo_position_noise_std" value="$(arg dekf_landing_dgo_position_noise_std)" />
+		    <arg name="run_id" value="$(arg run_id)" />
   </include>
 </launch>

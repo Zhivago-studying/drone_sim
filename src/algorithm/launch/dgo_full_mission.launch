@@ -81,8 +81,8 @@
   <arg name="dekf_uwb_noise_std" default="$(arg uwb_stddev)" />
 	  <arg name="dekf_camera_alpha_noise_std" default="0.05" />
 	  <arg name="dekf_camera_theta_noise_std" default="0.05" />
-		  <arg name="dekf_use_dgo_velocity" default="false" />
-	  <arg name="dekf_dgo_velocity_noise_std" default="0.35" />
+		  <arg name="dekf_use_dgo_velocity" default="true" />
+	  <arg name="dekf_dgo_velocity_noise_std" default="0.25" />
 	  <arg name="dekf_use_dgo_velocity_stage_gate" default="true" />
 	  <arg name="dekf_dgo_velocity_noise_std_dynamic" default="0.35" />
 	  <arg name="dekf_dgo_velocity_noise_std_landing" default="0.70" />
@@ -93,6 +93,15 @@
 		  <arg name="delayed_validation_gt_max_dt" default="0.05" />
 		  <arg name="dekf_trace_enabled" default="false" />
 	  <arg name="dekf_trace_dgo_only" default="true" />
+	  <arg name="dekf_enable_position_cov_floor" default="false" />
+	  <arg name="dekf_position_cov_floor_std" default="0.08" />
+	  <arg name="dekf_position_cov_floor_stage_dynamic_only" default="true" />
+	  <arg name="dekf_enable_stage_dependent_q" default="false" />
+	  <arg name="dekf_dynamic_q_scale" default="1.5" />
+	  <arg name="dekf_landing_q_scale" default="1.0" />
+	  <arg name="dekf_enable_stage_dependent_dgo_r" default="false" />
+	  <arg name="dekf_dynamic_dgo_position_noise_std" default="0.07" />
+	  <arg name="dekf_landing_dgo_position_noise_std" default="0.10" />
 	  <arg name="run_id" default="" />
 
   <!--
@@ -258,6 +267,18 @@
       <param name="max_velocity_cov" value="$(arg dekf_max_velocity_cov)" />
       <param name="max_pending" value="$(arg dekf_max_pending)" />
       <param name="history_keep_time" value="$(arg dekf_history_keep_time)" />
+      <!-- Position covariance floor -->
+      <param name="enable_position_cov_floor" value="$(arg dekf_enable_position_cov_floor)" />
+      <param name="position_cov_floor_std" value="$(arg dekf_position_cov_floor_std)" />
+      <param name="position_cov_floor_stage_dynamic_only" value="$(arg dekf_position_cov_floor_stage_dynamic_only)" />
+      <!-- Stage-dependent Q -->
+      <param name="enable_stage_dependent_q" value="$(arg dekf_enable_stage_dependent_q)" />
+      <param name="dynamic_q_scale" value="$(arg dekf_dynamic_q_scale)" />
+      <param name="landing_q_scale" value="$(arg dekf_landing_q_scale)" />
+      <!-- Stage-dependent DGO position R -->
+      <param name="enable_stage_dependent_dgo_r" value="$(arg dekf_enable_stage_dependent_dgo_r)" />
+      <param name="dynamic_dgo_position_noise_std" value="$(arg dekf_dynamic_dgo_position_noise_std)" />
+      <param name="landing_dgo_position_noise_std" value="$(arg dekf_landing_dgo_position_noise_std)" />
       <param name="max_history_match_dt" value="$(arg dekf_max_history_match_dt)" />
       <param name="csv_dir" value="$(arg dekf_csv_dir)" />
     </node>
@@ -383,6 +404,18 @@
       <param name="max_velocity_cov" value="$(arg dekf_max_velocity_cov)" />
       <param name="max_pending" value="$(arg dekf_max_pending)" />
       <param name="history_keep_time" value="$(arg dekf_history_keep_time)" />
+      <!-- Position covariance floor -->
+      <param name="enable_position_cov_floor" value="$(arg dekf_enable_position_cov_floor)" />
+      <param name="position_cov_floor_std" value="$(arg dekf_position_cov_floor_std)" />
+      <param name="position_cov_floor_stage_dynamic_only" value="$(arg dekf_position_cov_floor_stage_dynamic_only)" />
+      <!-- Stage-dependent Q -->
+      <param name="enable_stage_dependent_q" value="$(arg dekf_enable_stage_dependent_q)" />
+      <param name="dynamic_q_scale" value="$(arg dekf_dynamic_q_scale)" />
+      <param name="landing_q_scale" value="$(arg dekf_landing_q_scale)" />
+      <!-- Stage-dependent DGO position R -->
+      <param name="enable_stage_dependent_dgo_r" value="$(arg dekf_enable_stage_dependent_dgo_r)" />
+      <param name="dynamic_dgo_position_noise_std" value="$(arg dekf_dynamic_dgo_position_noise_std)" />
+      <param name="landing_dgo_position_noise_std" value="$(arg dekf_landing_dgo_position_noise_std)" />
       <param name="max_history_match_dt" value="$(arg dekf_max_history_match_dt)" />
       <param name="csv_dir" value="$(arg dekf_csv_dir)" />
     </node>
@@ -508,6 +541,18 @@
       <param name="max_velocity_cov" value="$(arg dekf_max_velocity_cov)" />
       <param name="max_pending" value="$(arg dekf_max_pending)" />
       <param name="history_keep_time" value="$(arg dekf_history_keep_time)" />
+      <!-- Position covariance floor -->
+      <param name="enable_position_cov_floor" value="$(arg dekf_enable_position_cov_floor)" />
+      <param name="position_cov_floor_std" value="$(arg dekf_position_cov_floor_std)" />
+      <param name="position_cov_floor_stage_dynamic_only" value="$(arg dekf_position_cov_floor_stage_dynamic_only)" />
+      <!-- Stage-dependent Q -->
+      <param name="enable_stage_dependent_q" value="$(arg dekf_enable_stage_dependent_q)" />
+      <param name="dynamic_q_scale" value="$(arg dekf_dynamic_q_scale)" />
+      <param name="landing_q_scale" value="$(arg dekf_landing_q_scale)" />
+      <!-- Stage-dependent DGO position R -->
+      <param name="enable_stage_dependent_dgo_r" value="$(arg dekf_enable_stage_dependent_dgo_r)" />
+      <param name="dynamic_dgo_position_noise_std" value="$(arg dekf_dynamic_dgo_position_noise_std)" />
+      <param name="landing_dgo_position_noise_std" value="$(arg dekf_landing_dgo_position_noise_std)" />
       <param name="max_history_match_dt" value="$(arg dekf_max_history_match_dt)" />
       <param name="csv_dir" value="$(arg dekf_csv_dir)" />
     </node>
@@ -633,6 +678,18 @@
       <param name="max_velocity_cov" value="$(arg dekf_max_velocity_cov)" />
       <param name="max_pending" value="$(arg dekf_max_pending)" />
       <param name="history_keep_time" value="$(arg dekf_history_keep_time)" />
+      <!-- Position covariance floor -->
+      <param name="enable_position_cov_floor" value="$(arg dekf_enable_position_cov_floor)" />
+      <param name="position_cov_floor_std" value="$(arg dekf_position_cov_floor_std)" />
+      <param name="position_cov_floor_stage_dynamic_only" value="$(arg dekf_position_cov_floor_stage_dynamic_only)" />
+      <!-- Stage-dependent Q -->
+      <param name="enable_stage_dependent_q" value="$(arg dekf_enable_stage_dependent_q)" />
+      <param name="dynamic_q_scale" value="$(arg dekf_dynamic_q_scale)" />
+      <param name="landing_q_scale" value="$(arg dekf_landing_q_scale)" />
+      <!-- Stage-dependent DGO position R -->
+      <param name="enable_stage_dependent_dgo_r" value="$(arg dekf_enable_stage_dependent_dgo_r)" />
+      <param name="dynamic_dgo_position_noise_std" value="$(arg dekf_dynamic_dgo_position_noise_std)" />
+      <param name="landing_dgo_position_noise_std" value="$(arg dekf_landing_dgo_position_noise_std)" />
       <param name="max_history_match_dt" value="$(arg dekf_max_history_match_dt)" />
       <param name="csv_dir" value="$(arg dekf_csv_dir)" />
     </node>
