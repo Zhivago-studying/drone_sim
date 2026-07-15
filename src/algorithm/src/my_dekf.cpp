@@ -92,13 +92,14 @@ public:
         pnh_.param("sigma_uwb", sigma_uwb_, 0.05);
         pnh_.param("sigma_alpha", sigma_alpha_, 0.05);
         pnh_.param("sigma_theta", sigma_theta_, 0.05);
-        pnh_.param("use_dgo_velocity", use_dgo_velocity_, false);
-        pnh_.param("dgo_velocity_noise_std", dgo_velocity_noise_std_, 0.35);
+	pnh_.param("use_dgo_velocity", use_dgo_velocity_, false);
+	pnh_.param("dgo_velocity_noise_std", dgo_velocity_noise_std_, 0.35);
         pnh_.param("use_dgo_velocity_stage_gate", use_dgo_velocity_stage_gate_, true);
         pnh_.param("dgo_velocity_noise_std_dynamic", dgo_velocity_noise_std_dynamic_, 0.35);
         pnh_.param("dgo_velocity_noise_std_landing", dgo_velocity_noise_std_landing_, 0.70);
         pnh_.param("disable_dgo_velocity_in_landing", disable_dgo_velocity_in_landing_, true);
-        pnh_.param("max_dgo_pair_dt", max_dgo_pair_dt_, 0.12);
+	pnh_.param("max_dgo_pair_dt", max_dgo_pair_dt_, 0.12);
+	pnh_.param("dgo_velocity_pair_max_dt", dgo_velocity_pair_max_dt_, 0.05);
         pnh_.param("max_observation_delay", max_observation_delay_, 0.60);
         pnh_.param("current_delay_threshold", current_delay_threshold_, 0.020);
         pnh_.param("max_history_match_dt", max_history_match_dt_, 0.06);
@@ -115,8 +116,9 @@ public:
             }
         }
         pnh_.param("max_nis", max_nis_, 25.0);
-        pnh_.param("max_nis_dgo", max_nis_dgo_, 11.34);
-        pnh_.param("max_nis_dgo_velocity", max_nis_dgo_velocity_, 16.27);
+	pnh_.param("max_nis_dgo", max_nis_dgo_, 11.34);
+	pnh_.param("max_nis_dgo_dynamic", max_nis_dgo_dynamic_, 16.27);
+	pnh_.param("max_nis_dgo_velocity", max_nis_dgo_velocity_, 16.27);
         pnh_.param("max_nis_uwb", max_nis_uwb_, 12.0);
         pnh_.param("max_nis_camera_1d", max_nis_camera_1d_, 9.0);
         pnh_.param("max_nis_camera_2d", max_nis_camera_2d_, 13.8);
@@ -126,7 +128,7 @@ public:
         pnh_.param("camera_residual_gate", camera_residual_gate_, 0.5);
         pnh_.param("require_direction_anchor_for_uwb", require_direction_anchor_for_uwb_, true);
 	        pnh_.param("uwb_anchor_max_age", uwb_anchor_max_age_, 0.50);
-	        pnh_.param("delayed_validation_enabled", delayed_validation_enabled_, false);
+	pnh_.param("delayed_validation_enabled", delayed_validation_enabled_, false);
 	        pnh_.param("delayed_validation_gt_max_dt", delayed_validation_gt_max_dt_, 0.05);
 	        pnh_.param("mode", fusion_mode_, 4);
 	        pnh_.param("trace_enabled", trace_enabled_, false);
@@ -167,7 +169,8 @@ public:
                  enable_camera_update_ ? 1 : 0);
         pnh_.param("enable_dgo_recovery", enable_dgo_recovery_, true);
         pnh_.param("dgo_recovery_gate", dgo_recovery_gate_, 3.0);
-        pnh_.param("dgo_recovery_count_threshold", dgo_recovery_count_threshold_, 3);
+	pnh_.param("dgo_recovery_count_threshold", dgo_recovery_count_threshold_, 3);
+	pnh_.param("dgo_consecutive_gate_fail_threshold", dgo_consecutive_gate_fail_threshold_, 3);
         pnh_.param("dgo_recovery_consistency_gate", dgo_recovery_consistency_gate_, 0.50);
         pnh_.param("dgo_recovery_cooldown", dgo_recovery_cooldown_, 1.0);
         pnh_.param("dgo_recovery_pos_std", dgo_recovery_pos_std_, 0.20);
@@ -622,6 +625,7 @@ public:
         int dgo_recovery_count = 0;
         bool has_last_recovery_dgo = false;
         Eigen::Vector3d last_recovery_dgo_position = Eigen::Vector3d::Zero();
+        int consecutive_dgo_gate_fails = 0;
     };
 
     // DGO 历史观测 (按 UAV 编号缓存)
@@ -669,6 +673,7 @@ public:
 
     // 延迟补偿参数
     double max_dgo_pair_dt_ = 0.12;
+    double dgo_velocity_pair_max_dt_ = 0.05;
     double max_observation_delay_ = 0.60;
     double current_delay_threshold_ = 0.020;
     double max_history_match_dt_ = 0.06;
@@ -676,6 +681,7 @@ public:
     double delayed_update_gain_weight_ = 1.0;
     double max_nis_ = 25.0;
     double max_nis_dgo_ = 11.34;
+    double max_nis_dgo_dynamic_ = 16.27;
     double max_nis_dgo_velocity_ = 16.27;
     double max_nis_uwb_ = 12.0;
     double max_nis_camera_1d_ = 9.0;
@@ -695,6 +701,7 @@ public:
 	    bool enable_dgo_recovery_ = true;
     double dgo_recovery_gate_ = 3.0;
     int dgo_recovery_count_threshold_ = 3;
+    int dgo_consecutive_gate_fail_threshold_ = 3;
     double dgo_recovery_consistency_gate_ = 0.50;
     double dgo_recovery_cooldown_ = 1.0;
     double dgo_recovery_pos_std_ = 0.20;
@@ -1177,6 +1184,7 @@ public:
 
         ++f.recovery_resets;
         f.last_recovery_reset_stamp = f.stamp;
+        f.consecutive_dgo_gate_fails = 0;
         incrementAcceptedCounters(f, obs, delayed);
         markDirectionAnchor(f);
 
@@ -1199,19 +1207,20 @@ public:
                           residual_norm, nis);
     }
 
-    RecoveryResult tryDgoRecovery(Filter &f,
-                                  const Observation &obs,
-                                  bool delayed,
-                                  double age,
-                                  double history_match_dt,
-                                  double residual_norm,
-                                  double nis,
-                                  const std::string &source_reason)
-    {
-        if (!enable_dgo_recovery_ || obs.type != ObsType::DGO ||
-            !obs.position.allFinite() ||
-            !std::isfinite(residual_norm) ||
-            residual_norm < dgo_recovery_gate_)
+	    RecoveryResult tryDgoRecovery(Filter &f,
+	                                  const Observation &obs,
+	                                  bool delayed,
+	                                  double age,
+	                                  double history_match_dt,
+	                                  double residual_norm,
+	                                  double nis,
+	                                  const std::string &source_reason,
+	                                  bool force = false)
+	    {
+	        if (!enable_dgo_recovery_ || obs.type != ObsType::DGO ||
+	            !obs.position.allFinite() ||
+	            !std::isfinite(residual_norm) ||
+	            (!force && residual_norm < dgo_recovery_gate_))
         {
             return RecoveryResult::NONE;
         }
@@ -1466,14 +1475,19 @@ public:
         return seq;
     }
 
-    double nisGateForObservation(const Observation &obs, int residual_dim) const
-    {
-        switch (obs.type)
-        {
-            case ObsType::DGO:
-                return max_nis_dgo_;
-            case ObsType::DGO_VELOCITY:
-                return max_nis_dgo_velocity_;
+	    double nisGateForObservation(const Observation &obs, int residual_dim) const
+	    {
+	        switch (obs.type)
+	        {
+	            case ObsType::DGO:
+	            {
+	                // Stage-dependent NIS gate: 高动态阶段用更宽的门限
+	                if (obs.mission_stage == 3 || obs.mission_stage == 5)
+	                    return max_nis_dgo_dynamic_;
+	                return max_nis_dgo_;
+	            }
+	            case ObsType::DGO_VELOCITY:
+	                return max_nis_dgo_velocity_;
             case ObsType::UWB_RANGE:
                 return max_nis_uwb_;
             case ObsType::CAMERA_BEARING:
@@ -1608,8 +1622,11 @@ public:
             filters_[target].pending_obs.push_back(pos_obs);
             if (pos_obs.velocity.allFinite())
                 writeDgoVelocitySourceTrace(pos_obs);
+            // Velocity observation: requires tighter pair sync
+            const double vel_pair_dt = std::abs((self.stamp - peer.stamp).toSec());
             if (shouldUseDgoVelocity(pos_obs.mission_stage) &&
-                pos_obs.velocity.allFinite())
+                pos_obs.velocity.allFinite() &&
+                vel_pair_dt <= dgo_velocity_pair_max_dt_)
             {
                 Observation vel_obs = pos_obs;
                 vel_obs.type = ObsType::DGO_VELOCITY;
@@ -2916,19 +2933,51 @@ public:
                                std::numeric_limits<double>::quiet_NaN(),
                                residual_norm,
                                std::numeric_limits<double>::quiet_NaN(),
-                               gate_reason);
-            if (recovery == RecoveryResult::RESET)
-            {
-                return UpdateStatus::RECOVERY_RESET;
-            }
-            if (recovery == RecoveryResult::HANDLED_REJECTED)
-            {
-                return UpdateStatus::REJECTED;
-            }
+	                               gate_reason);
+	            if (recovery == RecoveryResult::RESET)
+	            {
+	                return UpdateStatus::RECOVERY_RESET;
+	            }
+	            if (recovery == RecoveryResult::HANDLED_REJECTED)
+	            {
+	                return UpdateStatus::REJECTED;
+	            }
 
-            ++f.rejects;
-            logObservationRow("current_update", f, obs, 0, 0, 0,
-                              gate_reason, age,
+	            // ── 连续 DGO position 硬残差门限失败 → 提前 recovery ──
+	            if (obs.type == ObsType::DGO)
+	            {
+	                f.consecutive_dgo_gate_fails++;
+	                if (f.consecutive_dgo_gate_fails >=
+	                    dgo_consecutive_gate_fail_threshold_)
+	                {
+	                    Eigen::Vector3d latest_dgo;
+	                    double dgo_age = std::numeric_limits<double>::quiet_NaN();
+	                    if (getLatestDgoForTarget(obs.target_id, f.stamp,
+	                                              latest_dgo, dgo_age) &&
+	                        std::isfinite(dgo_age) && dgo_age < max_observation_delay_)
+	                    {
+		                        RecoveryResult early =
+		                            tryDgoRecovery(f, obs, false, age,
+		                                           std::numeric_limits<double>::quiet_NaN(),
+		                                           residual_norm,
+		                                           std::numeric_limits<double>::quiet_NaN(),
+		                                           "consecutive_gate_fail_" + gate_reason,
+		                                           true);  // force=true: bypass residual_gate check
+	                        if (early == RecoveryResult::RESET)
+	                            return UpdateStatus::RECOVERY_RESET;
+	                        if (early == RecoveryResult::HANDLED_REJECTED)
+	                            return UpdateStatus::REJECTED;
+	                    }
+	                }
+	            }
+	            else
+	            {
+	                f.consecutive_dgo_gate_fails = 0;
+	            }
+
+	            ++f.rejects;
+	            logObservationRow("current_update", f, obs, 0, 0, 0,
+	                              gate_reason, age,
                               std::numeric_limits<double>::quiet_NaN(),
                               residual_norm,
                               std::numeric_limits<double>::quiet_NaN(),
@@ -3014,7 +3063,11 @@ public:
             f.cache.back().P_post = f.P;
         }
 
-        logObservationRow("current_update", f, obs, 1, 0,
+	        // 重置连续失败计数器 (任何非 DGO 观测接受, 或非 rejection 路径时)
+	        if (obs.type == ObsType::DGO)
+	            f.consecutive_dgo_gate_fails = 0;
+
+	        logObservationRow("current_update", f, obs, 1, 0,
                           obs.type == ObsType::DGO_VELOCITY ? 0 : 1,
                           "accepted", age,
                           std::numeric_limits<double>::quiet_NaN(),
@@ -3269,10 +3322,61 @@ public:
 		                    val.accepted = false; val.replay_ok = false;
 		                    val.reason = "recovery_rejected_" + replay_reason;
 		                    val.current_replay_after = val.current_replay_before;
-		                    fillDelayedValidationGtAndWrite(val);
-		                }
-		                return UpdateStatus::REJECTED;
-		            }
+                    fillDelayedValidationGtAndWrite(val);
+                }
+                return UpdateStatus::REJECTED;
+            }
+            }
+
+            // ── 连续 DGO delayed replay 失败 → 提前 recovery ──
+            if (obs.type == ObsType::DGO &&
+                failed_on_gated_observation &&
+                (replay_reason.find("residual_gate") != std::string::npos ||
+                 replay_reason.find("nis_reject") != std::string::npos))
+            {
+                f.consecutive_dgo_gate_fails++;
+                if (f.consecutive_dgo_gate_fails >=
+                    dgo_consecutive_gate_fail_threshold_)
+                {
+                    Eigen::Vector3d latest_dgo;
+                    double dgo_age = std::numeric_limits<double>::quiet_NaN();
+                    if (getLatestDgoForTarget(obs.target_id, f.stamp,
+                                              latest_dgo, dgo_age) &&
+                        std::isfinite(dgo_age) && dgo_age < max_observation_delay_)
+                    {
+                        RecoveryResult early =
+                            tryDgoRecovery(f, obs, true, age, best_dt,
+                                           replay_residual_norm, replay_nis,
+                                           "consecutive_delayed_gate_fail_" + replay_reason,
+                                           true);  // force=true
+                        if (early == RecoveryResult::RESET)
+                        {
+                            if (validate_position_update)
+                            {
+                                val.accepted = false; val.replay_ok = false;
+                                val.reason = "recovery_reset_consecutive_fail";
+                                val.current_replay_after = val.current_replay_before;
+                                fillDelayedValidationGtAndWrite(val);
+                            }
+                            return UpdateStatus::RECOVERY_RESET;
+                        }
+                        if (early == RecoveryResult::HANDLED_REJECTED)
+                        {
+                            if (validate_position_update)
+                            {
+                                val.accepted = false; val.replay_ok = false;
+                                val.reason = "recovery_rejected_consecutive_fail";
+                                val.current_replay_after = val.current_replay_before;
+                                fillDelayedValidationGtAndWrite(val);
+                            }
+                            return UpdateStatus::REJECTED;
+                        }
+                    }
+                }
+            }
+            else if (obs.type != ObsType::DGO)
+            {
+                f.consecutive_dgo_gate_fails = 0;
             }
 
             ++f.rejects;
@@ -3331,7 +3435,10 @@ public:
 		        symmetrizeCov(f.P);
 		        noteDgoVelocityMetrics(f, obs, replay_residual_norm, replay_nis,
 		                               trace_ctx.gated_kvv);
-		        incrementAcceptedCounters(f, obs, true);
+			        incrementAcceptedCounters(f, obs, true);
+
+		        if (obs.type == ObsType::DGO)
+		            f.consecutive_dgo_gate_fails = 0;
 
 		        if (validate_position_update)
 		        {

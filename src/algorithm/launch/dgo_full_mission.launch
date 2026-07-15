@@ -45,8 +45,9 @@
   <arg name="dekf_delayed_covariance_weight" default="1.0" />
   <arg name="dekf_delayed_update_gain_weight" default="$(arg dekf_delayed_covariance_weight)" />
   <arg name="dekf_max_nis" default="25.0" />
-  <arg name="dekf_max_nis_dgo" default="11.34" />
-  <arg name="dekf_max_nis_dgo_velocity" default="16.27" />
+	  <arg name="dekf_max_nis_dgo" default="11.34" />
+	  <arg name="dekf_max_nis_dgo_dynamic" default="16.27" />
+	  <arg name="dekf_max_nis_dgo_velocity" default="16.27" />
   <arg name="dekf_max_nis_uwb" default="12.0" />
   <arg name="dekf_max_nis_camera_1d" default="9.0" />
   <arg name="dekf_max_nis_camera_2d" default="13.8" />
@@ -72,13 +73,15 @@
   <arg name="enable_pairwise_eval" default="true" />
   <arg name="pairwise_max_sync_dt" default="0.05" />
   <arg name="dekf_max_observation_delay" default="0.60" />
-  <arg name="dekf_max_dgo_pair_dt" default="0.12" />
+	  <arg name="dekf_max_dgo_pair_dt" default="0.12" />
+	  <arg name="dekf_dgo_velocity_pair_max_dt" default="0.05" />
+	  <arg name="dekf_dgo_consecutive_gate_fail_threshold" default="3" />
   <arg name="dekf_accel_noise_std" default="0.8" />
   <arg name="dekf_dgo_position_noise_std" default="0.08" />
   <arg name="dekf_uwb_noise_std" default="$(arg uwb_stddev)" />
 	  <arg name="dekf_camera_alpha_noise_std" default="0.05" />
 	  <arg name="dekf_camera_theta_noise_std" default="0.05" />
-	  <arg name="dekf_use_dgo_velocity" default="false" />
+		  <arg name="dekf_use_dgo_velocity" default="false" />
 	  <arg name="dekf_dgo_velocity_noise_std" default="0.35" />
 	  <arg name="dekf_use_dgo_velocity_stage_gate" default="true" />
 	  <arg name="dekf_dgo_velocity_noise_std_dynamic" default="0.35" />
@@ -86,9 +89,9 @@
 	  <arg name="dekf_disable_dgo_velocity_in_landing" default="true" />
 	  <arg name="max_dekf_align_dt" default="0.12" />
   <arg name="mode" default="4" />
-	  <arg name="delayed_validation_enabled" default="false" />
-	  <arg name="delayed_validation_gt_max_dt" default="0.05" />
-	  <arg name="dekf_trace_enabled" default="false" />
+		  <arg name="delayed_validation_enabled" default="false" />
+		  <arg name="delayed_validation_gt_max_dt" default="0.05" />
+		  <arg name="dekf_trace_enabled" default="false" />
 	  <arg name="dekf_trace_dgo_only" default="true" />
 	  <arg name="run_id" default="" />
 
@@ -242,6 +245,9 @@
       <param name="enable_dgo_recovery" value="$(arg dekf_enable_dgo_recovery)" />
       <param name="dgo_recovery_gate" value="$(arg dekf_dgo_recovery_gate)" />
       <param name="dgo_recovery_count_threshold" value="$(arg dekf_dgo_recovery_count_threshold)" />
+      <param name="dgo_consecutive_gate_fail_threshold" value="$(arg dekf_dgo_consecutive_gate_fail_threshold)" />
+      <param name="dgo_velocity_pair_max_dt" value="$(arg dekf_dgo_velocity_pair_max_dt)" />
+      <param name="max_nis_dgo_dynamic" value="$(arg dekf_max_nis_dgo_dynamic)" />
       <param name="dgo_recovery_consistency_gate" value="$(arg dekf_dgo_recovery_consistency_gate)" />
       <param name="dgo_recovery_cooldown" value="$(arg dekf_dgo_recovery_cooldown)" />
       <param name="dgo_recovery_pos_std" value="$(arg dekf_dgo_recovery_pos_std)" />
@@ -364,6 +370,9 @@
       <param name="enable_dgo_recovery" value="$(arg dekf_enable_dgo_recovery)" />
       <param name="dgo_recovery_gate" value="$(arg dekf_dgo_recovery_gate)" />
       <param name="dgo_recovery_count_threshold" value="$(arg dekf_dgo_recovery_count_threshold)" />
+      <param name="dgo_consecutive_gate_fail_threshold" value="$(arg dekf_dgo_consecutive_gate_fail_threshold)" />
+      <param name="dgo_velocity_pair_max_dt" value="$(arg dekf_dgo_velocity_pair_max_dt)" />
+      <param name="max_nis_dgo_dynamic" value="$(arg dekf_max_nis_dgo_dynamic)" />
       <param name="dgo_recovery_consistency_gate" value="$(arg dekf_dgo_recovery_consistency_gate)" />
       <param name="dgo_recovery_cooldown" value="$(arg dekf_dgo_recovery_cooldown)" />
       <param name="dgo_recovery_pos_std" value="$(arg dekf_dgo_recovery_pos_std)" />
@@ -486,6 +495,9 @@
       <param name="enable_dgo_recovery" value="$(arg dekf_enable_dgo_recovery)" />
       <param name="dgo_recovery_gate" value="$(arg dekf_dgo_recovery_gate)" />
       <param name="dgo_recovery_count_threshold" value="$(arg dekf_dgo_recovery_count_threshold)" />
+      <param name="dgo_consecutive_gate_fail_threshold" value="$(arg dekf_dgo_consecutive_gate_fail_threshold)" />
+      <param name="dgo_velocity_pair_max_dt" value="$(arg dekf_dgo_velocity_pair_max_dt)" />
+      <param name="max_nis_dgo_dynamic" value="$(arg dekf_max_nis_dgo_dynamic)" />
       <param name="dgo_recovery_consistency_gate" value="$(arg dekf_dgo_recovery_consistency_gate)" />
       <param name="dgo_recovery_cooldown" value="$(arg dekf_dgo_recovery_cooldown)" />
       <param name="dgo_recovery_pos_std" value="$(arg dekf_dgo_recovery_pos_std)" />
@@ -608,6 +620,9 @@
       <param name="enable_dgo_recovery" value="$(arg dekf_enable_dgo_recovery)" />
       <param name="dgo_recovery_gate" value="$(arg dekf_dgo_recovery_gate)" />
       <param name="dgo_recovery_count_threshold" value="$(arg dekf_dgo_recovery_count_threshold)" />
+      <param name="dgo_consecutive_gate_fail_threshold" value="$(arg dekf_dgo_consecutive_gate_fail_threshold)" />
+      <param name="dgo_velocity_pair_max_dt" value="$(arg dekf_dgo_velocity_pair_max_dt)" />
+      <param name="max_nis_dgo_dynamic" value="$(arg dekf_max_nis_dgo_dynamic)" />
       <param name="dgo_recovery_consistency_gate" value="$(arg dekf_dgo_recovery_consistency_gate)" />
       <param name="dgo_recovery_cooldown" value="$(arg dekf_dgo_recovery_cooldown)" />
       <param name="dgo_recovery_pos_std" value="$(arg dekf_dgo_recovery_pos_std)" />
