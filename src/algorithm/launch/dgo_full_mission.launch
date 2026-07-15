@@ -91,12 +91,12 @@
   <arg name="mode" default="4" />
 		  <arg name="delayed_validation_enabled" default="false" />
 		  <arg name="delayed_validation_gt_max_dt" default="0.05" />
-		  <arg name="dekf_trace_enabled" default="false" />
+		  <arg name="dekf_trace_enabled" default="true" />
 	  <arg name="dekf_trace_dgo_only" default="true" />
-	  <arg name="dekf_enable_position_cov_floor" default="false" />
+	  <arg name="dekf_enable_position_cov_floor" default="true" />
 	  <arg name="dekf_position_cov_floor_std" default="0.08" />
 	  <arg name="dekf_position_cov_floor_stage_dynamic_only" default="true" />
-	  <arg name="dekf_enable_stage_dependent_q" default="false" />
+	  <arg name="dekf_enable_stage_dependent_q" default="true" />
 	  <arg name="dekf_dynamic_q_scale" default="1.5" />
 	  <arg name="dekf_landing_q_scale" default="1.0" />
 	  <arg name="dekf_enable_stage_dependent_dgo_r" default="false" />

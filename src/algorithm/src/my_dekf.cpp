@@ -131,14 +131,14 @@ public:
 	pnh_.param("delayed_validation_enabled", delayed_validation_enabled_, false);
 	        pnh_.param("delayed_validation_gt_max_dt", delayed_validation_gt_max_dt_, 0.05);
 	        pnh_.param("mode", fusion_mode_, 4);
-	        pnh_.param("trace_enabled", trace_enabled_, false);
+	        pnh_.param("trace_enabled", trace_enabled_, true);
 		        pnh_.param("trace_dgo_only", trace_dgo_only_, true);
 	        // Position covariance floor
-	        pnh_.param("enable_position_cov_floor", enable_position_cov_floor_, false);
+	        pnh_.param("enable_position_cov_floor", enable_position_cov_floor_, true);
 	        pnh_.param("position_cov_floor_std", position_cov_floor_std_, 0.08);
 	        pnh_.param("position_cov_floor_stage_dynamic_only", position_cov_floor_stage_dynamic_only_, true);
 	        // Stage-dependent Q
-	        pnh_.param("enable_stage_dependent_q", enable_stage_dependent_q_, false);
+	        pnh_.param("enable_stage_dependent_q", enable_stage_dependent_q_, true);
 	        pnh_.param("dynamic_q_scale", dynamic_q_scale_, 1.5);
 	        pnh_.param("landing_q_scale", landing_q_scale_, 1.0);
 	        // Stage-dependent DGO position R
@@ -734,7 +734,7 @@ public:
 	    std::ofstream validation_csv_;
 
 	    // Trace 模块 (详细日志, 默认关闭)
-	    bool trace_enabled_ = false;
+	    bool trace_enabled_ = true;
 	    bool trace_dgo_only_ = true;
 	    std::ofstream delayed_trace_csv_;
 	    std::ofstream replay_trace_csv_;
@@ -742,12 +742,12 @@ public:
 	    std::ofstream dgo_velocity_source_csv_;
 
 	    // Position covariance floor
-	    bool enable_position_cov_floor_ = false;
+	    bool enable_position_cov_floor_ = true;
 	    double position_cov_floor_std_ = 0.08;
 	    bool position_cov_floor_stage_dynamic_only_ = true;
 
 	    // Stage-dependent Q
-	    bool enable_stage_dependent_q_ = false;
+	    bool enable_stage_dependent_q_ = true;
 	    double dynamic_q_scale_ = 1.5;
 	    double landing_q_scale_ = 1.0;
 
