@@ -145,6 +145,23 @@ public:
 	        pnh_.param("enable_stage_dependent_dgo_r", enable_stage_dependent_dgo_r_, false);
 	        pnh_.param("dynamic_dgo_position_noise_std", dynamic_dgo_position_noise_std_, 0.07);
 	        pnh_.param("landing_dgo_position_noise_std", landing_dgo_position_noise_std_, 0.10);
+        // DGO health adaptive R
+        pnh_.param("enable_dgo_health_adaptive_r", enable_dgo_health_adaptive_r_, false);
+        pnh_.param("dgo_health_good_sigma_p", dgo_health_good_sigma_p_, 0.07);
+        pnh_.param("dgo_health_normal_sigma_p", dgo_health_normal_sigma_p_, 0.08);
+        pnh_.param("dgo_health_suspect_sigma_p", dgo_health_suspect_sigma_p_, 0.12);
+        pnh_.param("dgo_health_bad_sigma_p", dgo_health_bad_sigma_p_, 0.20);
+        pnh_.param("dgo_health_bad_reject", dgo_health_bad_reject_, false);
+        pnh_.param("dgo_health_window_size", dgo_health_window_size_, 20);
+        pnh_.param("dgo_health_ema_alpha", dgo_health_ema_alpha_, 0.15);
+        pnh_.param("dgo_health_residual_good", dgo_health_residual_good_, 0.08);
+        pnh_.param("dgo_health_residual_bad", dgo_health_residual_bad_, 0.25);
+        pnh_.param("dgo_health_nis_good", dgo_health_nis_good_, 3.0);
+        pnh_.param("dgo_health_nis_bad", dgo_health_nis_bad_, 12.0);
+        pnh_.param("dgo_health_vel_res_good", dgo_health_vel_res_good_, 0.20);
+        pnh_.param("dgo_health_vel_res_bad", dgo_health_vel_res_bad_, 0.60);
+        pnh_.param("dgo_health_replay_delta_good", dgo_health_replay_delta_good_, -0.005);
+        pnh_.param("dgo_health_replay_delta_bad", dgo_health_replay_delta_bad_, 0.002);
 	        ROS_DEBUG("[DEKF] param mode=%d", fusion_mode_);
 
         // 根据 fusion_mode 设置传感器开关
@@ -426,6 +443,7 @@ public:
 		        if (replay_trace_csv_.is_open()) replay_trace_csv_.close();
 		        if (state_trace_csv_.is_open()) state_trace_csv_.close();
 		        if (dgo_velocity_source_csv_.is_open()) dgo_velocity_source_csv_.close();
+        if (dgo_health_trace_csv_.is_open()) dgo_health_trace_csv_.close();
 		    }
 
 	private:
@@ -484,6 +502,9 @@ public:
         ros::Time target_dgo_stamp;
         Eigen::Vector3d self_velocity = Eigen::Vector3d::Zero();
         Eigen::Vector3d target_velocity = Eigen::Vector3d::Zero();
+        double dgo_sigma_p_override = std::numeric_limits<double>::quiet_NaN();
+        double dgo_health_score = std::numeric_limits<double>::quiet_NaN();
+        int dgo_health_level = -1;
         double alpha = 0.0;
         double theta = 0.0;
         bool has_alpha = false;
@@ -598,7 +619,61 @@ public:
 		            std::numeric_limits<double>::quiet_NaN());
 		    };
 
-		    // 滤波器: 本机到 target_id 的相对位姿/速度估计
+		    
+struct RollingWindow
+{
+    std::deque<double> values;
+    size_t max_size = 20;
+
+    void setMaxSize(size_t n)
+    {
+        max_size = std::max<size_t>(1, n);
+        while (values.size() > max_size)
+            values.pop_front();
+    }
+
+    void push(double v)
+    {
+        if (!std::isfinite(v))
+            return;
+        values.push_back(v);
+        while (values.size() > max_size)
+            values.pop_front();
+    }
+
+    double mean() const
+    {
+        if (values.empty())
+            return std::numeric_limits<double>::quiet_NaN();
+        double s = 0.0;
+        for (double v : values) s += v;
+        return s / static_cast<double>(values.size());
+    }
+
+    size_t size() const { return values.size(); }
+};
+
+struct DgoHealthState
+{
+    double score = 1.0;
+    double sigma_p = 0.08;
+    int level = 0;  // 0=good, 1=normal, 2=suspect, 3=bad
+
+    int consecutive_bad = 0;
+    int consecutive_good = 0;
+
+    RollingWindow residual_window;
+    RollingWindow nis_window;
+    RollingWindow vel_res_window;
+    RollingWindow replay_delta_window;
+
+    double residual_mean = std::numeric_limits<double>::quiet_NaN();
+    double nis_mean = std::numeric_limits<double>::quiet_NaN();
+    double vel_res_mean = std::numeric_limits<double>::quiet_NaN();
+    double replay_delta_mean = std::numeric_limits<double>::quiet_NaN();
+};
+
+// 滤波器: 本机到 target_id 的相对位姿/速度估计
     struct Filter
     {
         int target_id = -1;
@@ -639,6 +714,7 @@ public:
         bool has_last_recovery_dgo = false;
         Eigen::Vector3d last_recovery_dgo_position = Eigen::Vector3d::Zero();
         int consecutive_dgo_gate_fails = 0;
+        DgoHealthState dgo_health;
     };
 
     // DGO 历史观测 (按 UAV 编号缓存)
@@ -734,20 +810,21 @@ public:
 	    std::ofstream validation_csv_;
 
 	    // Trace 模块 (详细日志, 默认关闭)
-	    bool trace_enabled_ = true;
+    bool trace_enabled_ = false;
 	    bool trace_dgo_only_ = true;
 	    std::ofstream delayed_trace_csv_;
 	    std::ofstream replay_trace_csv_;
 	    std::ofstream state_trace_csv_;
 	    std::ofstream dgo_velocity_source_csv_;
+	    std::ofstream dgo_health_trace_csv_;
 
 	    // Position covariance floor
-	    bool enable_position_cov_floor_ = true;
+    bool enable_position_cov_floor_ = false;
 	    double position_cov_floor_std_ = 0.08;
 	    bool position_cov_floor_stage_dynamic_only_ = true;
 
 	    // Stage-dependent Q
-	    bool enable_stage_dependent_q_ = true;
+    bool enable_stage_dependent_q_ = false;
 	    double dynamic_q_scale_ = 1.5;
 	    double landing_q_scale_ = 1.0;
 
@@ -755,6 +832,24 @@ public:
 	    bool enable_stage_dependent_dgo_r_ = false;
 	    double dynamic_dgo_position_noise_std_ = 0.07;
 	    double landing_dgo_position_noise_std_ = 0.10;
+    // DGO health adaptive R
+    bool enable_dgo_health_adaptive_r_ = false;
+    double dgo_health_good_sigma_p_ = 0.07;
+    double dgo_health_normal_sigma_p_ = 0.08;
+    double dgo_health_suspect_sigma_p_ = 0.12;
+	    double dgo_health_bad_sigma_p_ = 0.20;
+	    bool dgo_health_bad_reject_ = false;  // reserved for future bad-health hard reject; currently unused
+    int dgo_health_window_size_ = 20;
+    double dgo_health_ema_alpha_ = 0.15;
+    double dgo_health_residual_good_ = 0.08;
+    double dgo_health_residual_bad_ = 0.25;
+    double dgo_health_nis_good_ = 3.0;
+    double dgo_health_nis_bad_ = 12.0;
+    double dgo_health_vel_res_good_ = 0.20;
+    double dgo_health_vel_res_bad_ = 0.60;
+    double dgo_health_replay_delta_good_ = -0.005;
+    double dgo_health_replay_delta_bad_ = 0.002;
+
 
 	    // 任务阶段
 	    int mission_stage_ = -1;
@@ -1901,6 +1996,10 @@ public:
             init_vel_std_ * init_vel_std_);
         f.stamp = stamp;
         f.initialized = true;
+        f.dgo_health.residual_window.setMaxSize(dgo_health_window_size_);
+        f.dgo_health.nis_window.setMaxSize(dgo_health_window_size_);
+        f.dgo_health.vel_res_window.setMaxSize(dgo_health_window_size_);
+        f.dgo_health.replay_delta_window.setMaxSize(dgo_health_window_size_);
 
         History_Record rec;
         rec.stamp = stamp;
@@ -1996,6 +2095,24 @@ public:
 	            << "rel_vx,rel_vy,rel_vz,gt_rel_vx,gt_rel_vy,gt_rel_vz,"
 	            << "err_vx,err_vy,err_vz,err_norm,frame_assumption\n";
 	        ROS_INFO("[DEKF] DGO velocity source trace: %s", path.c_str());
+
+        const std::string health_path = csv_dir_ + "/" + self_name + "_dgo_health_trace.csv";
+        dgo_health_trace_csv_.open(health_path.c_str(), std::ios::out | std::ios::trunc);
+        if (!dgo_health_trace_csv_.is_open())
+        {
+            ROS_WARN("[DEKF] trace: cannot open %s", health_path.c_str());
+        }
+        else
+        {
+            dgo_health_trace_csv_ << std::fixed << std::setprecision(9);
+            dgo_health_trace_csv_
+                << "time,self_id,target_id,stage,obs_type,"
+                << "residual_norm,nis,vel_res_norm,"
+                << "residual_mean,nis_mean,vel_res_mean,replay_delta_mean,"
+                << "health_score,health_level,sigma_p_eff,"
+                << "accepted,reject_reason\n";
+            ROS_INFO("[DEKF] trace DGO health CSV: %s", health_path.c_str());
+        }
 	    }
 
 	// ═══════════════════════════════════════════════════════════
@@ -2045,6 +2162,73 @@ public:
 	    return sigma_px_;
 	}
 
+	double scoreFromRange(double value, double good, double bad, bool lower_is_better = true) const
+	{
+	    if (!std::isfinite(value))
+	        return 0.5;
+	    if (lower_is_better)
+	    {
+	        if (value <= good) return 1.0;
+	        if (value >= bad) return 0.0;
+	        return 1.0 - (value - good) / (bad - good);
+	    }
+	    else
+	    {
+	        if (value >= good) return 1.0;
+	        if (value <= bad) return 0.0;
+	        return (value - bad) / (good - bad);
+	    }
+	}
+
+	double computeDgoHealthScore(const DgoHealthState &h) const
+	{
+	    const double s_res = scoreFromRange(h.residual_mean, dgo_health_residual_good_, dgo_health_residual_bad_);
+	    const double s_nis = scoreFromRange(h.nis_mean, dgo_health_nis_good_, dgo_health_nis_bad_);
+	    const double s_vel = scoreFromRange(h.vel_res_mean, dgo_health_vel_res_good_, dgo_health_vel_res_bad_);
+	    const double s_replay = scoreFromRange(h.replay_delta_mean, dgo_health_replay_delta_good_, dgo_health_replay_delta_bad_);
+	    double score = 0.35 * s_res + 0.30 * s_nis + 0.20 * s_vel + 0.15 * s_replay;
+	    return std::max(0.0, std::min(1.0, score));
+	}
+
+	void updateDgoHealth(Filter &f) const
+	{
+	    auto &h = f.dgo_health;
+	    h.residual_mean = h.residual_window.mean();
+	    h.nis_mean = h.nis_window.mean();
+	    h.vel_res_mean = h.vel_res_window.mean();
+	    h.replay_delta_mean = h.replay_delta_window.mean();
+	    const double raw_score = computeDgoHealthScore(h);
+	    h.score = (1.0 - dgo_health_ema_alpha_) * h.score + dgo_health_ema_alpha_ * raw_score;
+
+	    if (h.score >= 0.80) h.level = 0;
+	    else if (h.score >= 0.60) h.level = 1;
+	    else if (h.score >= 0.35) h.level = 2;
+	    else h.level = 3;
+
+	    if (h.level >= 2) { ++h.consecutive_bad; h.consecutive_good = 0; }
+	    else { ++h.consecutive_good; h.consecutive_bad = 0; }
+
+	    switch (h.level) {
+	        case 0: h.sigma_p = dgo_health_good_sigma_p_; break;
+	        case 1: h.sigma_p = dgo_health_normal_sigma_p_; break;
+	        case 2: h.sigma_p = dgo_health_suspect_sigma_p_; break;
+	        default: h.sigma_p = dgo_health_bad_sigma_p_; break;
+	    }
+	}
+
+	double adaptiveDgoPositionNoiseStd(const Filter &f, const Observation &obs) const
+	{
+	    double sigma = dgoPositionNoiseStdForStage(obs.mission_stage);
+	    if (!enable_dgo_health_adaptive_r_)
+	        return sigma;
+	    const auto &h = f.dgo_health;
+	    if (h.level == 0) sigma = std::min(sigma, dgo_health_good_sigma_p_);
+	    else if (h.level == 1) sigma = std::max(sigma, dgo_health_normal_sigma_p_);
+	    else if (h.level == 2) sigma = std::max(sigma, dgo_health_suspect_sigma_p_);
+	    else sigma = std::max(sigma, dgo_health_bad_sigma_p_);
+	    return sigma;
+	}
+
 	// ═══════════════════════════════════════════════════════════
 	//  Trace / 日志输出
 	// ═══════════════════════════════════════════════════════════
@@ -2070,7 +2254,32 @@ public:
 	            << gt_rel.x() << ',' << gt_rel.y() << ',' << gt_rel.z() << ','
 	            << error.x() << ',' << error.y() << ',' << error.z() << ',' << error_norm << ','
 	            << "ENU_map_common\n";
-	    }
+	        }
+
+    void writeDgoHealthTrace(const Filter &f, const std::string &obs_type,
+                             double residual_norm, double nis, double vel_res_norm,
+                             double sigma_p_eff, int obs_stage,
+                             bool accepted, const std::string &reject_reason)
+    {
+        if (!dgo_health_trace_csv_.is_open()) return;
+        if (!traceActive()) return;
+        const double t = f.stamp.isZero() ? ros::Time::now().toSec() : f.stamp.toSec();
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        const auto &h = f.dgo_health;
+        dgo_health_trace_csv_
+            << t << ","
+            << uav_id_ << "," << f.target_id << "," << obs_stage << ","
+            << obs_type << ","
+            << residual_norm << "," << nis << "," << vel_res_norm << ","
+            << (std::isfinite(h.residual_mean) ? h.residual_mean : nan) << ","
+            << (std::isfinite(h.nis_mean) ? h.nis_mean : nan) << ","
+            << (std::isfinite(h.vel_res_mean) ? h.vel_res_mean : nan) << ","
+            << (std::isfinite(h.replay_delta_mean) ? h.replay_delta_mean : nan) << ","
+            << h.score << "," << h.level << ","
+            << sigma_p_eff << ","
+            << (accepted ? 1 : 0) << ","
+            << reject_reason << "\n";
+    }
 
 	    void writeDgoVelocityUpdateSummary()
 	    {
@@ -2551,7 +2760,9 @@ public:
 	                R_meas.resize(3, 3);
 	                R_meas.setZero();
 	                {
-	                    const double eff_sigma_p = dgoPositionNoiseStdForStage(obs.mission_stage);
+	                    double eff_sigma_p = dgoPositionNoiseStdForStage(obs.mission_stage);
+	                    if (std::isfinite(obs.dgo_sigma_p_override))
+	                        eff_sigma_p = obs.dgo_sigma_p_override;
 	                    R_meas(0, 0) = eff_sigma_p * eff_sigma_p;
 	                    R_meas(1, 1) = eff_sigma_p * eff_sigma_p;
 	                    R_meas(2, 2) = eff_sigma_p * eff_sigma_p;
@@ -2980,7 +3191,14 @@ public:
         Eigen::MatrixXd H;
         Eigen::MatrixXd R_meas;
 
-        if (!buildObsModel(f.X, obs, Z, residual, H, R_meas))
+        const Observation obs_eff = (obs.type == ObsType::DGO) ? [&]() -> Observation {
+            Observation o = obs;
+            o.dgo_sigma_p_override = adaptiveDgoPositionNoiseStd(f, o);
+            o.dgo_health_score = f.dgo_health.score;
+            o.dgo_health_level = f.dgo_health.level;
+            return o;
+        }() : obs;
+        if (!buildObsModel(f.X, obs_eff, Z, residual, H, R_meas))
         {
             ++f.rejects;
             logObservationRow("current_update", f, obs, 0, 0, 0,
@@ -3039,7 +3257,28 @@ public:
 	                return UpdateStatus::REJECTED;
 	            }
 
-	            // ── 连续 DGO position 硬残差门限失败 → 提前 recovery ──
+	            // DGO health: push rejected residual
+            if (obs_eff.type == ObsType::DGO)
+            {
+                f.dgo_health.residual_window.push(residual_norm);
+                f.dgo_health.nis_window.push(dgo_health_nis_bad_);
+                updateDgoHealth(f);
+            }
+            else if (obs_eff.type == ObsType::DGO_VELOCITY)
+            {
+                f.dgo_health.vel_res_window.push(residual_norm);
+                updateDgoHealth(f);
+            }
+            if (obs_eff.type == ObsType::DGO || obs_eff.type == ObsType::DGO_VELOCITY)
+            {
+                const std::string ot = (obs_eff.type == ObsType::DGO) ? "dgo" : "dgo_velocity";
+                writeDgoHealthTrace(f, ot, residual_norm, std::numeric_limits<double>::quiet_NaN(),
+                                    obs_eff.type == ObsType::DGO_VELOCITY ? residual_norm : std::numeric_limits<double>::quiet_NaN(),
+                                    obs_eff.type == ObsType::DGO ? obs_eff.dgo_sigma_p_override : std::numeric_limits<double>::quiet_NaN(),
+                                    obs_eff.mission_stage, false, gate_reason);
+            }
+
+            // ── 连续 DGO position 硬残差门限失败 → 提前 recovery ──
 	            if (obs.type == ObsType::DGO)
 	            {
 	                f.consecutive_dgo_gate_fails++;
@@ -3120,7 +3359,28 @@ public:
                 return UpdateStatus::REJECTED;
             }
 
-            ++f.rejects;
+                        // DGO health: push rejected NIS
+            if (obs_eff.type == ObsType::DGO)
+            {
+                f.dgo_health.residual_window.push(residual_norm);
+                f.dgo_health.nis_window.push(nis);
+                updateDgoHealth(f);
+            }
+	            else if (obs_eff.type == ObsType::DGO_VELOCITY)
+	            {
+	                f.dgo_health.vel_res_window.push(residual_norm);
+	                updateDgoHealth(f);
+	            }
+	            if (obs_eff.type == ObsType::DGO || obs_eff.type == ObsType::DGO_VELOCITY)
+	            {
+	                const std::string ot = (obs_eff.type == ObsType::DGO) ? "dgo" : "dgo_velocity";
+	                writeDgoHealthTrace(f, ot, residual_norm, nis,
+	                                    obs_eff.type == ObsType::DGO_VELOCITY ? residual_norm : std::numeric_limits<double>::quiet_NaN(),
+	                                    obs_eff.type == ObsType::DGO ? obs_eff.dgo_sigma_p_override : std::numeric_limits<double>::quiet_NaN(),
+	                                    obs_eff.mission_stage, false, "nis_reject");
+	            }
+
+	++f.rejects;
             logObservationRow("current_update", f, obs, 0, 0, 0,
                               obs.type == ObsType::DGO_VELOCITY
                                   ? "dgo_velocity_nis_reject" : "nis_reject", age,
@@ -3148,6 +3408,29 @@ public:
         noteDgoVelocityMetrics(f, obs, residual_norm, nis, kvv);
         incrementAcceptedCounters(f, obs, false);
 
+        // DGO health: push metrics
+        if (obs_eff.type == ObsType::DGO)
+        {
+            f.dgo_health.residual_window.push(residual_norm);
+            f.dgo_health.nis_window.push(nis);
+            updateDgoHealth(f);
+        }
+        else if (obs_eff.type == ObsType::DGO_VELOCITY)
+        {
+            f.dgo_health.vel_res_window.push(residual_norm);
+            updateDgoHealth(f);
+        }
+
+        // DGO health: trace
+        if (obs_eff.type == ObsType::DGO || obs_eff.type == ObsType::DGO_VELOCITY)
+        {
+            const std::string ot = (obs_eff.type == ObsType::DGO) ? "dgo" : "dgo_velocity";
+            writeDgoHealthTrace(f, ot, residual_norm, nis,
+                                obs_eff.type == ObsType::DGO_VELOCITY ? residual.norm() : std::numeric_limits<double>::quiet_NaN(),
+                                obs_eff.type == ObsType::DGO ? obs_eff.dgo_sigma_p_override : std::numeric_limits<double>::quiet_NaN(),
+                                obs_eff.mission_stage, true, "accepted");
+        }
+
         // 缓存 H, K, I_KH 到最新的历史记录 (用于延迟补偿重传播)
         if (!f.cache.empty())
         {
@@ -3155,7 +3438,7 @@ public:
             f.cache.back().K = K;
             // 累乘: 同一历史时刻多次 update 的 I_KH 组合
             f.cache.back().I_KH = I_KH * f.cache.back().I_KH;
-            recordAcceptedObservation(f.cache.back(), obs, false);
+            recordAcceptedObservation(f.cache.back(), obs_eff, false);
             f.cache.back().X_post = f.X;
             f.cache.back().P_post = f.P;
         }
@@ -3363,11 +3646,19 @@ public:
 		        const Vector6d current_before_replay = f.cache.back().X_post;
 		        const ros::Time current_stamp_before = f.cache.back().stamp;
 
-		        std::deque<History_Record> candidate_cache = f.cache;
-		        const uint64_t seq_before = obs_seq_;
-		        const uint64_t gated_seq =
-		            recordAcceptedObservation(candidate_cache[static_cast<size_t>(best_idx)], obs, true,
-		                                      validate_position_update);
+	        std::deque<History_Record> candidate_cache = f.cache;
+	        const uint64_t seq_before = obs_seq_;
+	        // DGO health: generate adaptive obs for delayed update
+	        Observation obs_eff = obs;
+	        if (obs_eff.type == ObsType::DGO)
+	        {
+	            obs_eff.dgo_sigma_p_override = adaptiveDgoPositionNoiseStd(f, obs_eff);
+	            obs_eff.dgo_health_score = f.dgo_health.score;
+	            obs_eff.dgo_health_level = f.dgo_health.level;
+	        }
+	        const uint64_t gated_seq =
+	            recordAcceptedObservation(candidate_cache[static_cast<size_t>(best_idx)], obs_eff, true,
+	                                      validate_position_update);
 
 		        std::string replay_reason;
 		        double replay_residual_norm = std::numeric_limits<double>::quiet_NaN();
@@ -3476,7 +3767,29 @@ public:
                 f.consecutive_dgo_gate_fails = 0;
             }
 
-            ++f.rejects;
+                        // DGO health: push rejected replay metrics
+            if (obs_eff.type == ObsType::DGO)
+            {
+                f.dgo_health.residual_window.push(replay_residual_norm);
+                f.dgo_health.nis_window.push(
+                    std::isfinite(replay_nis) ? replay_nis : dgo_health_nis_bad_);
+                updateDgoHealth(f);
+            }
+	            else if (obs_eff.type == ObsType::DGO_VELOCITY)
+	            {
+	                f.dgo_health.vel_res_window.push(replay_residual_norm);
+	                updateDgoHealth(f);
+	            }
+	            if (obs_eff.type == ObsType::DGO || obs_eff.type == ObsType::DGO_VELOCITY)
+	            {
+	                const std::string ot = (obs_eff.type == ObsType::DGO) ? "dgo" : "dgo_velocity";
+	                writeDgoHealthTrace(f, ot, replay_residual_norm, replay_nis,
+	                                    obs_eff.type == ObsType::DGO_VELOCITY ? replay_residual_norm : std::numeric_limits<double>::quiet_NaN(),
+	                                    obs_eff.type == ObsType::DGO ? obs_eff.dgo_sigma_p_override : std::numeric_limits<double>::quiet_NaN(),
+	                                    obs_eff.mission_stage, false, replay_reason);
+	            }
+
+	++f.rejects;
             logObservationRow("delayed_update", f, obs, 0, 1, 0,
                               "cache_replay_failed_" + replay_reason, age,
                               best_dt,
@@ -3534,8 +3847,46 @@ public:
 		                               trace_ctx.gated_kvv);
 			        incrementAcceptedCounters(f, obs, true);
 
+	        // DGO health: push replay metrics
+	        if (obs_eff.type == ObsType::DGO)
+	        {
+	            f.dgo_health.residual_window.push(replay_residual_norm);
+	            f.dgo_health.nis_window.push(replay_nis);
+
+	            // replay delta: GT error change due to replay
+	            Eigen::Vector3d gt_before_replay, gt_after_replay;
+		            if (getRelativeGroundTruth(uav_id_, obs_eff.target_id,
+		                                       current_stamp_before, gt_before_replay) &&
+		                getRelativeGroundTruth(uav_id_, obs_eff.target_id,
+		                                       f.cache.back().stamp, gt_after_replay))
+	            {
+	                const double err_before = (current_before_replay.head<3>() - gt_before_replay).norm();
+	                const double err_after  = (f.X.head<3>() - gt_after_replay).norm();
+	                f.dgo_health.replay_delta_window.push(err_after - err_before);
+	            }
+
+	            updateDgoHealth(f);
+	        }
+		        else if (obs_eff.type == ObsType::DGO_VELOCITY)
+		        {
+		            f.dgo_health.vel_res_window.push(replay_residual_norm);
+		            updateDgoHealth(f);
+		        }
+
+		        // DGO health: trace delayed accept
+		        if (obs_eff.type == ObsType::DGO || obs_eff.type == ObsType::DGO_VELOCITY)
+		        {
+		            const std::string ot = (obs_eff.type == ObsType::DGO) ? "dgo" : "dgo_velocity";
+		            writeDgoHealthTrace(f, ot, replay_residual_norm, replay_nis,
+		                                obs_eff.type == ObsType::DGO_VELOCITY ? replay_residual_norm : std::numeric_limits<double>::quiet_NaN(),
+		                                obs_eff.type == ObsType::DGO ? obs_eff.dgo_sigma_p_override : std::numeric_limits<double>::quiet_NaN(),
+		                                obs_eff.mission_stage, true, "delayed_accepted");
+		        }
+
 		        if (obs.type == ObsType::DGO)
+		        {
 		            f.consecutive_dgo_gate_fails = 0;
+		        }
 
 		        if (validate_position_update)
 		        {

@@ -102,6 +102,22 @@
 	  <arg name="dekf_enable_stage_dependent_dgo_r" default="false" />
 	  <arg name="dekf_dynamic_dgo_position_noise_std" default="0.07" />
 	  <arg name="dekf_landing_dgo_position_noise_std" default="0.10" />
+  <arg name="dekf_enable_dgo_health_adaptive_r" default="false" />
+  <arg name="dekf_dgo_health_good_sigma_p" default="0.07" />
+  <arg name="dekf_dgo_health_normal_sigma_p" default="0.08" />
+  <arg name="dekf_dgo_health_suspect_sigma_p" default="0.12" />
+  <arg name="dekf_dgo_health_bad_sigma_p" default="0.20" />
+  <arg name="dekf_dgo_health_bad_reject" default="false" />
+  <arg name="dekf_dgo_health_window_size" default="20" />
+  <arg name="dekf_dgo_health_ema_alpha" default="0.15" />
+  <arg name="dekf_dgo_health_residual_good" default="0.08" />
+  <arg name="dekf_dgo_health_residual_bad" default="0.25" />
+  <arg name="dekf_dgo_health_nis_good" default="3.0" />
+  <arg name="dekf_dgo_health_nis_bad" default="12.0" />
+  <arg name="dekf_dgo_health_vel_res_good" default="0.20" />
+  <arg name="dekf_dgo_health_vel_res_bad" default="0.60" />
+  <arg name="dekf_dgo_health_replay_delta_good" default="-0.005" />
+  <arg name="dekf_dgo_health_replay_delta_bad" default="0.002" />
 	  <arg name="run_id" default="" />
 
   <!--
@@ -279,6 +295,22 @@
       <param name="enable_stage_dependent_dgo_r" value="$(arg dekf_enable_stage_dependent_dgo_r)" />
       <param name="dynamic_dgo_position_noise_std" value="$(arg dekf_dynamic_dgo_position_noise_std)" />
       <param name="landing_dgo_position_noise_std" value="$(arg dekf_landing_dgo_position_noise_std)" />
+      <param name="enable_dgo_health_adaptive_r" value="$(arg dekf_enable_dgo_health_adaptive_r)" />
+      <param name="dgo_health_good_sigma_p" value="$(arg dekf_dgo_health_good_sigma_p)" />
+      <param name="dgo_health_normal_sigma_p" value="$(arg dekf_dgo_health_normal_sigma_p)" />
+      <param name="dgo_health_suspect_sigma_p" value="$(arg dekf_dgo_health_suspect_sigma_p)" />
+      <param name="dgo_health_bad_sigma_p" value="$(arg dekf_dgo_health_bad_sigma_p)" />
+      <param name="dgo_health_bad_reject" value="$(arg dekf_dgo_health_bad_reject)" />
+      <param name="dgo_health_window_size" value="$(arg dekf_dgo_health_window_size)" />
+      <param name="dgo_health_ema_alpha" value="$(arg dekf_dgo_health_ema_alpha)" />
+      <param name="dgo_health_residual_good" value="$(arg dekf_dgo_health_residual_good)" />
+      <param name="dgo_health_residual_bad" value="$(arg dekf_dgo_health_residual_bad)" />
+      <param name="dgo_health_nis_good" value="$(arg dekf_dgo_health_nis_good)" />
+      <param name="dgo_health_nis_bad" value="$(arg dekf_dgo_health_nis_bad)" />
+      <param name="dgo_health_vel_res_good" value="$(arg dekf_dgo_health_vel_res_good)" />
+      <param name="dgo_health_vel_res_bad" value="$(arg dekf_dgo_health_vel_res_bad)" />
+      <param name="dgo_health_replay_delta_good" value="$(arg dekf_dgo_health_replay_delta_good)" />
+      <param name="dgo_health_replay_delta_bad" value="$(arg dekf_dgo_health_replay_delta_bad)" />
       <param name="max_history_match_dt" value="$(arg dekf_max_history_match_dt)" />
       <param name="csv_dir" value="$(arg dekf_csv_dir)" />
     </node>
@@ -416,6 +448,22 @@
       <param name="enable_stage_dependent_dgo_r" value="$(arg dekf_enable_stage_dependent_dgo_r)" />
       <param name="dynamic_dgo_position_noise_std" value="$(arg dekf_dynamic_dgo_position_noise_std)" />
       <param name="landing_dgo_position_noise_std" value="$(arg dekf_landing_dgo_position_noise_std)" />
+      <param name="enable_dgo_health_adaptive_r" value="$(arg dekf_enable_dgo_health_adaptive_r)" />
+      <param name="dgo_health_good_sigma_p" value="$(arg dekf_dgo_health_good_sigma_p)" />
+      <param name="dgo_health_normal_sigma_p" value="$(arg dekf_dgo_health_normal_sigma_p)" />
+      <param name="dgo_health_suspect_sigma_p" value="$(arg dekf_dgo_health_suspect_sigma_p)" />
+      <param name="dgo_health_bad_sigma_p" value="$(arg dekf_dgo_health_bad_sigma_p)" />
+      <param name="dgo_health_bad_reject" value="$(arg dekf_dgo_health_bad_reject)" />
+      <param name="dgo_health_window_size" value="$(arg dekf_dgo_health_window_size)" />
+      <param name="dgo_health_ema_alpha" value="$(arg dekf_dgo_health_ema_alpha)" />
+      <param name="dgo_health_residual_good" value="$(arg dekf_dgo_health_residual_good)" />
+      <param name="dgo_health_residual_bad" value="$(arg dekf_dgo_health_residual_bad)" />
+      <param name="dgo_health_nis_good" value="$(arg dekf_dgo_health_nis_good)" />
+      <param name="dgo_health_nis_bad" value="$(arg dekf_dgo_health_nis_bad)" />
+      <param name="dgo_health_vel_res_good" value="$(arg dekf_dgo_health_vel_res_good)" />
+      <param name="dgo_health_vel_res_bad" value="$(arg dekf_dgo_health_vel_res_bad)" />
+      <param name="dgo_health_replay_delta_good" value="$(arg dekf_dgo_health_replay_delta_good)" />
+      <param name="dgo_health_replay_delta_bad" value="$(arg dekf_dgo_health_replay_delta_bad)" />
       <param name="max_history_match_dt" value="$(arg dekf_max_history_match_dt)" />
       <param name="csv_dir" value="$(arg dekf_csv_dir)" />
     </node>
@@ -553,6 +601,22 @@
       <param name="enable_stage_dependent_dgo_r" value="$(arg dekf_enable_stage_dependent_dgo_r)" />
       <param name="dynamic_dgo_position_noise_std" value="$(arg dekf_dynamic_dgo_position_noise_std)" />
       <param name="landing_dgo_position_noise_std" value="$(arg dekf_landing_dgo_position_noise_std)" />
+      <param name="enable_dgo_health_adaptive_r" value="$(arg dekf_enable_dgo_health_adaptive_r)" />
+      <param name="dgo_health_good_sigma_p" value="$(arg dekf_dgo_health_good_sigma_p)" />
+      <param name="dgo_health_normal_sigma_p" value="$(arg dekf_dgo_health_normal_sigma_p)" />
+      <param name="dgo_health_suspect_sigma_p" value="$(arg dekf_dgo_health_suspect_sigma_p)" />
+      <param name="dgo_health_bad_sigma_p" value="$(arg dekf_dgo_health_bad_sigma_p)" />
+      <param name="dgo_health_bad_reject" value="$(arg dekf_dgo_health_bad_reject)" />
+      <param name="dgo_health_window_size" value="$(arg dekf_dgo_health_window_size)" />
+      <param name="dgo_health_ema_alpha" value="$(arg dekf_dgo_health_ema_alpha)" />
+      <param name="dgo_health_residual_good" value="$(arg dekf_dgo_health_residual_good)" />
+      <param name="dgo_health_residual_bad" value="$(arg dekf_dgo_health_residual_bad)" />
+      <param name="dgo_health_nis_good" value="$(arg dekf_dgo_health_nis_good)" />
+      <param name="dgo_health_nis_bad" value="$(arg dekf_dgo_health_nis_bad)" />
+      <param name="dgo_health_vel_res_good" value="$(arg dekf_dgo_health_vel_res_good)" />
+      <param name="dgo_health_vel_res_bad" value="$(arg dekf_dgo_health_vel_res_bad)" />
+      <param name="dgo_health_replay_delta_good" value="$(arg dekf_dgo_health_replay_delta_good)" />
+      <param name="dgo_health_replay_delta_bad" value="$(arg dekf_dgo_health_replay_delta_bad)" />
       <param name="max_history_match_dt" value="$(arg dekf_max_history_match_dt)" />
       <param name="csv_dir" value="$(arg dekf_csv_dir)" />
     </node>
@@ -690,6 +754,22 @@
       <param name="enable_stage_dependent_dgo_r" value="$(arg dekf_enable_stage_dependent_dgo_r)" />
       <param name="dynamic_dgo_position_noise_std" value="$(arg dekf_dynamic_dgo_position_noise_std)" />
       <param name="landing_dgo_position_noise_std" value="$(arg dekf_landing_dgo_position_noise_std)" />
+      <param name="enable_dgo_health_adaptive_r" value="$(arg dekf_enable_dgo_health_adaptive_r)" />
+      <param name="dgo_health_good_sigma_p" value="$(arg dekf_dgo_health_good_sigma_p)" />
+      <param name="dgo_health_normal_sigma_p" value="$(arg dekf_dgo_health_normal_sigma_p)" />
+      <param name="dgo_health_suspect_sigma_p" value="$(arg dekf_dgo_health_suspect_sigma_p)" />
+      <param name="dgo_health_bad_sigma_p" value="$(arg dekf_dgo_health_bad_sigma_p)" />
+      <param name="dgo_health_bad_reject" value="$(arg dekf_dgo_health_bad_reject)" />
+      <param name="dgo_health_window_size" value="$(arg dekf_dgo_health_window_size)" />
+      <param name="dgo_health_ema_alpha" value="$(arg dekf_dgo_health_ema_alpha)" />
+      <param name="dgo_health_residual_good" value="$(arg dekf_dgo_health_residual_good)" />
+      <param name="dgo_health_residual_bad" value="$(arg dekf_dgo_health_residual_bad)" />
+      <param name="dgo_health_nis_good" value="$(arg dekf_dgo_health_nis_good)" />
+      <param name="dgo_health_nis_bad" value="$(arg dekf_dgo_health_nis_bad)" />
+      <param name="dgo_health_vel_res_good" value="$(arg dekf_dgo_health_vel_res_good)" />
+      <param name="dgo_health_vel_res_bad" value="$(arg dekf_dgo_health_vel_res_bad)" />
+      <param name="dgo_health_replay_delta_good" value="$(arg dekf_dgo_health_replay_delta_good)" />
+      <param name="dgo_health_replay_delta_bad" value="$(arg dekf_dgo_health_replay_delta_bad)" />
       <param name="max_history_match_dt" value="$(arg dekf_max_history_match_dt)" />
       <param name="csv_dir" value="$(arg dekf_csv_dir)" />
     </node>
