@@ -139,16 +139,16 @@ public:
 	        pnh_.param("position_cov_floor_stage_dynamic_only", position_cov_floor_stage_dynamic_only_, true);
 	        // Stage-dependent Q
 	        pnh_.param("enable_stage_dependent_q", enable_stage_dependent_q_, true);
-	        pnh_.param("dynamic_q_scale", dynamic_q_scale_, 1.5);
+	        pnh_.param("dynamic_q_scale", dynamic_q_scale_, 1.75);
 	        pnh_.param("landing_q_scale", landing_q_scale_, 1.0);
 	        // Stage-dependent DGO position R
 	        pnh_.param("enable_stage_dependent_dgo_r", enable_stage_dependent_dgo_r_, false);
-	        pnh_.param("dynamic_dgo_position_noise_std", dynamic_dgo_position_noise_std_, 0.07);
+	        pnh_.param("dynamic_dgo_position_noise_std", dynamic_dgo_position_noise_std_, 0.08);
 	        pnh_.param("landing_dgo_position_noise_std", landing_dgo_position_noise_std_, 0.10);
         // DGO health adaptive R
-        pnh_.param("enable_dgo_health_adaptive_r", enable_dgo_health_adaptive_r_, false);
-        pnh_.param("dgo_health_good_sigma_p", dgo_health_good_sigma_p_, 0.07);
-        pnh_.param("dgo_health_normal_sigma_p", dgo_health_normal_sigma_p_, 0.08);
+        pnh_.param("enable_dgo_health_adaptive_r", enable_dgo_health_adaptive_r_, true);
+        pnh_.param("dgo_health_good_sigma_p", dgo_health_good_sigma_p_, 0.08);
+        pnh_.param("dgo_health_normal_sigma_p", dgo_health_normal_sigma_p_, 0.09);
         pnh_.param("dgo_health_suspect_sigma_p", dgo_health_suspect_sigma_p_, 0.12);
         pnh_.param("dgo_health_bad_sigma_p", dgo_health_bad_sigma_p_, 0.20);
         pnh_.param("dgo_health_bad_reject", dgo_health_bad_reject_, false);
@@ -825,17 +825,17 @@ struct DgoHealthState
 
 	    // Stage-dependent Q
     bool enable_stage_dependent_q_ = false;
-	    double dynamic_q_scale_ = 1.5;
+	    double dynamic_q_scale_ = 1.75;
 	    double landing_q_scale_ = 1.0;
 
 	    // Stage-dependent DGO position R
 	    bool enable_stage_dependent_dgo_r_ = false;
-	    double dynamic_dgo_position_noise_std_ = 0.07;
+	    double dynamic_dgo_position_noise_std_ = 0.08;
 	    double landing_dgo_position_noise_std_ = 0.10;
     // DGO health adaptive R
-    bool enable_dgo_health_adaptive_r_ = false;
-    double dgo_health_good_sigma_p_ = 0.07;
-    double dgo_health_normal_sigma_p_ = 0.08;
+    bool enable_dgo_health_adaptive_r_ = true;
+    double dgo_health_good_sigma_p_ = 0.08;
+    double dgo_health_normal_sigma_p_ = 0.09;
     double dgo_health_suspect_sigma_p_ = 0.12;
 	    double dgo_health_bad_sigma_p_ = 0.20;
 	    bool dgo_health_bad_reject_ = false;  // reserved for future bad-health hard reject; currently unused
@@ -2222,7 +2222,7 @@ struct DgoHealthState
 	    if (!enable_dgo_health_adaptive_r_)
 	        return sigma;
 	    const auto &h = f.dgo_health;
-	    if (h.level == 0) sigma = std::min(sigma, dgo_health_good_sigma_p_);
+	    if (h.level == 0) sigma = std::max(sigma, dgo_health_good_sigma_p_);
 	    else if (h.level == 1) sigma = std::max(sigma, dgo_health_normal_sigma_p_);
 	    else if (h.level == 2) sigma = std::max(sigma, dgo_health_suspect_sigma_p_);
 	    else sigma = std::max(sigma, dgo_health_bad_sigma_p_);

@@ -97,14 +97,14 @@
 	  <arg name="dekf_position_cov_floor_std" default="0.08" />
 	  <arg name="dekf_position_cov_floor_stage_dynamic_only" default="true" />
 	  <arg name="dekf_enable_stage_dependent_q" default="true" />
-	  <arg name="dekf_dynamic_q_scale" default="1.5" />
+	  <arg name="dekf_dynamic_q_scale" default="1.75" />
 	  <arg name="dekf_landing_q_scale" default="1.0" />
 	  <arg name="dekf_enable_stage_dependent_dgo_r" default="false" />
-	  <arg name="dekf_dynamic_dgo_position_noise_std" default="0.07" />
+	  <arg name="dekf_dynamic_dgo_position_noise_std" default="0.08" />
 	  <arg name="dekf_landing_dgo_position_noise_std" default="0.10" />
-  <arg name="dekf_enable_dgo_health_adaptive_r" default="false" />
-  <arg name="dekf_dgo_health_good_sigma_p" default="0.07" />
-  <arg name="dekf_dgo_health_normal_sigma_p" default="0.08" />
+	  <arg name="dekf_enable_dgo_health_adaptive_r" default="true" />
+	  <arg name="dekf_dgo_health_good_sigma_p" default="0.08" />
+	  <arg name="dekf_dgo_health_normal_sigma_p" default="0.09" />
   <arg name="dekf_dgo_health_suspect_sigma_p" default="0.12" />
   <arg name="dekf_dgo_health_bad_sigma_p" default="0.20" />
   <arg name="dekf_dgo_health_bad_reject" default="false" />
