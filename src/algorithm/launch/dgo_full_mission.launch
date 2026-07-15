@@ -118,6 +118,17 @@
   <arg name="dekf_dgo_health_vel_res_bad" default="0.60" />
   <arg name="dekf_dgo_health_replay_delta_good" default="-0.005" />
   <arg name="dekf_dgo_health_replay_delta_bad" default="0.002" />
+  <arg name="dekf_dgo_health_enable_uwb_consistency" default="true" />
+  <arg name="dekf_dgo_health_uwb_consistency_good" default="0.08" />
+  <arg name="dekf_dgo_health_uwb_consistency_bad" default="0.30" />
+  <arg name="dekf_dgo_health_uwb_consistency_weight" default="1.0" />
+  <arg name="dekf_dgo_health_uwb_max_age" default="0.20" />
+
+  <arg name="dekf_dgo_health_enable_bidirectional_consistency" default="true" />
+  <arg name="dekf_dgo_health_bidirectional_good" default="0.08" />
+  <arg name="dekf_dgo_health_bidirectional_bad" default="0.35" />
+  <arg name="dekf_dgo_health_bidirectional_weight" default="1.0" />
+  <arg name="dekf_dgo_health_bidirectional_max_dt" default="0.08" />
 	  <arg name="run_id" default="" />
 
   <!--
@@ -311,6 +322,16 @@
       <param name="dgo_health_vel_res_bad" value="$(arg dekf_dgo_health_vel_res_bad)" />
       <param name="dgo_health_replay_delta_good" value="$(arg dekf_dgo_health_replay_delta_good)" />
       <param name="dgo_health_replay_delta_bad" value="$(arg dekf_dgo_health_replay_delta_bad)" />
+      <param name="dgo_health_enable_uwb_consistency" value="$(arg dekf_dgo_health_enable_uwb_consistency)" />
+      <param name="dgo_health_uwb_consistency_good" value="$(arg dekf_dgo_health_uwb_consistency_good)" />
+      <param name="dgo_health_uwb_consistency_bad" value="$(arg dekf_dgo_health_uwb_consistency_bad)" />
+      <param name="dgo_health_uwb_consistency_weight" value="$(arg dekf_dgo_health_uwb_consistency_weight)" />
+      <param name="dgo_health_uwb_max_age" value="$(arg dekf_dgo_health_uwb_max_age)" />
+      <param name="dgo_health_enable_bidirectional_consistency" value="$(arg dekf_dgo_health_enable_bidirectional_consistency)" />
+      <param name="dgo_health_bidirectional_good" value="$(arg dekf_dgo_health_bidirectional_good)" />
+      <param name="dgo_health_bidirectional_bad" value="$(arg dekf_dgo_health_bidirectional_bad)" />
+      <param name="dgo_health_bidirectional_weight" value="$(arg dekf_dgo_health_bidirectional_weight)" />
+      <param name="dgo_health_bidirectional_max_dt" value="$(arg dekf_dgo_health_bidirectional_max_dt)" />
       <param name="max_history_match_dt" value="$(arg dekf_max_history_match_dt)" />
       <param name="csv_dir" value="$(arg dekf_csv_dir)" />
     </node>
@@ -464,6 +485,16 @@
       <param name="dgo_health_vel_res_bad" value="$(arg dekf_dgo_health_vel_res_bad)" />
       <param name="dgo_health_replay_delta_good" value="$(arg dekf_dgo_health_replay_delta_good)" />
       <param name="dgo_health_replay_delta_bad" value="$(arg dekf_dgo_health_replay_delta_bad)" />
+      <param name="dgo_health_enable_uwb_consistency" value="$(arg dekf_dgo_health_enable_uwb_consistency)" />
+      <param name="dgo_health_uwb_consistency_good" value="$(arg dekf_dgo_health_uwb_consistency_good)" />
+      <param name="dgo_health_uwb_consistency_bad" value="$(arg dekf_dgo_health_uwb_consistency_bad)" />
+      <param name="dgo_health_uwb_consistency_weight" value="$(arg dekf_dgo_health_uwb_consistency_weight)" />
+      <param name="dgo_health_uwb_max_age" value="$(arg dekf_dgo_health_uwb_max_age)" />
+      <param name="dgo_health_enable_bidirectional_consistency" value="$(arg dekf_dgo_health_enable_bidirectional_consistency)" />
+      <param name="dgo_health_bidirectional_good" value="$(arg dekf_dgo_health_bidirectional_good)" />
+      <param name="dgo_health_bidirectional_bad" value="$(arg dekf_dgo_health_bidirectional_bad)" />
+      <param name="dgo_health_bidirectional_weight" value="$(arg dekf_dgo_health_bidirectional_weight)" />
+      <param name="dgo_health_bidirectional_max_dt" value="$(arg dekf_dgo_health_bidirectional_max_dt)" />
       <param name="max_history_match_dt" value="$(arg dekf_max_history_match_dt)" />
       <param name="csv_dir" value="$(arg dekf_csv_dir)" />
     </node>
@@ -617,6 +648,16 @@
       <param name="dgo_health_vel_res_bad" value="$(arg dekf_dgo_health_vel_res_bad)" />
       <param name="dgo_health_replay_delta_good" value="$(arg dekf_dgo_health_replay_delta_good)" />
       <param name="dgo_health_replay_delta_bad" value="$(arg dekf_dgo_health_replay_delta_bad)" />
+      <param name="dgo_health_enable_uwb_consistency" value="$(arg dekf_dgo_health_enable_uwb_consistency)" />
+      <param name="dgo_health_uwb_consistency_good" value="$(arg dekf_dgo_health_uwb_consistency_good)" />
+      <param name="dgo_health_uwb_consistency_bad" value="$(arg dekf_dgo_health_uwb_consistency_bad)" />
+      <param name="dgo_health_uwb_consistency_weight" value="$(arg dekf_dgo_health_uwb_consistency_weight)" />
+      <param name="dgo_health_uwb_max_age" value="$(arg dekf_dgo_health_uwb_max_age)" />
+      <param name="dgo_health_enable_bidirectional_consistency" value="$(arg dekf_dgo_health_enable_bidirectional_consistency)" />
+      <param name="dgo_health_bidirectional_good" value="$(arg dekf_dgo_health_bidirectional_good)" />
+      <param name="dgo_health_bidirectional_bad" value="$(arg dekf_dgo_health_bidirectional_bad)" />
+      <param name="dgo_health_bidirectional_weight" value="$(arg dekf_dgo_health_bidirectional_weight)" />
+      <param name="dgo_health_bidirectional_max_dt" value="$(arg dekf_dgo_health_bidirectional_max_dt)" />
       <param name="max_history_match_dt" value="$(arg dekf_max_history_match_dt)" />
       <param name="csv_dir" value="$(arg dekf_csv_dir)" />
     </node>
@@ -770,6 +811,16 @@
       <param name="dgo_health_vel_res_bad" value="$(arg dekf_dgo_health_vel_res_bad)" />
       <param name="dgo_health_replay_delta_good" value="$(arg dekf_dgo_health_replay_delta_good)" />
       <param name="dgo_health_replay_delta_bad" value="$(arg dekf_dgo_health_replay_delta_bad)" />
+      <param name="dgo_health_enable_uwb_consistency" value="$(arg dekf_dgo_health_enable_uwb_consistency)" />
+      <param name="dgo_health_uwb_consistency_good" value="$(arg dekf_dgo_health_uwb_consistency_good)" />
+      <param name="dgo_health_uwb_consistency_bad" value="$(arg dekf_dgo_health_uwb_consistency_bad)" />
+      <param name="dgo_health_uwb_consistency_weight" value="$(arg dekf_dgo_health_uwb_consistency_weight)" />
+      <param name="dgo_health_uwb_max_age" value="$(arg dekf_dgo_health_uwb_max_age)" />
+      <param name="dgo_health_enable_bidirectional_consistency" value="$(arg dekf_dgo_health_enable_bidirectional_consistency)" />
+      <param name="dgo_health_bidirectional_good" value="$(arg dekf_dgo_health_bidirectional_good)" />
+      <param name="dgo_health_bidirectional_bad" value="$(arg dekf_dgo_health_bidirectional_bad)" />
+      <param name="dgo_health_bidirectional_weight" value="$(arg dekf_dgo_health_bidirectional_weight)" />
+      <param name="dgo_health_bidirectional_max_dt" value="$(arg dekf_dgo_health_bidirectional_max_dt)" />
       <param name="max_history_match_dt" value="$(arg dekf_max_history_match_dt)" />
       <param name="csv_dir" value="$(arg dekf_csv_dir)" />
     </node>

@@ -162,6 +162,18 @@ public:
         pnh_.param("dgo_health_vel_res_bad", dgo_health_vel_res_bad_, 0.60);
         pnh_.param("dgo_health_replay_delta_good", dgo_health_replay_delta_good_, -0.005);
         pnh_.param("dgo_health_replay_delta_bad", dgo_health_replay_delta_bad_, 0.002);
+        // UWB consistency
+        pnh_.param("dgo_health_enable_uwb_consistency", dgo_health_enable_uwb_consistency_, true);
+        pnh_.param("dgo_health_uwb_consistency_good", dgo_health_uwb_consistency_good_, 0.08);
+        pnh_.param("dgo_health_uwb_consistency_bad", dgo_health_uwb_consistency_bad_, 0.30);
+        pnh_.param("dgo_health_uwb_consistency_weight", dgo_health_uwb_consistency_weight_, 1.0);
+        pnh_.param("dgo_health_uwb_max_age", dgo_health_uwb_max_age_, 0.20);
+        // Bidirectional consistency
+        pnh_.param("dgo_health_enable_bidirectional_consistency", dgo_health_enable_bidirectional_consistency_, true);
+        pnh_.param("dgo_health_bidirectional_good", dgo_health_bidirectional_good_, 0.08);
+        pnh_.param("dgo_health_bidirectional_bad", dgo_health_bidirectional_bad_, 0.35);
+        pnh_.param("dgo_health_bidirectional_weight", dgo_health_bidirectional_weight_, 1.0);
+        pnh_.param("dgo_health_bidirectional_max_dt", dgo_health_bidirectional_max_dt_, 0.08);
 	        ROS_DEBUG("[DEKF] param mode=%d", fusion_mode_);
 
         // 根据 fusion_mode 设置传感器开关
@@ -310,6 +322,8 @@ public:
         }
 
         dgo_cache_.resize(uav_num_);
+        latest_uwb_range_.resize(uav_num_);
+        peer_dekf_cache_.resize(uav_num_);
 
         // 编队初始 offset: 2x2 方阵, z=0 (已知编队)
         initial_offsets_.resize(uav_num_);
@@ -427,6 +441,19 @@ public:
 		    // 任务阶段订阅
 		    stage_sub_ = nh_.subscribe<std_msgs::UInt8>(
 		        "/formation/stage", 1, &DEKF::stageCallback, this);
+
+
+		// Peer DEKF subscribers (for bidirectional DGO health consistency)
+		for (int peer = 0; peer < uav_num_; ++peer)
+		{
+		    if (peer == uav_id_) continue;
+		    const std::string topic = "/iris_" + std::to_string(peer)
+		        + "/dekf/iris_" + std::to_string(uav_id_);
+		    peer_dekf_subs_.push_back(
+		        nh_.subscribe<nav_msgs::Odometry>(
+		            topic, 50,
+		            boost::bind(&DEKF::peerDekfCallback, this, _1, peer)));
+		}
 
 		    openCsv();
 
@@ -620,6 +647,13 @@ public:
 		    };
 
 		    
+struct LatestUwbRange
+{
+    bool valid = false;
+    ros::Time stamp;
+    double range = std::numeric_limits<double>::quiet_NaN();
+};
+
 struct RollingWindow
 {
     std::deque<double> values;
@@ -666,11 +700,15 @@ struct DgoHealthState
     RollingWindow nis_window;
     RollingWindow vel_res_window;
     RollingWindow replay_delta_window;
+    RollingWindow uwb_consistency_window;
+    RollingWindow bidirectional_consistency_window;
 
     double residual_mean = std::numeric_limits<double>::quiet_NaN();
     double nis_mean = std::numeric_limits<double>::quiet_NaN();
     double vel_res_mean = std::numeric_limits<double>::quiet_NaN();
     double replay_delta_mean = std::numeric_limits<double>::quiet_NaN();
+    double uwb_consistency_mean = std::numeric_limits<double>::quiet_NaN();
+    double bidirectional_consistency_mean = std::numeric_limits<double>::quiet_NaN();
 };
 
 // 滤波器: 本机到 target_id 的相对位姿/速度估计
@@ -810,7 +848,7 @@ struct DgoHealthState
 	    std::ofstream validation_csv_;
 
 	    // Trace 模块 (详细日志, 默认关闭)
-    bool trace_enabled_ = false;
+    bool trace_enabled_ = true;
 	    bool trace_dgo_only_ = true;
 	    std::ofstream delayed_trace_csv_;
 	    std::ofstream replay_trace_csv_;
@@ -849,6 +887,18 @@ struct DgoHealthState
     double dgo_health_vel_res_bad_ = 0.60;
     double dgo_health_replay_delta_good_ = -0.005;
     double dgo_health_replay_delta_bad_ = 0.002;
+    // UWB consistency
+    bool dgo_health_enable_uwb_consistency_ = true;
+    double dgo_health_uwb_consistency_good_ = 0.08;
+    double dgo_health_uwb_consistency_bad_ = 0.30;
+    double dgo_health_uwb_consistency_weight_ = 1.0;
+    double dgo_health_uwb_max_age_ = 0.20;
+    // Bidirectional consistency
+    bool dgo_health_enable_bidirectional_consistency_ = true;
+    double dgo_health_bidirectional_good_ = 0.08;
+    double dgo_health_bidirectional_bad_ = 0.35;
+    double dgo_health_bidirectional_weight_ = 1.0;
+    double dgo_health_bidirectional_max_dt_ = 0.08;
 
 
 	    // 任务阶段
@@ -859,8 +909,12 @@ struct DgoHealthState
 	    ros::Subscriber uwb_sub_;
 	    ros::Subscriber camera_sub_;
 	    ros::Subscriber stage_sub_;
-	    std::vector<Filter> filters_;
-	    std::vector<std::deque<DGOSample>> dgo_cache_;
+    std::vector<Filter> filters_;
+    std::vector<std::deque<DGOSample>> dgo_cache_;
+    std::vector<LatestUwbRange> latest_uwb_range_;
+    struct PeerDekfSample { ros::Time stamp; Eigen::Vector3d position = Eigen::Vector3d::Zero(); };
+    std::vector<std::deque<PeerDekfSample>> peer_dekf_cache_;
+    std::vector<ros::Subscriber> peer_dekf_subs_;
 
 	    // GT 真值缓存 (来自 /gazebo/model_states, 用于 delayed update 验证)
 	    std::deque<GtWorldSample> model_gt_buffer_;
@@ -1763,14 +1817,20 @@ struct DgoHealthState
     // UWB 回调: 收到 uwb_processed 后, 为每个 target 生成测距观测
     void uwbCallback(const data_process::UwbProcessed::ConstPtr &msg)
     {
-        if (!enable_uwb_update_)
-            return;
         for (size_t i = 0; i < msg->target_ids.size() && i < msg->distances.size(); ++i)
         {
             int target = msg->target_ids[i];
             if (target < 0 || target >= uav_num_ || target == uav_id_)
                 continue;
             if (!std::isfinite(msg->distances[i]) || msg->distances[i] < 0.05)
+                continue;
+
+            // Always cache UWB for health (even mode=1 DGO-only)
+            latest_uwb_range_[target].valid = true;
+            latest_uwb_range_[target].stamp = msg->header.stamp;
+            latest_uwb_range_[target].range = msg->distances[i];
+
+            if (!enable_uwb_update_)
                 continue;
 
 	            Observation obs;
@@ -1822,6 +1882,21 @@ struct DgoHealthState
 	    {
 	        mission_stage_ = static_cast<int>(msg->data);
 	    }
+
+	void peerDekfCallback(const nav_msgs::Odometry::ConstPtr &msg, int peer_id)
+	{
+	    PeerDekfSample s;
+	    s.stamp = msg->header.stamp;
+	    s.position = Eigen::Vector3d(
+	        msg->pose.pose.position.x,
+	        msg->pose.pose.position.y,
+	        msg->pose.pose.position.z);
+	    auto &buf = peer_dekf_cache_[peer_id];
+	    buf.push_back(s);
+	    while (buf.size() > 200)
+	        buf.pop_front();
+	}
+
 
 	    // ── GT 真值回调 ──────────────────────────────────────
 	    int findModelIndex(const gazebo_msgs::ModelStates::ConstPtr &msg,
@@ -2109,6 +2184,7 @@ struct DgoHealthState
                 << "time,self_id,target_id,stage,obs_type,"
                 << "residual_norm,nis,vel_res_norm,"
                 << "residual_mean,nis_mean,vel_res_mean,replay_delta_mean,"
+                << "uwb_consistency_mean,bidirectional_consistency_mean,"
                 << "health_score,health_level,sigma_p_eff,"
                 << "accepted,reject_reason\n";
             ROS_INFO("[DEKF] trace DGO health CSV: %s", health_path.c_str());
@@ -2180,35 +2256,97 @@ struct DgoHealthState
 	    }
 	}
 
-	double computeDgoHealthScore(const DgoHealthState &h) const
+	bool findNearestPeerDekf(int peer_id, const ros::Time &stamp,
+	                            PeerDekfSample &out, double &dt) const
 	{
-	    const double s_res = scoreFromRange(h.residual_mean, dgo_health_residual_good_, dgo_health_residual_bad_);
-	    const double s_nis = scoreFromRange(h.nis_mean, dgo_health_nis_good_, dgo_health_nis_bad_);
-	    const double s_vel = scoreFromRange(h.vel_res_mean, dgo_health_vel_res_good_, dgo_health_vel_res_bad_);
-	    const double s_replay = scoreFromRange(h.replay_delta_mean, dgo_health_replay_delta_good_, dgo_health_replay_delta_bad_);
-	    double score = 0.35 * s_res + 0.30 * s_nis + 0.20 * s_vel + 0.15 * s_replay;
-	    return std::max(0.0, std::min(1.0, score));
+	    const auto &buf = peer_dekf_cache_[peer_id];
+	    if (buf.empty()) return false;
+	    bool found = false;
+	    double best_dt = std::numeric_limits<double>::infinity();
+	    for (const auto &s : buf)
+	    {
+	        const double d = std::abs((s.stamp - stamp).toSec());
+	        if (d < best_dt) { best_dt = d; out = s; found = true; }
+	    }
+	    dt = best_dt;
+	    return found && best_dt <= dgo_health_bidirectional_max_dt_;
 	}
 
-	void updateDgoHealth(Filter &f) const
+	bool computeDgoUwbConsistency(const Filter &f, const Observation &dgo_obs,
+	                                double &consistency, double &uwb_age) const
 	{
-	    auto &h = f.dgo_health;
-	    h.residual_mean = h.residual_window.mean();
-	    h.nis_mean = h.nis_window.mean();
-	    h.vel_res_mean = h.vel_res_window.mean();
-	    h.replay_delta_mean = h.replay_delta_window.mean();
-	    const double raw_score = computeDgoHealthScore(h);
-	    h.score = (1.0 - dgo_health_ema_alpha_) * h.score + dgo_health_ema_alpha_ * raw_score;
+	    consistency = std::numeric_limits<double>::quiet_NaN();
+	    uwb_age = std::numeric_limits<double>::quiet_NaN();
+	    if (!dgo_health_enable_uwb_consistency_) return false;
+	    if (dgo_obs.type != ObsType::DGO) return false;
+	    const int target = dgo_obs.target_id;
+	    if (target < 0 || target >= uav_num_) return false;
+	    const auto &u = latest_uwb_range_[target];
+	    if (!u.valid || !std::isfinite(u.range)) return false;
+	    uwb_age = std::abs((dgo_obs.stamp - u.stamp).toSec());
+	    if (uwb_age > dgo_health_uwb_max_age_) return false;
+	    const double dgo_range = dgo_obs.position.norm();
+	    consistency = std::abs(dgo_range - u.range);
+	    return std::isfinite(consistency);
+	}
 
-	    if (h.score >= 0.80) h.level = 0;
-	    else if (h.score >= 0.60) h.level = 1;
-	    else if (h.score >= 0.35) h.level = 2;
-	    else h.level = 3;
+	int computeBidirectionalConsistency(const Filter &f, const Observation &dgo_obs,
+	                                      double &consistency, double &pair_dt) const
+	{
+	    consistency = std::numeric_limits<double>::quiet_NaN();
+	    pair_dt = std::numeric_limits<double>::quiet_NaN();
+	    if (!dgo_health_enable_bidirectional_consistency_) return -1;
+	    if (dgo_obs.type != ObsType::DGO) return -1;
+	    const int target = dgo_obs.target_id;
+	    PeerDekfSample peer;
+	    if (!findNearestPeerDekf(target, dgo_obs.stamp, peer, pair_dt)) return -1;
+	    consistency = (dgo_obs.position + peer.position).norm();
+	    return std::isfinite(consistency) ? 1 : -1;
+	}
 
-	    if (h.level >= 2) { ++h.consecutive_bad; h.consecutive_good = 0; }
-	    else { ++h.consecutive_good; h.consecutive_bad = 0; }
 
-	    switch (h.level) {
+    double computeDgoHealthScore(const DgoHealthState &h) const
+    {
+        const double s_res = scoreFromRange(h.residual_mean, dgo_health_residual_good_, dgo_health_residual_bad_);
+        const double s_nis = scoreFromRange(h.nis_mean, dgo_health_nis_good_, dgo_health_nis_bad_);
+        const double s_vel = scoreFromRange(h.vel_res_mean, dgo_health_vel_res_good_, dgo_health_vel_res_bad_);
+        const double s_replay = scoreFromRange(h.replay_delta_mean, dgo_health_replay_delta_good_, dgo_health_replay_delta_bad_);
+        const double s_uwb = scoreFromRange(h.uwb_consistency_mean, dgo_health_uwb_consistency_good_, dgo_health_uwb_consistency_bad_);
+        const double s_bidir = scoreFromRange(h.bidirectional_consistency_mean, dgo_health_bidirectional_good_, dgo_health_bidirectional_bad_);
+        double sum = 0.0, wsum = 0.0;
+        auto addScore = [&](double s, double w) { if (std::isfinite(s) && w > 0.0) { sum += w * s; wsum += w; } };
+        addScore(s_res, 1.0);
+        addScore(s_nis, 1.0);
+        addScore(s_vel, 0.5);
+        addScore(s_replay, 1.0);
+        if (dgo_health_enable_uwb_consistency_)
+            addScore(s_uwb, dgo_health_uwb_consistency_weight_);
+        if (dgo_health_enable_bidirectional_consistency_)
+            addScore(s_bidir, dgo_health_bidirectional_weight_);
+        return wsum > 0.0 ? std::max(0.0, std::min(1.0, sum / wsum)) : 1.0;
+    }
+
+    void updateDgoHealth(Filter &f) const
+    {
+        auto &h = f.dgo_health;
+        h.residual_mean = h.residual_window.mean();
+        h.nis_mean = h.nis_window.mean();
+        h.vel_res_mean = h.vel_res_window.mean();
+        h.replay_delta_mean = h.replay_delta_window.mean();
+        h.uwb_consistency_mean = h.uwb_consistency_window.mean();
+        h.bidirectional_consistency_mean = h.bidirectional_consistency_window.mean();
+        const double raw_score = computeDgoHealthScore(h);
+        h.score = (1.0 - dgo_health_ema_alpha_) * h.score + dgo_health_ema_alpha_ * raw_score;
+
+        if (h.score >= 0.80) h.level = 0;
+        else if (h.score >= 0.60) h.level = 1;
+        else if (h.score >= 0.35) h.level = 2;
+        else h.level = 3;
+
+        if (h.level >= 2) { ++h.consecutive_bad; h.consecutive_good = 0; }
+        else { ++h.consecutive_good; h.consecutive_bad = 0; }
+
+        switch (h.level) {
 	        case 0: h.sigma_p = dgo_health_good_sigma_p_; break;
 	        case 1: h.sigma_p = dgo_health_normal_sigma_p_; break;
 	        case 2: h.sigma_p = dgo_health_suspect_sigma_p_; break;
@@ -2275,6 +2413,8 @@ struct DgoHealthState
             << (std::isfinite(h.nis_mean) ? h.nis_mean : nan) << ","
             << (std::isfinite(h.vel_res_mean) ? h.vel_res_mean : nan) << ","
             << (std::isfinite(h.replay_delta_mean) ? h.replay_delta_mean : nan) << ","
+            << (std::isfinite(h.uwb_consistency_mean) ? h.uwb_consistency_mean : nan) << ","
+            << (std::isfinite(h.bidirectional_consistency_mean) ? h.bidirectional_consistency_mean : nan) << ","
             << h.score << "," << h.level << ","
             << sigma_p_eff << ","
             << (accepted ? 1 : 0) << ","
@@ -3852,6 +3992,14 @@ struct DgoHealthState
 	        {
 	            f.dgo_health.residual_window.push(replay_residual_norm);
 	            f.dgo_health.nis_window.push(replay_nis);
+
+	            // UWB consistency for delayed accept
+	            {
+	                double uwb_c = std::numeric_limits<double>::quiet_NaN();
+	                double uwb_a = std::numeric_limits<double>::quiet_NaN();
+	                if (computeDgoUwbConsistency(f, obs_eff, uwb_c, uwb_a))
+	                    f.dgo_health.uwb_consistency_window.push(uwb_c);
+	            }
 
 	            // replay delta: GT error change due to replay
 	            Eigen::Vector3d gt_before_replay, gt_after_replay;
