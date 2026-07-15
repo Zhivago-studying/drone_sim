@@ -104,8 +104,8 @@
 	  <arg name="dekf_landing_dgo_position_noise_std" default="0.10" />
 	  <arg name="dekf_enable_dgo_health_adaptive_r" default="true" />
 	  <arg name="dekf_dgo_health_good_sigma_p" default="0.08" />
-	  <arg name="dekf_dgo_health_normal_sigma_p" default="0.09" />
-  <arg name="dekf_dgo_health_suspect_sigma_p" default="0.12" />
+	  <arg name="dekf_dgo_health_normal_sigma_p" default="0.10" />
+  <arg name="dekf_dgo_health_suspect_sigma_p" default="0.15" />
   <arg name="dekf_dgo_health_bad_sigma_p" default="0.20" />
   <arg name="dekf_dgo_health_bad_reject" default="false" />
   <arg name="dekf_dgo_health_window_size" default="20" />
@@ -119,15 +119,15 @@
   <arg name="dekf_dgo_health_replay_delta_good" default="-0.005" />
   <arg name="dekf_dgo_health_replay_delta_bad" default="0.002" />
   <arg name="dekf_dgo_health_enable_uwb_consistency" default="true" />
-  <arg name="dekf_dgo_health_uwb_consistency_good" default="0.08" />
-  <arg name="dekf_dgo_health_uwb_consistency_bad" default="0.30" />
-  <arg name="dekf_dgo_health_uwb_consistency_weight" default="1.0" />
+  <arg name="dekf_dgo_health_uwb_consistency_good" default="0.06" />
+  <arg name="dekf_dgo_health_uwb_consistency_bad" default="0.20" />
+  <arg name="dekf_dgo_health_uwb_consistency_weight" default="1.5" />
   <arg name="dekf_dgo_health_uwb_max_age" default="0.20" />
 
   <arg name="dekf_dgo_health_enable_bidirectional_consistency" default="true" />
   <arg name="dekf_dgo_health_bidirectional_good" default="0.08" />
   <arg name="dekf_dgo_health_bidirectional_bad" default="0.35" />
-  <arg name="dekf_dgo_health_bidirectional_weight" default="1.0" />
+  <arg name="dekf_dgo_health_bidirectional_weight" default="0.0" />
   <arg name="dekf_dgo_health_bidirectional_max_dt" default="0.08" />
 	  <arg name="run_id" default="" />
 

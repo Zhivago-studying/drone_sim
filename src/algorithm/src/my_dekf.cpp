@@ -148,8 +148,8 @@ public:
         // DGO health adaptive R
         pnh_.param("enable_dgo_health_adaptive_r", enable_dgo_health_adaptive_r_, true);
         pnh_.param("dgo_health_good_sigma_p", dgo_health_good_sigma_p_, 0.08);
-        pnh_.param("dgo_health_normal_sigma_p", dgo_health_normal_sigma_p_, 0.09);
-        pnh_.param("dgo_health_suspect_sigma_p", dgo_health_suspect_sigma_p_, 0.12);
+        pnh_.param("dgo_health_normal_sigma_p", dgo_health_normal_sigma_p_, 0.10);
+        pnh_.param("dgo_health_suspect_sigma_p", dgo_health_suspect_sigma_p_, 0.15);
         pnh_.param("dgo_health_bad_sigma_p", dgo_health_bad_sigma_p_, 0.20);
         pnh_.param("dgo_health_bad_reject", dgo_health_bad_reject_, false);
         pnh_.param("dgo_health_window_size", dgo_health_window_size_, 20);
@@ -164,15 +164,15 @@ public:
         pnh_.param("dgo_health_replay_delta_bad", dgo_health_replay_delta_bad_, 0.002);
         // UWB consistency
         pnh_.param("dgo_health_enable_uwb_consistency", dgo_health_enable_uwb_consistency_, true);
-        pnh_.param("dgo_health_uwb_consistency_good", dgo_health_uwb_consistency_good_, 0.08);
-        pnh_.param("dgo_health_uwb_consistency_bad", dgo_health_uwb_consistency_bad_, 0.30);
-        pnh_.param("dgo_health_uwb_consistency_weight", dgo_health_uwb_consistency_weight_, 1.0);
+        pnh_.param("dgo_health_uwb_consistency_good", dgo_health_uwb_consistency_good_, 0.06);
+        pnh_.param("dgo_health_uwb_consistency_bad", dgo_health_uwb_consistency_bad_, 0.20);
+        pnh_.param("dgo_health_uwb_consistency_weight", dgo_health_uwb_consistency_weight_, 1.5);
         pnh_.param("dgo_health_uwb_max_age", dgo_health_uwb_max_age_, 0.20);
         // Bidirectional consistency
         pnh_.param("dgo_health_enable_bidirectional_consistency", dgo_health_enable_bidirectional_consistency_, true);
         pnh_.param("dgo_health_bidirectional_good", dgo_health_bidirectional_good_, 0.08);
         pnh_.param("dgo_health_bidirectional_bad", dgo_health_bidirectional_bad_, 0.35);
-        pnh_.param("dgo_health_bidirectional_weight", dgo_health_bidirectional_weight_, 1.0);
+        pnh_.param("dgo_health_bidirectional_weight", dgo_health_bidirectional_weight_, 0.0);
         pnh_.param("dgo_health_bidirectional_max_dt", dgo_health_bidirectional_max_dt_, 0.08);
 	        ROS_DEBUG("[DEKF] param mode=%d", fusion_mode_);
 
@@ -873,8 +873,8 @@ struct DgoHealthState
     // DGO health adaptive R
     bool enable_dgo_health_adaptive_r_ = true;
     double dgo_health_good_sigma_p_ = 0.08;
-    double dgo_health_normal_sigma_p_ = 0.09;
-    double dgo_health_suspect_sigma_p_ = 0.12;
+    double dgo_health_normal_sigma_p_ = 0.10;
+    double dgo_health_suspect_sigma_p_ = 0.15;
 	    double dgo_health_bad_sigma_p_ = 0.20;
 	    bool dgo_health_bad_reject_ = false;  // reserved for future bad-health hard reject; currently unused
     int dgo_health_window_size_ = 20;
@@ -889,15 +889,15 @@ struct DgoHealthState
     double dgo_health_replay_delta_bad_ = 0.002;
     // UWB consistency
     bool dgo_health_enable_uwb_consistency_ = true;
-    double dgo_health_uwb_consistency_good_ = 0.08;
-    double dgo_health_uwb_consistency_bad_ = 0.30;
-    double dgo_health_uwb_consistency_weight_ = 1.0;
+    double dgo_health_uwb_consistency_good_ = 0.06;
+    double dgo_health_uwb_consistency_bad_ = 0.20;
+    double dgo_health_uwb_consistency_weight_ = 1.5;
     double dgo_health_uwb_max_age_ = 0.20;
     // Bidirectional consistency
     bool dgo_health_enable_bidirectional_consistency_ = true;
     double dgo_health_bidirectional_good_ = 0.08;
     double dgo_health_bidirectional_bad_ = 0.35;
-    double dgo_health_bidirectional_weight_ = 1.0;
+    double dgo_health_bidirectional_weight_ = 0.0;
     double dgo_health_bidirectional_max_dt_ = 0.08;
 
 
@@ -2312,7 +2312,7 @@ struct DgoHealthState
         const double s_vel = scoreFromRange(h.vel_res_mean, dgo_health_vel_res_good_, dgo_health_vel_res_bad_);
         const double s_replay = scoreFromRange(h.replay_delta_mean, dgo_health_replay_delta_good_, dgo_health_replay_delta_bad_);
         const double s_uwb = scoreFromRange(h.uwb_consistency_mean, dgo_health_uwb_consistency_good_, dgo_health_uwb_consistency_bad_);
-        const double s_bidir = scoreFromRange(h.bidirectional_consistency_mean, dgo_health_bidirectional_good_, dgo_health_bidirectional_bad_);
+
         double sum = 0.0, wsum = 0.0;
         auto addScore = [&](double s, double w) { if (std::isfinite(s) && w > 0.0) { sum += w * s; wsum += w; } };
         addScore(s_res, 1.0);
@@ -2321,9 +2321,21 @@ struct DgoHealthState
         addScore(s_replay, 1.0);
         if (dgo_health_enable_uwb_consistency_)
             addScore(s_uwb, dgo_health_uwb_consistency_weight_);
-        if (dgo_health_enable_bidirectional_consistency_)
-            addScore(s_bidir, dgo_health_bidirectional_weight_);
-        return wsum > 0.0 ? std::max(0.0, std::min(1.0, sum / wsum)) : 1.0;
+
+        double score = wsum > 0.0 ? std::max(0.0, std::min(1.0, sum / wsum)) : 1.0;
+
+        // Bidirectional consistency: penalty multiplier, not additive
+        // When bidir is good (small), penalty ≈ 1.0 (no effect)
+        // When bidir is bad (large), penalty < 1.0 (reduces score)
+        if (dgo_health_enable_bidirectional_consistency_ && dgo_health_bidirectional_weight_ > 0.0 &&
+            std::isfinite(h.bidirectional_consistency_mean))
+        {
+            const double s_bidir = scoreFromRange(h.bidirectional_consistency_mean, dgo_health_bidirectional_good_, dgo_health_bidirectional_bad_);
+            const double penalty = s_bidir + (1.0 - s_bidir) * (1.0 - dgo_health_bidirectional_weight_);
+            score *= std::max(0.0, std::min(1.0, penalty));
+        }
+
+        return std::max(0.0, std::min(1.0, score));
     }
 
     void updateDgoHealth(Filter &f) const
@@ -4112,7 +4124,21 @@ struct DgoHealthState
             }
         }
 
-	        f.pub.publish(msg);
+        // Bidirectional consistency at publish time
+        if (dgo_health_enable_bidirectional_consistency_)
+        {
+            PeerDekfSample peer;
+            double pair_dt = std::numeric_limits<double>::quiet_NaN();
+            if (findNearestPeerDekf(f.target_id, f.stamp, peer, pair_dt))
+            {
+                const Eigen::Vector3d r_ij(f.X[0], f.X[1], f.X[2]);
+                const double bidir = (r_ij + peer.position).norm();
+                f.dgo_health.bidirectional_consistency_window.push(bidir);
+                updateDgoHealth(f);
+            }
+        }
+
+        f.pub.publish(msg);
 	        ++f.publish_count;
 	        logPublishRow(f);
 
