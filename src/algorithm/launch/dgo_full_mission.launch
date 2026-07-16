@@ -35,7 +35,7 @@
   <arg name="dgo_stop_stage" default="7" />
   <arg name="publish_hold_after_stop" default="false" />
   <arg name="ignore_after_mission_complete" default="true" />
-  <arg name="eval_stop_stage" default="7" />
+  <arg name="eval_stop_stage" default="6" />
   <arg name="count_ignored_callbacks" default="true" />
   <arg name="enable_dekf" default="true" />
   <arg name="dekf_rate" default="30.0" />
@@ -82,7 +82,11 @@
 	  <arg name="dekf_camera_alpha_noise_std" default="0.05" />
 	  <arg name="dekf_camera_theta_noise_std" default="0.05" />
 		  <arg name="dekf_use_dgo_velocity" default="true" />
-	  <arg name="dekf_dgo_velocity_noise_std" default="0.25" />
+	    <arg name="dekf_dgo_velocity_noise_std_stage3" default="0.25" />
+  <arg name="dekf_dgo_velocity_noise_std_stage5" default="0.35" />
+  <arg name="dekf_dgo_velocity_noise_std_stage6" default="0.55" />
+  <arg name="dekf_use_dgo_velocity_stage6" default="false" />
+<arg name="dekf_dgo_velocity_noise_std" default="0.25" />
 	  <arg name="dekf_use_dgo_velocity_stage_gate" default="true" />
 	  <arg name="dekf_dgo_velocity_noise_std_dynamic" default="0.35" />
 	  <arg name="dekf_dgo_velocity_noise_std_landing" default="0.70" />
@@ -111,7 +115,10 @@
   <arg name="dekf_uwb_predicted_direction_stage6" default="false" />
   <arg name="dekf_uwb_predicted_direction_min_range" default="0.50" />
   <arg name="dekf_uwb_predicted_direction_noise_scale" default="5.0" />
-  <arg name="dekf_uwb_predicted_direction_max_residual" default="0.35" />
+    <arg name="dekf_uwb_predicted_direction_max_uncertainty" default="0.25" />
+  <arg name="dekf_uwb_predicted_direction_max_recent_age" default="0.50" />
+  <arg name="dekf_uwb_predicted_direction_cooldown" default="2.0" />
+<arg name="dekf_uwb_predicted_direction_max_residual" default="0.35" />
 	  <arg name="dekf_dgo_health_good_sigma_p" default="0.08" />
 	  <arg name="dekf_dgo_health_normal_sigma_p" default="0.10" />
   <arg name="dekf_dgo_health_suspect_sigma_p" default="0.15" />
@@ -266,6 +273,13 @@
       <param name="sigma_theta" value="$(arg dekf_camera_theta_noise_std)" />
       <param name="use_dgo_velocity" value="$(arg dekf_use_dgo_velocity)" />
       <param name="dgo_velocity_noise_std" value="$(arg dekf_dgo_velocity_noise_std)" />
+      <param name="dgo_velocity_noise_std_stage3" value="$(arg dekf_dgo_velocity_noise_std_stage3)" />
+
+      <param name="dgo_velocity_noise_std_stage5" value="$(arg dekf_dgo_velocity_noise_std_stage5)" />
+
+      <param name="dgo_velocity_noise_std_stage6" value="$(arg dekf_dgo_velocity_noise_std_stage6)" />
+
+      <param name="use_dgo_velocity_stage6" value="$(arg dekf_use_dgo_velocity_stage6)" />
       <param name="use_dgo_velocity_stage_gate" value="$(arg dekf_use_dgo_velocity_stage_gate)" />
       <param name="dgo_velocity_noise_std_dynamic" value="$(arg dekf_dgo_velocity_noise_std_dynamic)" />
       <param name="dgo_velocity_noise_std_landing" value="$(arg dekf_dgo_velocity_noise_std_landing)" />
@@ -320,6 +334,11 @@
       <param name="uwb_predicted_direction_min_range" value="$(arg dekf_uwb_predicted_direction_min_range)" />
       <param name="uwb_predicted_direction_noise_scale" value="$(arg dekf_uwb_predicted_direction_noise_scale)" />
       <param name="uwb_predicted_direction_max_residual" value="$(arg dekf_uwb_predicted_direction_max_residual)" />
+      <param name="uwb_predicted_direction_max_uncertainty" value="$(arg dekf_uwb_predicted_direction_max_uncertainty)" />
+
+      <param name="uwb_predicted_direction_max_recent_age" value="$(arg dekf_uwb_predicted_direction_max_recent_age)" />
+
+      <param name="uwb_predicted_direction_cooldown" value="$(arg dekf_uwb_predicted_direction_cooldown)" />
       <param name="uwb_predicted_direction_min_health_level" value="$(arg dekf_uwb_predicted_direction_min_health_level)" />
       <param name="uwb_predicted_direction_stage3" value="$(arg dekf_uwb_predicted_direction_stage3)" />
       <param name="uwb_predicted_direction_stage4" value="$(arg dekf_uwb_predicted_direction_stage4)" />
@@ -438,6 +457,13 @@
       <param name="sigma_theta" value="$(arg dekf_camera_theta_noise_std)" />
       <param name="use_dgo_velocity" value="$(arg dekf_use_dgo_velocity)" />
       <param name="dgo_velocity_noise_std" value="$(arg dekf_dgo_velocity_noise_std)" />
+      <param name="dgo_velocity_noise_std_stage3" value="$(arg dekf_dgo_velocity_noise_std_stage3)" />
+
+      <param name="dgo_velocity_noise_std_stage5" value="$(arg dekf_dgo_velocity_noise_std_stage5)" />
+
+      <param name="dgo_velocity_noise_std_stage6" value="$(arg dekf_dgo_velocity_noise_std_stage6)" />
+
+      <param name="use_dgo_velocity_stage6" value="$(arg dekf_use_dgo_velocity_stage6)" />
       <param name="use_dgo_velocity_stage_gate" value="$(arg dekf_use_dgo_velocity_stage_gate)" />
       <param name="dgo_velocity_noise_std_dynamic" value="$(arg dekf_dgo_velocity_noise_std_dynamic)" />
       <param name="dgo_velocity_noise_std_landing" value="$(arg dekf_dgo_velocity_noise_std_landing)" />
@@ -492,6 +518,11 @@
       <param name="uwb_predicted_direction_min_range" value="$(arg dekf_uwb_predicted_direction_min_range)" />
       <param name="uwb_predicted_direction_noise_scale" value="$(arg dekf_uwb_predicted_direction_noise_scale)" />
       <param name="uwb_predicted_direction_max_residual" value="$(arg dekf_uwb_predicted_direction_max_residual)" />
+      <param name="uwb_predicted_direction_max_uncertainty" value="$(arg dekf_uwb_predicted_direction_max_uncertainty)" />
+
+      <param name="uwb_predicted_direction_max_recent_age" value="$(arg dekf_uwb_predicted_direction_max_recent_age)" />
+
+      <param name="uwb_predicted_direction_cooldown" value="$(arg dekf_uwb_predicted_direction_cooldown)" />
       <param name="uwb_predicted_direction_min_health_level" value="$(arg dekf_uwb_predicted_direction_min_health_level)" />
       <param name="uwb_predicted_direction_stage3" value="$(arg dekf_uwb_predicted_direction_stage3)" />
       <param name="uwb_predicted_direction_stage4" value="$(arg dekf_uwb_predicted_direction_stage4)" />
@@ -610,6 +641,13 @@
       <param name="sigma_theta" value="$(arg dekf_camera_theta_noise_std)" />
       <param name="use_dgo_velocity" value="$(arg dekf_use_dgo_velocity)" />
       <param name="dgo_velocity_noise_std" value="$(arg dekf_dgo_velocity_noise_std)" />
+      <param name="dgo_velocity_noise_std_stage3" value="$(arg dekf_dgo_velocity_noise_std_stage3)" />
+
+      <param name="dgo_velocity_noise_std_stage5" value="$(arg dekf_dgo_velocity_noise_std_stage5)" />
+
+      <param name="dgo_velocity_noise_std_stage6" value="$(arg dekf_dgo_velocity_noise_std_stage6)" />
+
+      <param name="use_dgo_velocity_stage6" value="$(arg dekf_use_dgo_velocity_stage6)" />
       <param name="use_dgo_velocity_stage_gate" value="$(arg dekf_use_dgo_velocity_stage_gate)" />
       <param name="dgo_velocity_noise_std_dynamic" value="$(arg dekf_dgo_velocity_noise_std_dynamic)" />
       <param name="dgo_velocity_noise_std_landing" value="$(arg dekf_dgo_velocity_noise_std_landing)" />
@@ -664,6 +702,11 @@
       <param name="uwb_predicted_direction_min_range" value="$(arg dekf_uwb_predicted_direction_min_range)" />
       <param name="uwb_predicted_direction_noise_scale" value="$(arg dekf_uwb_predicted_direction_noise_scale)" />
       <param name="uwb_predicted_direction_max_residual" value="$(arg dekf_uwb_predicted_direction_max_residual)" />
+      <param name="uwb_predicted_direction_max_uncertainty" value="$(arg dekf_uwb_predicted_direction_max_uncertainty)" />
+
+      <param name="uwb_predicted_direction_max_recent_age" value="$(arg dekf_uwb_predicted_direction_max_recent_age)" />
+
+      <param name="uwb_predicted_direction_cooldown" value="$(arg dekf_uwb_predicted_direction_cooldown)" />
       <param name="uwb_predicted_direction_min_health_level" value="$(arg dekf_uwb_predicted_direction_min_health_level)" />
       <param name="uwb_predicted_direction_stage3" value="$(arg dekf_uwb_predicted_direction_stage3)" />
       <param name="uwb_predicted_direction_stage4" value="$(arg dekf_uwb_predicted_direction_stage4)" />
@@ -782,6 +825,13 @@
       <param name="sigma_theta" value="$(arg dekf_camera_theta_noise_std)" />
       <param name="use_dgo_velocity" value="$(arg dekf_use_dgo_velocity)" />
       <param name="dgo_velocity_noise_std" value="$(arg dekf_dgo_velocity_noise_std)" />
+      <param name="dgo_velocity_noise_std_stage3" value="$(arg dekf_dgo_velocity_noise_std_stage3)" />
+
+      <param name="dgo_velocity_noise_std_stage5" value="$(arg dekf_dgo_velocity_noise_std_stage5)" />
+
+      <param name="dgo_velocity_noise_std_stage6" value="$(arg dekf_dgo_velocity_noise_std_stage6)" />
+
+      <param name="use_dgo_velocity_stage6" value="$(arg dekf_use_dgo_velocity_stage6)" />
       <param name="use_dgo_velocity_stage_gate" value="$(arg dekf_use_dgo_velocity_stage_gate)" />
       <param name="dgo_velocity_noise_std_dynamic" value="$(arg dekf_dgo_velocity_noise_std_dynamic)" />
       <param name="dgo_velocity_noise_std_landing" value="$(arg dekf_dgo_velocity_noise_std_landing)" />
@@ -836,6 +886,11 @@
       <param name="uwb_predicted_direction_min_range" value="$(arg dekf_uwb_predicted_direction_min_range)" />
       <param name="uwb_predicted_direction_noise_scale" value="$(arg dekf_uwb_predicted_direction_noise_scale)" />
       <param name="uwb_predicted_direction_max_residual" value="$(arg dekf_uwb_predicted_direction_max_residual)" />
+      <param name="uwb_predicted_direction_max_uncertainty" value="$(arg dekf_uwb_predicted_direction_max_uncertainty)" />
+
+      <param name="uwb_predicted_direction_max_recent_age" value="$(arg dekf_uwb_predicted_direction_max_recent_age)" />
+
+      <param name="uwb_predicted_direction_cooldown" value="$(arg dekf_uwb_predicted_direction_cooldown)" />
       <param name="uwb_predicted_direction_min_health_level" value="$(arg dekf_uwb_predicted_direction_min_health_level)" />
       <param name="uwb_predicted_direction_stage3" value="$(arg dekf_uwb_predicted_direction_stage3)" />
       <param name="uwb_predicted_direction_stage4" value="$(arg dekf_uwb_predicted_direction_stage4)" />

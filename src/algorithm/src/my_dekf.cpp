@@ -94,6 +94,10 @@ public:
         pnh_.param("sigma_theta", sigma_theta_, 0.05);
         pnh_.param("use_dgo_velocity", use_dgo_velocity_, true);
         pnh_.param("dgo_velocity_noise_std", dgo_velocity_noise_std_, 0.25);
+        pnh_.param("dgo_velocity_noise_std_stage3", dgo_velocity_noise_std_stage3_, 0.25);
+        pnh_.param("dgo_velocity_noise_std_stage5", dgo_velocity_noise_std_stage5_, 0.35);
+        pnh_.param("dgo_velocity_noise_std_stage6", dgo_velocity_noise_std_stage6_, 0.55);
+        pnh_.param("use_dgo_velocity_stage6", use_dgo_velocity_stage6_, false);
         pnh_.param("use_dgo_velocity_stage_gate", use_dgo_velocity_stage_gate_, true);
         pnh_.param("dgo_velocity_noise_std_dynamic", dgo_velocity_noise_std_dynamic_, 0.35);
         pnh_.param("dgo_velocity_noise_std_landing", dgo_velocity_noise_std_landing_, 0.70);
@@ -150,6 +154,9 @@ public:
         pnh_.param("uwb_predicted_direction_min_range", uwb_predicted_direction_min_range_, 0.50);
         pnh_.param("uwb_predicted_direction_noise_scale", uwb_predicted_direction_noise_scale_, 5.0);
         pnh_.param("uwb_predicted_direction_max_residual", uwb_predicted_direction_max_residual_, 0.35);
+        pnh_.param("uwb_predicted_direction_max_uncertainty", uwb_predicted_direction_max_uncertainty_, 0.25);
+        pnh_.param("uwb_predicted_direction_max_recent_age", uwb_predicted_direction_max_recent_age_, 0.50);
+        pnh_.param("uwb_predicted_direction_cooldown", uwb_predicted_direction_cooldown_, 2.0);
         pnh_.param("uwb_predicted_direction_min_health_level", uwb_predicted_direction_min_health_level_, 2);
         pnh_.param("uwb_predicted_direction_stage3", uwb_predicted_direction_stage3_, true);
         pnh_.param("uwb_predicted_direction_stage4", uwb_predicted_direction_stage4_, true);
@@ -322,8 +329,9 @@ public:
         // use_dgo_velocity 参数合法性检查
         if (use_dgo_velocity_ &&
             (dgo_velocity_noise_std_ <= 0.0 ||
-             dgo_velocity_noise_std_dynamic_ <= 0.0 ||
-             dgo_velocity_noise_std_landing_ <= 0.0))
+             dgo_velocity_noise_std_stage3_ <= 0.0 ||
+             dgo_velocity_noise_std_stage5_ <= 0.0 ||
+             dgo_velocity_noise_std_stage6_ <= 0.0))
         {
             ROS_FATAL("[DEKF] all DGO velocity noise stddevs must be positive when velocity updates are enabled");
             ros::shutdown();
@@ -373,15 +381,16 @@ public:
                  allow_dgo_x_only_on_bad_cov_ ? 1 : 0);
         ROS_INFO("[DEKF] covariance bounds: max_position_cov=%.3f max_velocity_cov=%.3f",
                  max_position_cov_, max_velocity_cov_);
-        ROS_INFO("[DEKF] DGO split updates: velocity=%d stage_gate=%d landing_disabled=%d "
-                 "sigma_v_base=%.3f dynamic=%.3f landing=%.3f "
+        ROS_INFO("[DEKF] DGO split updates: velocity=%d stage_gate=%d stage6=%d "
+                 "sigma_v_base=%.3f stage3=%.3f stage5=%.3f stage6=%.3f "
                  "nis_pos=%.2f nis_vel=%.2f residual_gate_pos=%.2f residual_gate_vel=%.2f",
                  use_dgo_velocity_ ? 1 : 0,
                  use_dgo_velocity_stage_gate_ ? 1 : 0,
-                 disable_dgo_velocity_in_landing_ ? 1 : 0,
+                 use_dgo_velocity_stage6_ ? 1 : 0,
                  dgo_velocity_noise_std_,
-                 dgo_velocity_noise_std_dynamic_,
-                 dgo_velocity_noise_std_landing_,
+                 dgo_velocity_noise_std_stage3_,
+                 dgo_velocity_noise_std_stage5_,
+                 dgo_velocity_noise_std_stage6_,
                  max_nis_dgo_,
                  max_nis_dgo_velocity_,
                  dgo_residual_gate_,
@@ -801,6 +810,10 @@ struct DgoHealthState
     double sigma_theta_ = 0.05;
     bool use_dgo_velocity_ = true;
     double dgo_velocity_noise_std_ = 0.25;
+    double dgo_velocity_noise_std_stage3_ = 0.25;
+    double dgo_velocity_noise_std_stage5_ = 0.35;
+    double dgo_velocity_noise_std_stage6_ = 0.55;
+    bool use_dgo_velocity_stage6_ = false;
     bool use_dgo_velocity_stage_gate_ = true;
     double dgo_velocity_noise_std_dynamic_ = 0.35;
     double dgo_velocity_noise_std_landing_ = 0.70;
@@ -884,6 +897,9 @@ struct DgoHealthState
     double uwb_predicted_direction_min_range_ = 0.50;
     double uwb_predicted_direction_noise_scale_ = 5.0;
     double uwb_predicted_direction_max_residual_ = 0.35;
+    double uwb_predicted_direction_max_uncertainty_ = 0.25;
+    double uwb_predicted_direction_max_recent_age_ = 0.50;
+    double uwb_predicted_direction_cooldown_ = 2.0;
     int uwb_predicted_direction_min_health_level_ = 2;
     bool uwb_predicted_direction_stage3_ = true;
     bool uwb_predicted_direction_stage4_ = true;
@@ -1017,17 +1033,20 @@ struct DgoHealthState
             return false;
         if (!use_dgo_velocity_stage_gate_)
             return true;
-        if (stage == 6 && disable_dgo_velocity_in_landing_)
-            return false;
-        return stage == 3 || stage == 5;
+        if (stage == 3) return true;
+        if (stage == 5) return true;
+        if (stage == 6) return use_dgo_velocity_stage6_;
+        return false;
     }
 
     double effectiveDgoVelocityNoise(int stage) const
     {
+        if (stage == 3)
+            return dgo_velocity_noise_std_stage3_;
+        if (stage == 5)
+            return dgo_velocity_noise_std_stage5_;
         if (stage == 6)
-            return dgo_velocity_noise_std_landing_;
-        if (stage == 3 || stage == 5)
-            return dgo_velocity_noise_std_dynamic_;
+            return dgo_velocity_noise_std_stage6_;
         return dgo_velocity_noise_std_;
     }
 
@@ -1345,6 +1364,7 @@ struct DgoHealthState
     bool applyUwbDirectionAndNoise(
         const Filter &f,
         const Vector6d &x,
+        const Matrix6d &P_for_gate,
         const ros::Time &update_stamp,
         const ros::Time &direction_anchor_stamp,
         const Observation &obs,
@@ -1394,7 +1414,35 @@ struct DgoHealthState
             return false;
         }
 
+        // Direction uncertainty gate: avoid fallback when direction is unreliable
+        const double pos_unc = std::sqrt(P_for_gate.block<3,3>(0,0).trace());
         const double pred_range = x.head<3>().norm();
+        const double direction_uncertainty = pos_unc / std::max(pred_range, 1e-3);
+        if (direction_uncertainty > uwb_predicted_direction_max_uncertainty_)
+        {
+            info.reason = "predicted_direction_uncertainty_gate";
+            reject_reason = "uwb_predicted_direction_uncertainty_gate";
+            return false;
+        }
+
+        // Recent DGO / anchor gate: direction must have been recently updated
+        const ros::Time &latest_anchor = f.last_direction_anchor_stamp;
+        if (latest_anchor.isZero())
+        {
+            info.reason = "predicted_direction_no_recent_anchor";
+            reject_reason = "uwb_predicted_direction_no_recent_anchor";
+            return false;
+        }
+        {
+            const double anchor_age = std::abs((update_stamp - latest_anchor).toSec());
+            if (anchor_age > uwb_predicted_direction_max_recent_age_)
+            {
+                info.reason = "predicted_direction_stale_direction";
+                reject_reason = "uwb_predicted_direction_stale_direction";
+                return false;
+            }
+        }
+
         if (pred_range < uwb_predicted_direction_min_range_)
         {
             info.reason = "predicted_direction_too_small";
@@ -3268,7 +3316,7 @@ struct DgoHealthState
                     std::string uwb_replay_reason;
                     AdaptiveUwbInfo replay_uwb_info;
                     if (!applyUwbDirectionAndNoise(
-                            f, rec.X_post, rec.stamp, replay_direction_anchor_stamp,
+                            f, rec.X_post, rec.P_post, rec.stamp, replay_direction_anchor_stamp,
                             obs_i, residual, R_meas,
                             replay_uwb_info, uwb_replay_reason))
                     {
@@ -3471,7 +3519,7 @@ struct DgoHealthState
         if (obs.type == ObsType::UWB_RANGE)
         {
             std::string uwb_reject_reason;
-            if (!applyUwbDirectionAndNoise(f, f.X, f.stamp, f.last_direction_anchor_stamp,
+            if (!applyUwbDirectionAndNoise(f, f.X, f.P, f.stamp, f.last_direction_anchor_stamp,
                                            obs, residual, R_meas, adaptive_uwb,
                                            uwb_reject_reason))
             {
