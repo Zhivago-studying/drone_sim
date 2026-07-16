@@ -136,7 +136,7 @@ public:
 	        pnh_.param("delayed_validation_gt_max_dt", delayed_validation_gt_max_dt_, 0.05);
 	        pnh_.param("mode", fusion_mode_, 4);
 	        pnh_.param("trace_enabled", trace_enabled_, true);
-		        pnh_.param("trace_dgo_only", trace_dgo_only_, true);
+        pnh_.param("trace_dgo_only", trace_dgo_only_, false);
 	        // Position covariance floor
 	        pnh_.param("enable_position_cov_floor", enable_position_cov_floor_, true);
 	        pnh_.param("position_cov_floor_std", position_cov_floor_std_, 0.08);
@@ -871,7 +871,7 @@ struct DgoHealthState
 
 	    // Trace 模块 (详细日志, 默认关闭)
     bool trace_enabled_ = true;
-	    bool trace_dgo_only_ = true;
+    bool trace_dgo_only_ = false;
 	    std::ofstream delayed_trace_csv_;
 	    std::ofstream replay_trace_csv_;
 	    std::ofstream state_trace_csv_;
