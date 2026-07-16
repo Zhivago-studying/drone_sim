@@ -103,10 +103,15 @@
 	  <arg name="dekf_dynamic_dgo_position_noise_std" default="0.08" />
 	  <arg name="dekf_landing_dgo_position_noise_std" default="0.10" />
 	  <arg name="dekf_enable_dgo_health_adaptive_r" default="true" />
-  <arg name="dekf_enable_uwb_predicted_direction_fallback" default="true" />
-  <arg name="dekf_uwb_predicted_direction_min_range" default="0.30" />
-  <arg name="dekf_uwb_predicted_direction_noise_scale" default="2.0" />
-  <arg name="dekf_uwb_predicted_direction_max_residual" default="1.0" />
+  <arg name="dekf_enable_uwb_predicted_direction_fallback" default="false" />
+  <arg name="dekf_uwb_predicted_direction_min_health_level" default="2" />
+  <arg name="dekf_uwb_predicted_direction_stage3" default="true" />
+  <arg name="dekf_uwb_predicted_direction_stage4" default="true" />
+  <arg name="dekf_uwb_predicted_direction_stage5" default="true" />
+  <arg name="dekf_uwb_predicted_direction_stage6" default="false" />
+  <arg name="dekf_uwb_predicted_direction_min_range" default="0.50" />
+  <arg name="dekf_uwb_predicted_direction_noise_scale" default="5.0" />
+  <arg name="dekf_uwb_predicted_direction_max_residual" default="0.35" />
 	  <arg name="dekf_dgo_health_good_sigma_p" default="0.08" />
 	  <arg name="dekf_dgo_health_normal_sigma_p" default="0.10" />
   <arg name="dekf_dgo_health_suspect_sigma_p" default="0.15" />
@@ -315,6 +320,11 @@
       <param name="uwb_predicted_direction_min_range" value="$(arg dekf_uwb_predicted_direction_min_range)" />
       <param name="uwb_predicted_direction_noise_scale" value="$(arg dekf_uwb_predicted_direction_noise_scale)" />
       <param name="uwb_predicted_direction_max_residual" value="$(arg dekf_uwb_predicted_direction_max_residual)" />
+      <param name="uwb_predicted_direction_min_health_level" value="$(arg dekf_uwb_predicted_direction_min_health_level)" />
+      <param name="uwb_predicted_direction_stage3" value="$(arg dekf_uwb_predicted_direction_stage3)" />
+      <param name="uwb_predicted_direction_stage4" value="$(arg dekf_uwb_predicted_direction_stage4)" />
+      <param name="uwb_predicted_direction_stage5" value="$(arg dekf_uwb_predicted_direction_stage5)" />
+      <param name="uwb_predicted_direction_stage6" value="$(arg dekf_uwb_predicted_direction_stage6)" />
       <param name="dgo_health_good_sigma_p" value="$(arg dekf_dgo_health_good_sigma_p)" />
       <param name="dgo_health_normal_sigma_p" value="$(arg dekf_dgo_health_normal_sigma_p)" />
       <param name="dgo_health_suspect_sigma_p" value="$(arg dekf_dgo_health_suspect_sigma_p)" />
@@ -482,6 +492,11 @@
       <param name="uwb_predicted_direction_min_range" value="$(arg dekf_uwb_predicted_direction_min_range)" />
       <param name="uwb_predicted_direction_noise_scale" value="$(arg dekf_uwb_predicted_direction_noise_scale)" />
       <param name="uwb_predicted_direction_max_residual" value="$(arg dekf_uwb_predicted_direction_max_residual)" />
+      <param name="uwb_predicted_direction_min_health_level" value="$(arg dekf_uwb_predicted_direction_min_health_level)" />
+      <param name="uwb_predicted_direction_stage3" value="$(arg dekf_uwb_predicted_direction_stage3)" />
+      <param name="uwb_predicted_direction_stage4" value="$(arg dekf_uwb_predicted_direction_stage4)" />
+      <param name="uwb_predicted_direction_stage5" value="$(arg dekf_uwb_predicted_direction_stage5)" />
+      <param name="uwb_predicted_direction_stage6" value="$(arg dekf_uwb_predicted_direction_stage6)" />
       <param name="dgo_health_good_sigma_p" value="$(arg dekf_dgo_health_good_sigma_p)" />
       <param name="dgo_health_normal_sigma_p" value="$(arg dekf_dgo_health_normal_sigma_p)" />
       <param name="dgo_health_suspect_sigma_p" value="$(arg dekf_dgo_health_suspect_sigma_p)" />
@@ -649,6 +664,11 @@
       <param name="uwb_predicted_direction_min_range" value="$(arg dekf_uwb_predicted_direction_min_range)" />
       <param name="uwb_predicted_direction_noise_scale" value="$(arg dekf_uwb_predicted_direction_noise_scale)" />
       <param name="uwb_predicted_direction_max_residual" value="$(arg dekf_uwb_predicted_direction_max_residual)" />
+      <param name="uwb_predicted_direction_min_health_level" value="$(arg dekf_uwb_predicted_direction_min_health_level)" />
+      <param name="uwb_predicted_direction_stage3" value="$(arg dekf_uwb_predicted_direction_stage3)" />
+      <param name="uwb_predicted_direction_stage4" value="$(arg dekf_uwb_predicted_direction_stage4)" />
+      <param name="uwb_predicted_direction_stage5" value="$(arg dekf_uwb_predicted_direction_stage5)" />
+      <param name="uwb_predicted_direction_stage6" value="$(arg dekf_uwb_predicted_direction_stage6)" />
       <param name="dgo_health_good_sigma_p" value="$(arg dekf_dgo_health_good_sigma_p)" />
       <param name="dgo_health_normal_sigma_p" value="$(arg dekf_dgo_health_normal_sigma_p)" />
       <param name="dgo_health_suspect_sigma_p" value="$(arg dekf_dgo_health_suspect_sigma_p)" />
@@ -816,6 +836,11 @@
       <param name="uwb_predicted_direction_min_range" value="$(arg dekf_uwb_predicted_direction_min_range)" />
       <param name="uwb_predicted_direction_noise_scale" value="$(arg dekf_uwb_predicted_direction_noise_scale)" />
       <param name="uwb_predicted_direction_max_residual" value="$(arg dekf_uwb_predicted_direction_max_residual)" />
+      <param name="uwb_predicted_direction_min_health_level" value="$(arg dekf_uwb_predicted_direction_min_health_level)" />
+      <param name="uwb_predicted_direction_stage3" value="$(arg dekf_uwb_predicted_direction_stage3)" />
+      <param name="uwb_predicted_direction_stage4" value="$(arg dekf_uwb_predicted_direction_stage4)" />
+      <param name="uwb_predicted_direction_stage5" value="$(arg dekf_uwb_predicted_direction_stage5)" />
+      <param name="uwb_predicted_direction_stage6" value="$(arg dekf_uwb_predicted_direction_stage6)" />
       <param name="dgo_health_good_sigma_p" value="$(arg dekf_dgo_health_good_sigma_p)" />
       <param name="dgo_health_normal_sigma_p" value="$(arg dekf_dgo_health_normal_sigma_p)" />
       <param name="dgo_health_suspect_sigma_p" value="$(arg dekf_dgo_health_suspect_sigma_p)" />

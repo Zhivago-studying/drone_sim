@@ -146,10 +146,15 @@ public:
 	        pnh_.param("dynamic_dgo_position_noise_std", dynamic_dgo_position_noise_std_, 0.08);
 	        pnh_.param("landing_dgo_position_noise_std", landing_dgo_position_noise_std_, 0.10);
         // DGO health adaptive R
-        pnh_.param("enable_uwb_predicted_direction_fallback", enable_uwb_predicted_direction_fallback_, true);
-        pnh_.param("uwb_predicted_direction_min_range", uwb_predicted_direction_min_range_, 0.30);
-        pnh_.param("uwb_predicted_direction_noise_scale", uwb_predicted_direction_noise_scale_, 2.0);
-        pnh_.param("uwb_predicted_direction_max_residual", uwb_predicted_direction_max_residual_, 1.0);
+        pnh_.param("enable_uwb_predicted_direction_fallback", enable_uwb_predicted_direction_fallback_, false);
+        pnh_.param("uwb_predicted_direction_min_range", uwb_predicted_direction_min_range_, 0.50);
+        pnh_.param("uwb_predicted_direction_noise_scale", uwb_predicted_direction_noise_scale_, 5.0);
+        pnh_.param("uwb_predicted_direction_max_residual", uwb_predicted_direction_max_residual_, 0.35);
+        pnh_.param("uwb_predicted_direction_min_health_level", uwb_predicted_direction_min_health_level_, 2);
+        pnh_.param("uwb_predicted_direction_stage3", uwb_predicted_direction_stage3_, true);
+        pnh_.param("uwb_predicted_direction_stage4", uwb_predicted_direction_stage4_, true);
+        pnh_.param("uwb_predicted_direction_stage5", uwb_predicted_direction_stage5_, true);
+        pnh_.param("uwb_predicted_direction_stage6", uwb_predicted_direction_stage6_, false);
         pnh_.param("enable_dgo_health_adaptive_r", enable_dgo_health_adaptive_r_, true);
         pnh_.param("dgo_health_good_sigma_p", dgo_health_good_sigma_p_, 0.08);
         pnh_.param("dgo_health_normal_sigma_p", dgo_health_normal_sigma_p_, 0.10);
@@ -875,10 +880,15 @@ struct DgoHealthState
 	    double dynamic_dgo_position_noise_std_ = 0.08;
 	    double landing_dgo_position_noise_std_ = 0.10;
     // UWB predicted direction fallback
-    bool enable_uwb_predicted_direction_fallback_ = true;
-    double uwb_predicted_direction_min_range_ = 0.30;
-    double uwb_predicted_direction_noise_scale_ = 2.0;
-    double uwb_predicted_direction_max_residual_ = 1.0;
+    bool enable_uwb_predicted_direction_fallback_ = false;
+    double uwb_predicted_direction_min_range_ = 0.50;
+    double uwb_predicted_direction_noise_scale_ = 5.0;
+    double uwb_predicted_direction_max_residual_ = 0.35;
+    int uwb_predicted_direction_min_health_level_ = 2;
+    bool uwb_predicted_direction_stage3_ = true;
+    bool uwb_predicted_direction_stage4_ = true;
+    bool uwb_predicted_direction_stage5_ = true;
+    bool uwb_predicted_direction_stage6_ = false;
     // DGO health adaptive R
     bool enable_dgo_health_adaptive_r_ = true;
     double dgo_health_good_sigma_p_ = 0.08;
@@ -1322,8 +1332,18 @@ struct DgoHealthState
         f.has_last_recovery_dgo = false;
     }
 
+    bool allowUwbPredictedDirectionStage(int stage) const
+    {
+        if (stage == 3) return uwb_predicted_direction_stage3_;
+        if (stage == 4) return uwb_predicted_direction_stage4_;
+        if (stage == 5) return uwb_predicted_direction_stage5_;
+        if (stage == 6) return uwb_predicted_direction_stage6_;
+        return false;
+    }
+
     // Unified UWB direction & noise handling (current + replay)
     bool applyUwbDirectionAndNoise(
+        const Filter &f,
         const Vector6d &x,
         const ros::Time &update_stamp,
         const ros::Time &direction_anchor_stamp,
@@ -1355,6 +1375,22 @@ struct DgoHealthState
         {
             info.reason = "no_anchor_reject";
             reject_reason = "uwb_no_direction_anchor";
+            return false;
+        }
+
+        // Health-level gate: only allow when DGO health is poor enough
+        if (f.dgo_health.level < uwb_predicted_direction_min_health_level_)
+        {
+            info.reason = "predicted_direction_health_gate";
+            reject_reason = "uwb_predicted_direction_health_gate";
+            return false;
+        }
+
+        // Stage gate: only stages where fallback is allowed
+        if (!allowUwbPredictedDirectionStage(obs.mission_stage))
+        {
+            info.reason = "predicted_direction_stage_gate";
+            reject_reason = "uwb_predicted_direction_stage_gate";
             return false;
         }
 
@@ -3140,7 +3176,8 @@ struct DgoHealthState
         return true;
     }
 
-	    bool replayCacheFrom(std::deque<History_Record> &cache,
+	    bool replayCacheFrom(const Filter &f,
+	                         std::deque<History_Record> &cache,
 	                         int start_idx,
 	                         bool gate_observation,
 	                         uint64_t gated_seq,
@@ -3231,7 +3268,7 @@ struct DgoHealthState
                     std::string uwb_replay_reason;
                     AdaptiveUwbInfo replay_uwb_info;
                     if (!applyUwbDirectionAndNoise(
-                            rec.X_post, rec.stamp, replay_direction_anchor_stamp,
+                            f, rec.X_post, rec.stamp, replay_direction_anchor_stamp,
                             obs_i, residual, R_meas,
                             replay_uwb_info, uwb_replay_reason))
                     {
@@ -3434,7 +3471,7 @@ struct DgoHealthState
         if (obs.type == ObsType::UWB_RANGE)
         {
             std::string uwb_reject_reason;
-            if (!applyUwbDirectionAndNoise(f.X, f.stamp, f.last_direction_anchor_stamp,
+            if (!applyUwbDirectionAndNoise(f, f.X, f.stamp, f.last_direction_anchor_stamp,
                                            obs, residual, R_meas, adaptive_uwb,
                                            uwb_reject_reason))
             {
@@ -3890,7 +3927,7 @@ struct DgoHealthState
 		        trace_ctx.cache_size = static_cast<int>(f.cache.size());
 		        trace_ctx.current_stamp = current_stamp_before;
 
-	        if (!replayCacheFrom(candidate_cache, best_idx, true, gated_seq,
+		        if (!replayCacheFrom(f, candidate_cache, best_idx, true, gated_seq,
 	                             replay_reason, replay_residual_norm, replay_nis,
 	                             failed_on_gated_observation, replay_adaptive_uwb,
 	                             validate_position_update ? &val : nullptr,
