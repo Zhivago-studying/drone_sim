@@ -146,6 +146,10 @@ public:
 	        pnh_.param("dynamic_dgo_position_noise_std", dynamic_dgo_position_noise_std_, 0.08);
 	        pnh_.param("landing_dgo_position_noise_std", landing_dgo_position_noise_std_, 0.10);
         // DGO health adaptive R
+        pnh_.param("enable_uwb_predicted_direction_fallback", enable_uwb_predicted_direction_fallback_, true);
+        pnh_.param("uwb_predicted_direction_min_range", uwb_predicted_direction_min_range_, 0.30);
+        pnh_.param("uwb_predicted_direction_noise_scale", uwb_predicted_direction_noise_scale_, 2.0);
+        pnh_.param("uwb_predicted_direction_max_residual", uwb_predicted_direction_max_residual_, 1.0);
         pnh_.param("enable_dgo_health_adaptive_r", enable_dgo_health_adaptive_r_, true);
         pnh_.param("dgo_health_good_sigma_p", dgo_health_good_sigma_p_, 0.08);
         pnh_.param("dgo_health_normal_sigma_p", dgo_health_normal_sigma_p_, 0.10);
@@ -870,6 +874,11 @@ struct DgoHealthState
 	    bool enable_stage_dependent_dgo_r_ = false;
 	    double dynamic_dgo_position_noise_std_ = 0.08;
 	    double landing_dgo_position_noise_std_ = 0.10;
+    // UWB predicted direction fallback
+    bool enable_uwb_predicted_direction_fallback_ = true;
+    double uwb_predicted_direction_min_range_ = 0.30;
+    double uwb_predicted_direction_noise_scale_ = 2.0;
+    double uwb_predicted_direction_max_residual_ = 1.0;
     // DGO health adaptive R
     bool enable_dgo_health_adaptive_r_ = true;
     double dgo_health_good_sigma_p_ = 0.08;
@@ -1311,6 +1320,73 @@ struct DgoHealthState
         f.last_direction_anchor_stamp = f.stamp;
         f.dgo_recovery_count = 0;
         f.has_last_recovery_dgo = false;
+    }
+
+    // Unified UWB direction & noise handling (current + replay)
+    bool applyUwbDirectionAndNoise(
+        const Vector6d &x,
+        const ros::Time &update_stamp,
+        const ros::Time &direction_anchor_stamp,
+        const Observation &obs,
+        const Eigen::VectorXd &residual,
+        Eigen::MatrixXd &R_meas,
+        AdaptiveUwbInfo &info,
+        std::string &reject_reason)
+    {
+        if (obs.type != ObsType::UWB_RANGE)
+            return true;
+
+        const bool has_anchor =
+            !require_direction_anchor_for_uwb_ ||
+            !direction_anchor_stamp.isZero();
+
+        if (has_anchor)
+        {
+            info = applyAdaptiveUwbNoise(update_stamp,
+                                         direction_anchor_stamp,
+                                         obs,
+                                         residual,
+                                         R_meas);
+            return true;
+        }
+
+        // No direction anchor
+        if (!enable_uwb_predicted_direction_fallback_)
+        {
+            info.reason = "no_anchor_reject";
+            reject_reason = "uwb_no_direction_anchor";
+            return false;
+        }
+
+        const double pred_range = x.head<3>().norm();
+        if (pred_range < uwb_predicted_direction_min_range_)
+        {
+            info.reason = "predicted_direction_too_small";
+            reject_reason = "uwb_predicted_direction_too_small";
+            return false;
+        }
+
+        if (residual.size() < 1)
+        {
+            info.reason = "predicted_direction_empty_residual";
+            reject_reason = "uwb_predicted_direction_empty_residual";
+            return false;
+        }
+
+        if (std::abs(residual(0)) > uwb_predicted_direction_max_residual_)
+        {
+            info.reason = "predicted_direction_residual_gate";
+            reject_reason = "uwb_predicted_direction_residual_gate";
+            return false;
+        }
+
+        info.reason = "predicted_direction";
+        info.scale = uwb_predicted_direction_noise_scale_;
+        info.noise = sigma_uwb_ * info.scale;
+        info.anchor_age = std::numeric_limits<double>::quiet_NaN();
+
+        R_meas(0, 0) = info.noise * info.noise;
+        return true;
     }
 
     void rebuildHistoryAfterRecovery(Filter &f)
@@ -3152,30 +3228,22 @@ struct DgoHealthState
                 AdaptiveUwbInfo adaptive_uwb;
                 if (obs_i.type == ObsType::UWB_RANGE)
                 {
-                    if (require_direction_anchor_for_uwb_ &&
-                        replay_direction_anchor_stamp.isZero())
+                    std::string uwb_replay_reason;
+                    AdaptiveUwbInfo replay_uwb_info;
+                    if (!applyUwbDirectionAndNoise(
+                            rec.X_post, rec.stamp, replay_direction_anchor_stamp,
+                            obs_i, residual, R_meas,
+                            replay_uwb_info, uwb_replay_reason))
                     {
                         failed_on_gated_observation = is_gated_observation;
                         fail_residual_norm = residual_norm;
-                        fail_reason = "uwb_no_direction_anchor";
+                        fail_reason = uwb_replay_reason;
                         if (is_gated_observation)
-                        {
-                            gated_adaptive_uwb.reason = "no_anchor_reject";
-                            gated_adaptive_uwb.scale = std::numeric_limits<double>::infinity();
-                            gated_adaptive_uwb.noise = std::numeric_limits<double>::infinity();
-                        }
+                            gated_adaptive_uwb = replay_uwb_info;
                         return false;
                     }
-
-                    adaptive_uwb =
-                        applyAdaptiveUwbNoise(rec.stamp,
-                                              replay_direction_anchor_stamp,
-                                              obs_i,
-                                              residual,
-                                              R_meas);
-                    if (is_gated_observation)
-                        gated_adaptive_uwb = adaptive_uwb;
-                }
+	                    gated_adaptive_uwb = replay_uwb_info;
+	                }
 
                 if (is_gated_observation)
                 {
@@ -3365,15 +3433,14 @@ struct DgoHealthState
         AdaptiveUwbInfo adaptive_uwb;
         if (obs.type == ObsType::UWB_RANGE)
         {
-            if (!hasAnyDirectionAnchor(f))
+            std::string uwb_reject_reason;
+            if (!applyUwbDirectionAndNoise(f.X, f.stamp, f.last_direction_anchor_stamp,
+                                           obs, residual, R_meas, adaptive_uwb,
+                                           uwb_reject_reason))
             {
-                adaptive_uwb.reason = "no_anchor_reject";
-                adaptive_uwb.scale = std::numeric_limits<double>::infinity();
-                adaptive_uwb.noise = std::numeric_limits<double>::infinity();
-
                 ++f.rejects;
                 logObservationRow("current_update", f, obs, 0, 0, 0,
-                                  "uwb_no_direction_anchor", age,
+                                  uwb_reject_reason, age,
                                   std::numeric_limits<double>::quiet_NaN(),
                                   residual_norm,
                                   std::numeric_limits<double>::quiet_NaN(),
@@ -3381,12 +3448,6 @@ struct DgoHealthState
                                   adaptive_uwb);
                 return UpdateStatus::REJECTED;
             }
-
-            adaptive_uwb = applyAdaptiveUwbNoise(f.stamp,
-                                                 f.last_direction_anchor_stamp,
-                                                 obs,
-                                                 residual,
-                                                 R_meas);
         }
 
         std::string gate_reason;
@@ -4136,6 +4197,33 @@ struct DgoHealthState
                 f.dgo_health.bidirectional_consistency_window.push(bidir);
                 updateDgoHealth(f);
             }
+        }
+
+        // DGO health trace: publish snapshot
+        if (dgo_health_trace_csv_.is_open() && trace_enabled_)
+        {
+            const double nan = std::numeric_limits<double>::quiet_NaN();
+            const auto &h = f.dgo_health;
+            const double t = f.stamp.isZero() ? ros::Time::now().toSec() : f.stamp.toSec();
+            Observation pseudo_obs;
+            pseudo_obs.type = ObsType::DGO;
+            pseudo_obs.target_id = f.target_id;
+            pseudo_obs.mission_stage = mission_stage_;
+            dgo_health_trace_csv_
+                << t << ","
+                << uav_id_ << "," << f.target_id << "," << mission_stage_ << ","
+                << "publish" << ","
+                << nan << "," << nan << "," << nan << ","
+                << (std::isfinite(h.residual_mean) ? h.residual_mean : nan) << ","
+                << (std::isfinite(h.nis_mean) ? h.nis_mean : nan) << ","
+                << (std::isfinite(h.vel_res_mean) ? h.vel_res_mean : nan) << ","
+                << (std::isfinite(h.replay_delta_mean) ? h.replay_delta_mean : nan) << ","
+                << (std::isfinite(h.uwb_consistency_mean) ? h.uwb_consistency_mean : nan) << ","
+                << (std::isfinite(h.bidirectional_consistency_mean) ? h.bidirectional_consistency_mean : nan) << ","
+                << h.score << "," << h.level << ","
+                << adaptiveDgoPositionNoiseStd(f, pseudo_obs) << ","
+                << 1 << ","
+                << "publish_snapshot\n";
         }
 
         f.pub.publish(msg);

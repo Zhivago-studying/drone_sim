@@ -103,6 +103,10 @@
 	  <arg name="dekf_dynamic_dgo_position_noise_std" default="0.08" />
 	  <arg name="dekf_landing_dgo_position_noise_std" default="0.10" />
 	  <arg name="dekf_enable_dgo_health_adaptive_r" default="true" />
+  <arg name="dekf_enable_uwb_predicted_direction_fallback" default="true" />
+  <arg name="dekf_uwb_predicted_direction_min_range" default="0.30" />
+  <arg name="dekf_uwb_predicted_direction_noise_scale" default="2.0" />
+  <arg name="dekf_uwb_predicted_direction_max_residual" default="1.0" />
 	  <arg name="dekf_dgo_health_good_sigma_p" default="0.08" />
 	  <arg name="dekf_dgo_health_normal_sigma_p" default="0.10" />
   <arg name="dekf_dgo_health_suspect_sigma_p" default="0.15" />
@@ -307,6 +311,10 @@
       <param name="dynamic_dgo_position_noise_std" value="$(arg dekf_dynamic_dgo_position_noise_std)" />
       <param name="landing_dgo_position_noise_std" value="$(arg dekf_landing_dgo_position_noise_std)" />
       <param name="enable_dgo_health_adaptive_r" value="$(arg dekf_enable_dgo_health_adaptive_r)" />
+      <param name="enable_uwb_predicted_direction_fallback" value="$(arg dekf_enable_uwb_predicted_direction_fallback)" />
+      <param name="uwb_predicted_direction_min_range" value="$(arg dekf_uwb_predicted_direction_min_range)" />
+      <param name="uwb_predicted_direction_noise_scale" value="$(arg dekf_uwb_predicted_direction_noise_scale)" />
+      <param name="uwb_predicted_direction_max_residual" value="$(arg dekf_uwb_predicted_direction_max_residual)" />
       <param name="dgo_health_good_sigma_p" value="$(arg dekf_dgo_health_good_sigma_p)" />
       <param name="dgo_health_normal_sigma_p" value="$(arg dekf_dgo_health_normal_sigma_p)" />
       <param name="dgo_health_suspect_sigma_p" value="$(arg dekf_dgo_health_suspect_sigma_p)" />
@@ -470,6 +478,10 @@
       <param name="dynamic_dgo_position_noise_std" value="$(arg dekf_dynamic_dgo_position_noise_std)" />
       <param name="landing_dgo_position_noise_std" value="$(arg dekf_landing_dgo_position_noise_std)" />
       <param name="enable_dgo_health_adaptive_r" value="$(arg dekf_enable_dgo_health_adaptive_r)" />
+      <param name="enable_uwb_predicted_direction_fallback" value="$(arg dekf_enable_uwb_predicted_direction_fallback)" />
+      <param name="uwb_predicted_direction_min_range" value="$(arg dekf_uwb_predicted_direction_min_range)" />
+      <param name="uwb_predicted_direction_noise_scale" value="$(arg dekf_uwb_predicted_direction_noise_scale)" />
+      <param name="uwb_predicted_direction_max_residual" value="$(arg dekf_uwb_predicted_direction_max_residual)" />
       <param name="dgo_health_good_sigma_p" value="$(arg dekf_dgo_health_good_sigma_p)" />
       <param name="dgo_health_normal_sigma_p" value="$(arg dekf_dgo_health_normal_sigma_p)" />
       <param name="dgo_health_suspect_sigma_p" value="$(arg dekf_dgo_health_suspect_sigma_p)" />
@@ -633,6 +645,10 @@
       <param name="dynamic_dgo_position_noise_std" value="$(arg dekf_dynamic_dgo_position_noise_std)" />
       <param name="landing_dgo_position_noise_std" value="$(arg dekf_landing_dgo_position_noise_std)" />
       <param name="enable_dgo_health_adaptive_r" value="$(arg dekf_enable_dgo_health_adaptive_r)" />
+      <param name="enable_uwb_predicted_direction_fallback" value="$(arg dekf_enable_uwb_predicted_direction_fallback)" />
+      <param name="uwb_predicted_direction_min_range" value="$(arg dekf_uwb_predicted_direction_min_range)" />
+      <param name="uwb_predicted_direction_noise_scale" value="$(arg dekf_uwb_predicted_direction_noise_scale)" />
+      <param name="uwb_predicted_direction_max_residual" value="$(arg dekf_uwb_predicted_direction_max_residual)" />
       <param name="dgo_health_good_sigma_p" value="$(arg dekf_dgo_health_good_sigma_p)" />
       <param name="dgo_health_normal_sigma_p" value="$(arg dekf_dgo_health_normal_sigma_p)" />
       <param name="dgo_health_suspect_sigma_p" value="$(arg dekf_dgo_health_suspect_sigma_p)" />
@@ -796,6 +812,10 @@
       <param name="dynamic_dgo_position_noise_std" value="$(arg dekf_dynamic_dgo_position_noise_std)" />
       <param name="landing_dgo_position_noise_std" value="$(arg dekf_landing_dgo_position_noise_std)" />
       <param name="enable_dgo_health_adaptive_r" value="$(arg dekf_enable_dgo_health_adaptive_r)" />
+      <param name="enable_uwb_predicted_direction_fallback" value="$(arg dekf_enable_uwb_predicted_direction_fallback)" />
+      <param name="uwb_predicted_direction_min_range" value="$(arg dekf_uwb_predicted_direction_min_range)" />
+      <param name="uwb_predicted_direction_noise_scale" value="$(arg dekf_uwb_predicted_direction_noise_scale)" />
+      <param name="uwb_predicted_direction_max_residual" value="$(arg dekf_uwb_predicted_direction_max_residual)" />
       <param name="dgo_health_good_sigma_p" value="$(arg dekf_dgo_health_good_sigma_p)" />
       <param name="dgo_health_normal_sigma_p" value="$(arg dekf_dgo_health_normal_sigma_p)" />
       <param name="dgo_health_suspect_sigma_p" value="$(arg dekf_dgo_health_suspect_sigma_p)" />
