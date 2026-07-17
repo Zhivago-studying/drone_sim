@@ -204,6 +204,7 @@ public:
         initResidualCsv();
         initCommDebugCsv();
         initSyncDiagCsv();
+        initCameraFrontendCsv();
 
         ROS_INFO("[DGO] ns=%s uav_id=%d uav_num=%d initial_spacing=%.2f "
                  "max_sensor_age=%.2f max_communication_age=%.2f "
@@ -263,6 +264,8 @@ public:
             comm_debug_csv_.close();
         if (sync_diag_csv_.is_open())
             sync_diag_csv_.close();
+        if (camera_frontend_csv_.is_open())
+            camera_frontend_csv_.close();
     }
 
     void comCallback(const sensors::ComMsg::ConstPtr &msg, int uav_index)
@@ -586,6 +589,7 @@ public:
             updateCameraCounts();
             writeResidualDebugCsv("post", after_cb.ins);
             writeSyncDiagCsv();
+            writeCameraFrontendCsv();
             writeCommDebugCsv();
             publishDgoEstimate();
             published = true;
@@ -724,6 +728,7 @@ private:
     std::ofstream comm_debug_csv_;
     // 同步诊断 CSV (每轮 DGO 记录各传感器年龄)
     std::ofstream sync_diag_csv_;
+    std::ofstream camera_frontend_csv_;
 
     // UWB 缓存
     std::deque<std::pair<ros::Time, data_process::UwbProcessed>> uwb_history_;
@@ -1172,10 +1177,65 @@ private:
                        << "camera_target_mask,"
                        << "P_opt_x,P_opt_y,P_opt_z\n";
         sync_diag_csv_ << std::fixed << std::setprecision(9);
-        ROS_INFO("[iris_%d] sync diag CSV: %s", uav_id_, path.c_str());
-    }
+	        ROS_INFO("[iris_%d] sync diag CSV: %s", uav_id_, path.c_str());
+	    }
 
-    void writeSyncDiagCsv()
+	    void initCameraFrontendCsv()
+	    {
+	        if (csv_dir_.empty())
+	            return;
+	        const std::string self_name = uavs_[uav_id_].substr(1);
+	        const std::string path = csv_dir_ + "/" + self_name + "_camera_frontend_trace.csv";
+	        camera_frontend_csv_.open(path.c_str(), std::ios::out | std::ios::trunc);
+	        if (!camera_frontend_csv_.is_open())
+	        {
+	            ROS_WARN("[iris_%d] cannot open camera frontend CSV: %s", uav_id_, path.c_str());
+	            return;
+	        }
+	        camera_frontend_csv_ << std::fixed << std::setprecision(9);
+	        camera_frontend_csv_ << "time,self_id,stage,"
+	                             << "fresh,raw_count,valid_count,"
+	                             << "angle_constraints,xy_constraints,used,age,status\n";
+	        ROS_INFO("[iris_%d] camera frontend CSV: %s", uav_id_, path.c_str());
+	    }
+
+	    void writeCameraFrontendCsv()
+	    {
+	        if (!camera_frontend_csv_.is_open())
+	            return;
+	        const double stamp = sync_ref_time_.isZero() ? ros::Time::now().toSec()
+	                                                     : sync_ref_time_.toSec();
+	        const double age = (!best_camera_stamp_.isZero() && !sync_ref_time_.isZero())
+	            ? std::fabs((best_camera_stamp_ - sync_ref_time_).toSec()) * 1000.0
+	            : std::numeric_limits<double>::quiet_NaN();
+        std::string status;
+        if (!camera_message_fresh_)
+            status = "stale";
+        else if (camera_raw_count_ == 0)
+            status = "fresh_empty";
+        else if (camera_valid_target_count_ == 0)
+            status = "no_valid_target";
+        else if (camera_angle_constraint_count_ == 0 &&
+                 camera_xy_constraint_count_ == 0)
+            status = "no_constraints";
+        else if (!camera_used_in_cost_)
+            status = "not_used";
+        else
+            status = "used";
+	        camera_frontend_csv_
+	            << stamp << ','
+	            << uav_id_ << ',' << static_cast<int>(mission_stage_) << ','
+	            << (camera_message_fresh_ ? 1 : 0) << ','
+	            << camera_raw_count_ << ','
+	            << camera_valid_target_count_ << ','
+	            << camera_angle_constraint_count_ << ','
+	            << camera_xy_constraint_count_ << ','
+	            << (camera_used_in_cost_ ? 1 : 0) << ','
+	            << age << ','
+	            << status << '\n';
+	    }
+
+	    void writeSyncDiagCsv()
     {
         if (!sync_diag_csv_.is_open())
             return;

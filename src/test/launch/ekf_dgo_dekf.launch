@@ -103,7 +103,7 @@
 		  <arg name="dekf_trace_dgo_only" default="false" />
 	  <arg name="dekf_use_dgo_velocity" default="true" />
 	    <arg name="dekf_dgo_velocity_noise_std_stage3" default="0.25" />
-  <arg name="dekf_dgo_velocity_noise_std_stage5" default="0.35" />
+  <arg name="dekf_dgo_velocity_noise_std_stage5" default="0.30" />
   <arg name="dekf_dgo_velocity_noise_std_stage6" default="0.55" />
   <arg name="dekf_use_dgo_velocity_stage6" default="false" />
 <arg name="dekf_dgo_velocity_noise_std" default="0.25" />

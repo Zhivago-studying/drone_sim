@@ -52,6 +52,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <map>
 #include <string>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -95,7 +96,7 @@ public:
         pnh_.param("use_dgo_velocity", use_dgo_velocity_, true);
         pnh_.param("dgo_velocity_noise_std", dgo_velocity_noise_std_, 0.25);
         pnh_.param("dgo_velocity_noise_std_stage3", dgo_velocity_noise_std_stage3_, 0.25);
-        pnh_.param("dgo_velocity_noise_std_stage5", dgo_velocity_noise_std_stage5_, 0.35);
+        pnh_.param("dgo_velocity_noise_std_stage5", dgo_velocity_noise_std_stage5_, 0.30);
         pnh_.param("dgo_velocity_noise_std_stage6", dgo_velocity_noise_std_stage6_, 0.55);
         pnh_.param("use_dgo_velocity_stage6", use_dgo_velocity_stage6_, false);
         pnh_.param("use_dgo_velocity_stage_gate", use_dgo_velocity_stage_gate_, true);
@@ -483,6 +484,7 @@ public:
 		    ~DEKF()
 		    {
 		        writeDelayedAgeSummary();
+		        writeCameraTraceSummary();
 		        writeDgoVelocityUpdateSummary();
 		        if (delayed_trace_csv_.is_open()) delayed_trace_csv_.close();
 		        if (replay_trace_csv_.is_open()) replay_trace_csv_.close();
@@ -672,6 +674,33 @@ struct LatestUwbRange
     double range = std::numeric_limits<double>::quiet_NaN();
 };
 
+struct CameraTraceStageStats
+{
+    int camera_event_count = 0;
+    int raw_count = 0;
+    int valid_count = 0;
+    int used_count = 0;
+    int accepted_count = 0;
+    int rejected_count = 0;
+    int accepted_current_count = 0;
+    int accepted_delayed_count = 0;
+    int rejected_current_count = 0;
+    int rejected_delayed_count = 0;
+    int stale_count = 0;
+    int timestamp_mismatch_count = 0;
+    int no_valid_constraints_count = 0;
+    int residual_gate_reject_count = 0;
+    int nis_reject_count = 0;
+    int bad_cov_count = 0;
+    int history_match_failed_count = 0;
+    int replay_failed_count = 0;
+    std::vector<double> age_ms;
+    std::vector<double> residual_norm;
+    std::vector<double> err_delta;
+    std::vector<double> correction_cos_error;
+    std::vector<double> propagation_gain_pos;
+};
+
 struct RollingWindow
 {
     std::deque<double> values;
@@ -771,6 +800,7 @@ struct DgoHealthState
         Eigen::Vector3d last_recovery_dgo_position = Eigen::Vector3d::Zero();
         int consecutive_dgo_gate_fails = 0;
         DgoHealthState dgo_health;
+        std::map<int, CameraTraceStageStats> camera_trace_stats;
     };
 
     // DGO 历史观测 (按 UAV 编号缓存)
@@ -811,7 +841,7 @@ struct DgoHealthState
     bool use_dgo_velocity_ = true;
     double dgo_velocity_noise_std_ = 0.25;
     double dgo_velocity_noise_std_stage3_ = 0.25;
-    double dgo_velocity_noise_std_stage5_ = 0.35;
+    double dgo_velocity_noise_std_stage5_ = 0.30;
     double dgo_velocity_noise_std_stage6_ = 0.55;
     bool use_dgo_velocity_stage6_ = false;
     bool use_dgo_velocity_stage_gate_ = true;
@@ -1342,6 +1372,55 @@ struct DgoHealthState
         info.reason = reason;
         R_meas(0, 0) = info.noise * info.noise;
         return info;
+    }
+
+    CameraTraceStageStats& cameraStats(Filter &f, int stage)
+    {
+        return f.camera_trace_stats[stage];
+    }
+
+    std::string normalizeCameraRejectReason(const std::string &raw) const
+    {
+        if (raw.find("innovation") != std::string::npos) return "innovation_cov";
+        if (raw.find("residual") != std::string::npos) return "residual_gate";
+        if (raw.find("nis") != std::string::npos) return "nis";
+        if (raw.find("history") != std::string::npos) return "history_match_failed";
+        if (raw.find("replay") != std::string::npos) return "replay_failed";
+        if (raw.find("bad") != std::string::npos || raw.find("cov") != std::string::npos) return "bad_cov";
+        return "other";
+    }
+
+    void recordCameraReject(Filter &f, int stage, const std::string &reason, bool delayed = false)
+    {
+        auto &s = cameraStats(f, stage);
+        ++s.rejected_count;
+        if (delayed) ++s.rejected_delayed_count; else ++s.rejected_current_count;
+        ++s.camera_event_count;
+        if (reason == "stale") ++s.stale_count;
+        else if (reason == "timestamp_mismatch") ++s.timestamp_mismatch_count;
+        else if (reason == "no_valid_constraints") ++s.no_valid_constraints_count;
+        else if (reason == "residual_gate") ++s.residual_gate_reject_count;
+        else if (reason == "nis") ++s.nis_reject_count;
+        else if (reason == "bad_cov") ++s.bad_cov_count;
+        else if (reason == "history_match_failed") ++s.history_match_failed_count;
+        else if (reason == "replay_failed" || reason == "innovation_cov") ++s.replay_failed_count;
+    }
+
+    void recordCameraAccepted(Filter &f, int stage,
+                               double age_sec, double residual_norm_val,
+                               double err_delta_val, double correction_cos_val,
+                               double propagation_gain_val,
+                               bool delayed = true)
+    {
+        auto &s = cameraStats(f, stage);
+        ++s.accepted_count;
+        if (delayed) ++s.accepted_delayed_count; else ++s.accepted_current_count;
+        ++s.camera_event_count;
+        s.age_ms.push_back(age_sec * 1000.0);
+        s.residual_norm.push_back(residual_norm_val);
+        s.err_delta.push_back(err_delta_val);
+        s.correction_cos_error.push_back(correction_cos_val);
+        s.propagation_gain_pos.push_back(propagation_gain_val);
     }
 
     void markDirectionAnchor(Filter &f)
@@ -2194,6 +2273,8 @@ struct DgoHealthState
                     // 观测太旧, 直接丢弃
                     ++f.old_drops;
                     ++f.rejects;
+                    if (obs.type == ObsType::CAMERA_BEARING)
+                        recordCameraReject(f, obs.mission_stage, "stale", true);
                     logObservationRow("drop_old", f, obs, 0, 0, 0,
                                       "observation_too_old", age,
                                       std::numeric_limits<double>::quiet_NaN(),
@@ -3538,6 +3619,8 @@ struct DgoHealthState
         std::string gate_reason;
         if (!passHardResidualGate(obs, residual, gate_reason))
         {
+            if (obs.type == ObsType::CAMERA_BEARING)
+                recordCameraReject(f, obs.mission_stage, "residual_gate");
             noteDgoVelocityMetrics(f, obs, residual_norm,
                                    std::numeric_limits<double>::quiet_NaN());
             const RecoveryResult recovery =
@@ -3624,6 +3707,8 @@ struct DgoHealthState
         Eigen::FullPivLU<Eigen::MatrixXd> lu(S);
         if (!lu.isInvertible())
         {
+            if (obs.type == ObsType::CAMERA_BEARING)
+                recordCameraReject(f, obs.mission_stage, "innovation_cov", false);
             noteDgoVelocityMetrics(f, obs, residual_norm,
                                    std::numeric_limits<double>::quiet_NaN());
             ++f.rejects;
@@ -3641,6 +3726,8 @@ struct DgoHealthState
         const double nis_gate = nisGateForObservation(obs, residual.size());
         if (nis > nis_gate)
         {
+            if (obs.type == ObsType::CAMERA_BEARING)
+                recordCameraReject(f, obs.mission_stage, "nis", false);
             noteDgoVelocityMetrics(f, obs, residual_norm, nis);
             const RecoveryResult recovery =
                 tryDgoRecovery(f, obs, false, age,
@@ -3754,6 +3841,14 @@ struct DgoHealthState
                           std::numeric_limits<double>::quiet_NaN(),
                           adaptive_uwb,
                           kvv);
+        if (obs.type == ObsType::CAMERA_BEARING)
+        {
+            recordCameraAccepted(f, obs.mission_stage, (f.stamp - obs.stamp).toSec(),
+                                 residual_norm, std::numeric_limits<double>::quiet_NaN(),
+                                 std::numeric_limits<double>::quiet_NaN(),
+                                 std::numeric_limits<double>::quiet_NaN(),
+                                 false);
+        }
         return UpdateStatus::ACCEPTED;
 	    }
 
@@ -3906,6 +4001,8 @@ struct DgoHealthState
         }
         if (best_idx < 0 || best_dt > max_history_match_dt_)
         {
+            if (obs.type == ObsType::CAMERA_BEARING)
+                recordCameraReject(f, obs.mission_stage, "history_match_failed", true);
             ++f.rejects;
             logObservationRow("delayed_update", f, obs, 0, 1, 0,
                               "history_match_failed", age,
@@ -3966,7 +4063,7 @@ struct DgoHealthState
 
 		        // ── ReplayTraceContext ────────────────────────────────
 		        ReplayTraceContext trace_ctx;
-		        trace_ctx.enabled = traceActive();
+		        trace_ctx.enabled = traceActive() || (obs.type == ObsType::CAMERA_BEARING);
 		        trace_ctx.self_id = uav_id_;
 		        trace_ctx.target_id = obs.target_id;
 		        trace_ctx.stage = obs.mission_stage;
@@ -4087,6 +4184,8 @@ struct DgoHealthState
 	                                    obs_eff.mission_stage, false, replay_reason);
 	            }
 
+            if (obs.type == ObsType::CAMERA_BEARING)
+                recordCameraReject(f, obs.mission_stage, normalizeCameraRejectReason(replay_reason), true);
 	++f.rejects;
             logObservationRow("delayed_update", f, obs, 0, 1, 0,
                               "cache_replay_failed_" + replay_reason, age,
@@ -4108,6 +4207,8 @@ struct DgoHealthState
 	        const History_Record &final_rec = candidate_cache.back();
         if (!final_rec.X_post.allFinite() || !isBoundedCovariance(final_rec.P_post))
         {
+            if (obs.type == ObsType::CAMERA_BEARING)
+                recordCameraReject(f, obs.mission_stage, "bad_cov", true);
             obs_seq_ = seq_before;
             noteDgoVelocityMetrics(f, obs, replay_residual_norm, replay_nis,
                                    trace_ctx.gated_kvv);
@@ -4144,6 +4245,33 @@ struct DgoHealthState
 		        noteDgoVelocityMetrics(f, obs, replay_residual_norm, replay_nis,
 		                               trace_ctx.gated_kvv);
 			        incrementAcceptedCounters(f, obs, true);
+
+	        // Camera trace: record accepted metrics
+	        if (obs.type == ObsType::CAMERA_BEARING)
+	        {
+	            const double cam_age = (f.stamp - obs.stamp).toSec();
+	            double err_delta_val = std::numeric_limits<double>::quiet_NaN();
+	            double corr_cos = std::numeric_limits<double>::quiet_NaN();
+	            double prop_gain = std::numeric_limits<double>::quiet_NaN();
+	            Eigen::Vector3d gt_hist;
+	            if (getRelativeGroundTruth(uav_id_, obs.target_id, trace_ctx.hist_stamp, gt_hist))
+	            {
+	                const Eigen::Vector3d before = trace_ctx.hist_before.head<3>();
+	                const Eigen::Vector3d after  = trace_ctx.hist_after.head<3>();
+	                const Eigen::Vector3d corr = after - before;
+	                const Eigen::Vector3d err_before = before - gt_hist;
+	                const double eb = err_before.norm();
+	                const double ea = (after - gt_hist).norm();
+	                err_delta_val = ea - eb;
+	                const double denom = corr.norm() * err_before.norm();
+	                if (denom > 1e-9) corr_cos = corr.dot(err_before) / denom;
+	            }
+	            const double hist_delta = (trace_ctx.hist_after.head<3>() - trace_ctx.hist_before.head<3>()).norm();
+	            const double current_delta = (f.cache.back().X_post.head<3>() - current_before_replay.head<3>()).norm();
+	            if (hist_delta > 1e-9) prop_gain = current_delta / hist_delta;
+	            recordCameraAccepted(f, obs.mission_stage, cam_age, replay_residual_norm, err_delta_val, corr_cos, prop_gain);
+	        }
+
 
 	        // DGO health: push replay metrics
 	        if (obs_eff.type == ObsType::DGO)
@@ -4319,9 +4447,82 @@ struct DgoHealthState
 	        if (traceActive())
 	            writeStateTrace(f);
 	    }
+    void writeCameraTraceSummary()
+    {
+        if (!trace_enabled_ || csv_dir_.empty()) return;
+        const std::string self_name = "iris_" + std::to_string(uav_id_);
+        const std::string path = csv_dir_ + "/" + self_name + "_camera_trace_summary.csv";
+        std::ofstream csv(path.c_str(), std::ios::out | std::ios::trunc);
+        if (!csv.is_open()) return;
+
+        csv << "self_id,target_id,stage,camera_event_count,raw_count,valid_count,used_count,"
+            << "accepted_count,accepted_current_count,accepted_delayed_count,rejected_count,rejected_current_count,rejected_delayed_count,"
+            << "stale_count,timestamp_mismatch_count,no_valid_constraints_count,"
+            << "residual_gate_reject_count,nis_reject_count,bad_cov_count,"
+            << "history_match_failed_count,replay_failed_count,"
+            << "mean_age_ms,p95_age_ms,"
+            << "mean_residual_norm,p95_residual_norm,"
+            << "mean_err_delta,improve_rate,"
+            << "mean_correction_cos_error,mean_propagation_gain_pos\n";
+
+        for (int t = 0; t < uav_num_; ++t)
+        {
+            if (t == uav_id_) continue;
+            const auto &f = filters_[t];
+            for (const auto &kv : f.camera_trace_stats)
+            {
+                const auto &s = kv.second;
+                const int stage = kv.first;
+                auto p95 = [](const std::vector<double> &v, double p) -> double {
+                    std::vector<double> c;
+                    for (double x : v) { if (std::isfinite(x)) c.push_back(x); }
+                    if (c.empty()) return std::numeric_limits<double>::quiet_NaN();
+                    std::sort(c.begin(), c.end());
+                    size_t idx = static_cast<size_t>(std::floor(p * static_cast<double>(c.size())));
+                    if (idx >= c.size()) idx = c.size() - 1;
+                    return c[idx];
+                };
+                auto mean_finite = [](const std::vector<double> &v) -> double {
+                    double sum = 0.0; size_t n = 0;
+                    for (double x : v) { if (std::isfinite(x)) { sum += x; ++n; } }
+                    return n > 0 ? sum / static_cast<double>(n) : std::numeric_limits<double>::quiet_NaN();
+                };
+                auto improve_rate = [](const std::vector<double> &ed) -> double {
+                    size_t n = 0, imp = 0;
+                    for (double x : ed) { if (std::isfinite(x)) { ++n; if (x < 0) ++imp; } }
+                    return n > 0 ? static_cast<double>(imp) / static_cast<double>(n) : std::numeric_limits<double>::quiet_NaN();
+                };
+
+                const double mean_age = mean_finite(s.age_ms);
+                const double p95_age_val = s.age_ms.empty() ? std::numeric_limits<double>::quiet_NaN() : p95(s.age_ms, 0.95);
+                const double mean_res = mean_finite(s.residual_norm);
+                const double p95_res = s.residual_norm.empty() ? std::numeric_limits<double>::quiet_NaN() : p95(s.residual_norm, 0.95);
+                const double mean_ed = mean_finite(s.err_delta);
+                const double impro = improve_rate(s.err_delta);
+                const double mean_cc = mean_finite(s.correction_cos_error);
+                const double mean_pg = mean_finite(s.propagation_gain_pos);
+
+                csv << uav_id_ << "," << f.target_id << "," << stage << ","
+                    << s.camera_event_count << ","
+                    << s.raw_count << "," << s.valid_count << "," << s.used_count << ","
+                    << s.accepted_count << "," << s.accepted_current_count << "," << s.accepted_delayed_count << "," << s.rejected_count << "," << s.rejected_current_count << "," << s.rejected_delayed_count << ","
+                    << s.stale_count << "," << s.timestamp_mismatch_count << "," << s.no_valid_constraints_count << ","
+                    << s.residual_gate_reject_count << "," << s.nis_reject_count << "," << s.bad_cov_count << ","
+                    << s.history_match_failed_count << "," << s.replay_failed_count << ","
+                    << mean_age << "," << p95_age_val << ","
+                    << mean_res << "," << p95_res << ","
+                    << mean_ed << "," << impro << ","
+                    << mean_cc << "," << mean_pg << "\n";
+            }
+        }
+        csv.close();
+    }
+
 };
 
 // ═══════════════════════════════════════════════════════════
+
+
 int main(int argc, char **argv)
 {
     ros::init(argc, argv, "my_dekf");
