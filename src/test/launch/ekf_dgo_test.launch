@@ -122,6 +122,13 @@
   <arg name="dekf_dgo_health_vel_res_bad" default="0.60" />
   <arg name="dekf_dgo_health_replay_delta_good" default="-0.005" />
   <arg name="dekf_dgo_health_replay_delta_bad" default="0.002" />
+  <!-- Camera recent DGO downweight -->
+
+  <arg name="dekf_camera_recent_dgo_downweight_enabled" default="true" />
+
+  <arg name="dekf_camera_recent_dgo_downweight_duration" default="1.0" />
+
+  <arg name="dekf_camera_recent_dgo_sigma_p" default="0.12" />
   <arg name="dekf_dgo_health_enable_uwb_consistency" default="true" />
   <arg name="dekf_dgo_health_uwb_consistency_good" default="0.06" />
   <arg name="dekf_dgo_health_uwb_consistency_bad" default="0.20" />

@@ -234,8 +234,12 @@ public:
         pnh_.param("dgo_recovery_pos_std", dgo_recovery_pos_std_, 0.20);
         pnh_.param("dgo_recovery_vel_std", dgo_recovery_vel_std_, 0.50);
         pnh_.param("clear_history_on_recovery", clear_history_on_recovery_, true);
-        pnh_.param("allow_dgo_x_only_on_bad_cov", allow_dgo_x_only_on_bad_cov_, false);
-        pnh_.param("max_position_cov", max_position_cov_, 2.0);
+	        pnh_.param("allow_dgo_x_only_on_bad_cov", allow_dgo_x_only_on_bad_cov_, false);
+	        // Camera recent DGO downweight
+	        pnh_.param("camera_recent_dgo_downweight_enabled", camera_recent_dgo_downweight_enabled_, true);
+	        pnh_.param("camera_recent_dgo_downweight_duration", camera_recent_dgo_downweight_duration_, 1.0);
+	        pnh_.param("camera_recent_dgo_sigma_p", camera_recent_dgo_sigma_p_, 0.12);
+	        pnh_.param("max_position_cov", max_position_cov_, 2.0);
         pnh_.param("max_velocity_cov", max_velocity_cov_, 1.0);
         pnh_.param("max_pending", max_pending_, 100);
         pnh_.param("history_keep_time", history_keep_time_, 2.0);
@@ -483,9 +487,10 @@ public:
 
 		    ~DEKF()
 		    {
-		        writeDelayedAgeSummary();
-		        writeCameraTraceSummary();
-		        writeDgoVelocityUpdateSummary();
+        writeDelayedAgeSummary();
+        writeCameraTraceSummary();
+        writeCameraImpactSummary();
+        writeDgoVelocityUpdateSummary();
 		        if (delayed_trace_csv_.is_open()) delayed_trace_csv_.close();
 		        if (replay_trace_csv_.is_open()) replay_trace_csv_.close();
 		        if (state_trace_csv_.is_open()) state_trace_csv_.close();
@@ -605,7 +610,26 @@ public:
         std::vector<AppliedObservation> updates; // 该 cache 节点已接受的原始观测
 	    };
 
-	    // 延迟更新验证记录 (delayed_validation_enabled_ 时使用)
+	    struct CameraImpactEvent
+    {
+        ros::Time accept_stamp;
+        int target_id = -1;
+        int stage = -1;
+        double err_before = std::numeric_limits<double>::quiet_NaN();
+        double dgo_gap_before = std::numeric_limits<double>::quiet_NaN();
+        double dgo_sigma_before = std::numeric_limits<double>::quiet_NaN();
+        bool sample_0_5 = false;
+        bool sample_1_0 = false;
+        bool sample_2_0 = false;
+        double dgo_gap_0_5 = std::numeric_limits<double>::quiet_NaN();
+        double dgo_gap_1_0 = std::numeric_limits<double>::quiet_NaN();
+        double dgo_gap_2_0 = std::numeric_limits<double>::quiet_NaN();
+        double gt_err_0_5 = std::numeric_limits<double>::quiet_NaN();
+        double gt_err_1_0 = std::numeric_limits<double>::quiet_NaN();
+        double gt_err_2_0 = std::numeric_limits<double>::quiet_NaN();
+    };
+
+    // 延迟更新验证记录 (delayed_validation_enabled_ 时使用)
 	    struct DelayedUpdateValidation
 	    {
 	        bool enabled = false;
@@ -801,6 +825,10 @@ struct DgoHealthState
         int consecutive_dgo_gate_fails = 0;
         DgoHealthState dgo_health;
         std::map<int, CameraTraceStageStats> camera_trace_stats;
+        std::deque<CameraImpactEvent> camera_impact_pending;
+        std::vector<CameraImpactEvent> camera_impact_completed;
+        ros::Time camera_recent_until;
+        int camera_recent_target = -1;
     };
 
     // DGO 历史观测 (按 UAV 编号缓存)
@@ -887,6 +915,10 @@ struct DgoHealthState
     double dgo_recovery_vel_std_ = 0.50;
     bool clear_history_on_recovery_ = true;
     bool allow_dgo_x_only_on_bad_cov_ = false;
+    // Camera recent DGO downweight
+    bool camera_recent_dgo_downweight_enabled_ = true;
+    double camera_recent_dgo_downweight_duration_ = 1.0;
+    double camera_recent_dgo_sigma_p_ = 0.12;
     double max_position_cov_ = 2.0;
     double max_velocity_cov_ = 1.0;
     int max_pending_ = 100;
@@ -3582,6 +3614,16 @@ struct DgoHealthState
             o.dgo_sigma_p_override = adaptiveDgoPositionNoiseStd(f, o);
             o.dgo_health_score = f.dgo_health.score;
             o.dgo_health_level = f.dgo_health.level;
+            // Camera recent DGO downweight
+            if (camera_recent_dgo_downweight_enabled_ &&
+                !f.camera_recent_until.isZero() &&
+                o.stamp < f.camera_recent_until &&
+                o.target_id == f.camera_recent_target)
+            {
+                o.dgo_sigma_p_override = std::max(
+                    std::isfinite(o.dgo_sigma_p_override) ? o.dgo_sigma_p_override : camera_recent_dgo_sigma_p_,
+                    camera_recent_dgo_sigma_p_);
+            }
             return o;
         }() : obs;
         if (!buildObsModel(f.X, obs_eff, Z, residual, H, R_meas))
@@ -3841,14 +3883,19 @@ struct DgoHealthState
                           std::numeric_limits<double>::quiet_NaN(),
                           adaptive_uwb,
                           kvv);
-        if (obs.type == ObsType::CAMERA_BEARING)
-        {
-            recordCameraAccepted(f, obs.mission_stage, (f.stamp - obs.stamp).toSec(),
-                                 residual_norm, std::numeric_limits<double>::quiet_NaN(),
-                                 std::numeric_limits<double>::quiet_NaN(),
-                                 std::numeric_limits<double>::quiet_NaN(),
-                                 false);
-        }
+	        if (obs.type == ObsType::CAMERA_BEARING)
+	        {
+	            recordCameraAccepted(f, obs.mission_stage, (f.stamp - obs.stamp).toSec(),
+	                                 residual_norm, std::numeric_limits<double>::quiet_NaN(),
+	                                 std::numeric_limits<double>::quiet_NaN(),
+	                                 std::numeric_limits<double>::quiet_NaN(),
+	                                 false);
+	            if (camera_recent_dgo_downweight_enabled_)
+	            {
+	                f.camera_recent_until = f.stamp + ros::Duration(camera_recent_dgo_downweight_duration_);
+	                f.camera_recent_target = obs.target_id;
+	            }
+	        }
         return UpdateStatus::ACCEPTED;
 	    }
 
@@ -4044,16 +4091,26 @@ struct DgoHealthState
 	        std::deque<History_Record> candidate_cache = f.cache;
 	        const uint64_t seq_before = obs_seq_;
 	        // DGO health: generate adaptive obs for delayed update
-	        Observation obs_eff = obs;
-	        if (obs_eff.type == ObsType::DGO)
-	        {
-	            obs_eff.dgo_sigma_p_override = adaptiveDgoPositionNoiseStd(f, obs_eff);
-	            obs_eff.dgo_health_score = f.dgo_health.score;
-	            obs_eff.dgo_health_level = f.dgo_health.level;
-	        }
-	        const uint64_t gated_seq =
-	            recordAcceptedObservation(candidate_cache[static_cast<size_t>(best_idx)], obs_eff, true,
-	                                      validate_position_update);
+		        Observation obs_eff = obs;
+		        if (obs_eff.type == ObsType::DGO)
+		        {
+		            obs_eff.dgo_sigma_p_override = adaptiveDgoPositionNoiseStd(f, obs_eff);
+		            obs_eff.dgo_health_score = f.dgo_health.score;
+		            obs_eff.dgo_health_level = f.dgo_health.level;
+		            // Camera recent DGO downweight
+		            if (camera_recent_dgo_downweight_enabled_ &&
+		                !f.camera_recent_until.isZero() &&
+		                obs_eff.stamp < f.camera_recent_until &&
+		                obs_eff.target_id == f.camera_recent_target)
+		            {
+		                obs_eff.dgo_sigma_p_override = std::max(
+		                    std::isfinite(obs_eff.dgo_sigma_p_override) ? obs_eff.dgo_sigma_p_override : camera_recent_dgo_sigma_p_,
+		                    camera_recent_dgo_sigma_p_);
+		            }
+		        }
+		        const uint64_t gated_seq =
+		            recordAcceptedObservation(candidate_cache[static_cast<size_t>(best_idx)], obs_eff, true,
+		                                      validate_position_update);
 
 		        std::string replay_reason;
 		        double replay_residual_norm = std::numeric_limits<double>::quiet_NaN();
@@ -4269,11 +4326,26 @@ struct DgoHealthState
 	            const double hist_delta = (trace_ctx.hist_after.head<3>() - trace_ctx.hist_before.head<3>()).norm();
 	            const double current_delta = (f.cache.back().X_post.head<3>() - current_before_replay.head<3>()).norm();
 	            if (hist_delta > 1e-9) prop_gain = current_delta / hist_delta;
-	            recordCameraAccepted(f, obs.mission_stage, cam_age, replay_residual_norm, err_delta_val, corr_cos, prop_gain);
-	        }
+		            recordCameraAccepted(f, obs.mission_stage, cam_age, replay_residual_norm, err_delta_val, corr_cos, prop_gain);
+            // Record camera impact
+            {
+                double dgo_gap = std::numeric_limits<double>::quiet_NaN();
+                Eigen::Vector3d dgo_rel;
+                double dgo_age;
+                if (getLatestDgoForTarget(obs.target_id, f.stamp, dgo_rel, dgo_age))
+                    dgo_gap = (f.X.head<3>() - dgo_rel).norm();
+                double dgo_sigma = adaptiveDgoPositionNoiseStd(f, obs_eff);
+                recordCameraImpact(f, obs.mission_stage, err_delta_val, dgo_gap, dgo_sigma);
+            }
+            if (camera_recent_dgo_downweight_enabled_)
+            {
+                f.camera_recent_until = f.stamp + ros::Duration(camera_recent_dgo_downweight_duration_);
+                f.camera_recent_target = obs.target_id;
+            }
+        }
 
 
-	        // DGO health: push replay metrics
+		        // DGO health: push replay metrics
 	        if (obs_eff.type == ObsType::DGO)
 	        {
 	            f.dgo_health.residual_window.push(replay_residual_norm);
@@ -4443,10 +4515,121 @@ struct DgoHealthState
 	        ++f.publish_count;
 	        logPublishRow(f);
 
-	        // state trace (每 publish 一次记录)
+	        // Sample camera impact events
+        sampleCameraImpacts(f);
+
+        // state trace (每 publish 一次记录)
 	        if (traceActive())
 	            writeStateTrace(f);
 	    }
+
+    void recordCameraImpact(Filter &f, int stage, double err_before, double dgo_gap_before, double dgo_sigma_before)
+    {
+        CameraImpactEvent e;
+        e.accept_stamp = f.stamp;
+        e.target_id = f.target_id;
+        e.stage = stage;
+        e.err_before = err_before;
+        e.dgo_gap_before = dgo_gap_before;
+        e.dgo_sigma_before = dgo_sigma_before;
+        f.camera_impact_pending.push_back(e);
+    }
+
+    void sampleCameraImpacts(Filter &f)
+    {
+        if (f.camera_impact_pending.empty()) return;
+        auto now = f.stamp;
+        Eigen::Vector3d dgo_rel;
+        double dgo_age = std::numeric_limits<double>::quiet_NaN();
+        bool has_dgo = getLatestDgoForTarget(f.target_id, now, dgo_rel, dgo_age);
+        double dgo_gap = std::numeric_limits<double>::quiet_NaN();
+        Eigen::Vector3d gt_rel;
+        double gt_err = std::numeric_limits<double>::quiet_NaN();
+        if (has_dgo)
+            dgo_gap = (f.X.head<3>() - dgo_rel).norm();
+        if (getRelativeGroundTruth(uav_id_, f.target_id, now, gt_rel))
+            gt_err = (f.X.head<3>() - gt_rel).norm();
+
+        for (auto &e : f.camera_impact_pending)
+        {
+            double dt = (now - e.accept_stamp).toSec();
+            if (!e.sample_0_5 && dt >= 0.5 && std::isfinite(dgo_gap))
+            {
+                e.sample_0_5 = true;
+                e.dgo_gap_0_5 = dgo_gap;
+                e.gt_err_0_5 = gt_err;
+            }
+            if (!e.sample_1_0 && dt >= 1.0 && std::isfinite(dgo_gap))
+            {
+                e.sample_1_0 = true;
+                e.dgo_gap_1_0 = dgo_gap;
+                e.gt_err_1_0 = gt_err;
+            }
+            if (!e.sample_2_0 && dt >= 2.0 && std::isfinite(dgo_gap))
+            {
+                e.sample_2_0 = true;
+                e.dgo_gap_2_0 = dgo_gap;
+                e.gt_err_2_0 = gt_err;
+            }
+        }
+        while (!f.camera_impact_pending.empty())
+        {
+            auto &e = f.camera_impact_pending.front();
+            double dt = (now - e.accept_stamp).toSec();
+            if (e.sample_2_0 || dt > 3.0)
+            {
+                f.camera_impact_completed.push_back(e);
+                f.camera_impact_pending.pop_front();
+            }
+            else break;
+        }
+    }
+
+    void writeCameraImpactSummary()
+    {
+        if (!trace_enabled_ || csv_dir_.empty()) return;
+        const std::string self_name = "iris_" + std::to_string(uav_id_);
+        const std::string path = csv_dir_ + "/" + self_name + "_camera_impact_summary.csv";
+        std::ofstream csv(path.c_str(), std::ios::out | std::ios::trunc);
+        if (!csv.is_open()) return;
+        csv << "camera_accept_time,target_id,stage,"
+            << "err_before,dgo_gap_before,dgo_sigma_before,"
+            << "dgo_gap_0_5s,dgo_gap_delta_0_5s,"
+            << "dgo_gap_1_0s,dgo_gap_delta_1_0s,"
+            << "dgo_gap_2_0s,dgo_gap_delta_2_0s,"
+            << "gt_err_0_5s,gt_err_delta_0_5s,"
+            << "gt_err_1_0s,gt_err_delta_1_0s,"
+            << "gt_err_2_0s,gt_err_delta_2_0s\n";
+        for (int t = 0; t < uav_num_; ++t)
+        {
+            if (t == uav_id_) continue;
+            for (const auto &e : filters_[t].camera_impact_completed)
+            {
+                double dgo_delta_0_5 = std::isfinite(e.dgo_gap_before) && std::isfinite(e.dgo_gap_0_5)
+                    ? e.dgo_gap_0_5 - e.dgo_gap_before : std::numeric_limits<double>::quiet_NaN();
+                double dgo_delta_1_0 = std::isfinite(e.dgo_gap_before) && std::isfinite(e.dgo_gap_1_0)
+                    ? e.dgo_gap_1_0 - e.dgo_gap_before : std::numeric_limits<double>::quiet_NaN();
+                double dgo_delta_2_0 = std::isfinite(e.dgo_gap_before) && std::isfinite(e.dgo_gap_2_0)
+                    ? e.dgo_gap_2_0 - e.dgo_gap_before : std::numeric_limits<double>::quiet_NaN();
+                double gt_delta_0_5 = std::isfinite(e.err_before) && std::isfinite(e.gt_err_0_5)
+                    ? e.gt_err_0_5 - e.err_before : std::numeric_limits<double>::quiet_NaN();
+                double gt_delta_1_0 = std::isfinite(e.err_before) && std::isfinite(e.gt_err_1_0)
+                    ? e.gt_err_1_0 - e.err_before : std::numeric_limits<double>::quiet_NaN();
+                double gt_delta_2_0 = std::isfinite(e.err_before) && std::isfinite(e.gt_err_2_0)
+                    ? e.gt_err_2_0 - e.err_before : std::numeric_limits<double>::quiet_NaN();
+                csv << e.accept_stamp.toSec() << "," << e.target_id << "," << e.stage << ","
+                    << e.err_before << "," << e.dgo_gap_before << "," << e.dgo_sigma_before << ","
+                    << e.dgo_gap_0_5 << "," << dgo_delta_0_5 << ","
+                    << e.dgo_gap_1_0 << "," << dgo_delta_1_0 << ","
+                    << e.dgo_gap_2_0 << "," << dgo_delta_2_0 << ","
+                    << e.gt_err_0_5 << "," << gt_delta_0_5 << ","
+                    << e.gt_err_1_0 << "," << gt_delta_1_0 << ","
+                    << e.gt_err_2_0 << "," << gt_delta_2_0 << "\n";
+            }
+        }
+        csv.close();
+    }
+
     void writeCameraTraceSummary()
     {
         if (!trace_enabled_ || csv_dir_.empty()) return;
