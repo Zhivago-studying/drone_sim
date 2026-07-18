@@ -6,7 +6,7 @@
 !/src
 !/sitl_config
 !/README.md
-
+!/meta.sh
 # 放开子目录内容（否则 git 不会进入已忽略的目录）
 !/yolov7/**
 !/yolov7_result_files/**
