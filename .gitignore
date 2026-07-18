@@ -12,6 +12,12 @@
 !/yolov7_result_files/**
 !/src/**
 !/sitl_config/**
+# 单独放行 runs_217_to_236 全部内容
+!/run_data
+!/run_data/**
+!/run_data/figure/**
+!/run_data/figure/runs_217_to_236/**
+!/run_data/figure/runs_217_to_236/**/*
 
 # ── 即使在跟踪目录内也要排除的内容 ────────────────────────────
 
