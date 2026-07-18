@@ -1,0 +1,14 @@
+   Run    EKF_mean   DGO_mean   DEKF_mean   DEKF/DGO
+─────────────────────────────────────────────────────
+run_111     0.828      0.543      0.517        0.95
+run_115     0.613      0.668      0.612        0.92
+run_105     0.563      0.361      0.351        0.97
+run_140     1.078      0.301      0.284        0.95
+run_225     0.786      0.378      0.281        0.74
+run_204     0.564      0.355      0.297        0.84
+
+说明：
+- EKF_mean: ins_eskf_test 中所有目标的 mean_error_norm
+- DGO_mean: ekf_dgo_test 中所有目标的 mean_error_norm
+- DEKF_mean: dekf/dekf_summary.csv 中所有目标的 mean_error_m 均值
+- DEKF/DGO: DEKF_mean / DGO_mean，越接近 1 说明 DEKF 未有效抑制 DGO 退化
