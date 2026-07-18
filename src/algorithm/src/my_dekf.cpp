@@ -107,7 +107,7 @@ public:
 	pnh_.param("dgo_velocity_pair_max_dt", dgo_velocity_pair_max_dt_, 0.05);
         pnh_.param("max_observation_delay", max_observation_delay_, 0.60);
         pnh_.param("current_delay_threshold", current_delay_threshold_, 0.020);
-        pnh_.param("max_history_match_dt", max_history_match_dt_, 0.06);
+        pnh_.param("max_history_match_dt", max_history_match_dt_, 0.1);
         pnh_.param("future_tolerance", future_tolerance_, 0.02);
         pnh_.param("delayed_update_gain_weight", delayed_update_gain_weight_, 1.0);
         if (!pnh_.hasParam("delayed_update_gain_weight"))
@@ -610,24 +610,26 @@ public:
         std::vector<AppliedObservation> updates; // 该 cache 节点已接受的原始观测
 	    };
 
-	    struct CameraImpactEvent
-    {
-        ros::Time accept_stamp;
-        int target_id = -1;
-        int stage = -1;
-        double err_before = std::numeric_limits<double>::quiet_NaN();
-        double dgo_gap_before = std::numeric_limits<double>::quiet_NaN();
-        double dgo_sigma_before = std::numeric_limits<double>::quiet_NaN();
-        bool sample_0_5 = false;
-        bool sample_1_0 = false;
-        bool sample_2_0 = false;
-        double dgo_gap_0_5 = std::numeric_limits<double>::quiet_NaN();
-        double dgo_gap_1_0 = std::numeric_limits<double>::quiet_NaN();
-        double dgo_gap_2_0 = std::numeric_limits<double>::quiet_NaN();
-        double gt_err_0_5 = std::numeric_limits<double>::quiet_NaN();
-        double gt_err_1_0 = std::numeric_limits<double>::quiet_NaN();
-        double gt_err_2_0 = std::numeric_limits<double>::quiet_NaN();
-    };
+		    struct CameraImpactEvent
+	    {
+	        ros::Time accept_stamp;
+	        int target_id = -1;
+	        int stage = -1;
+	        double err_before_norm = std::numeric_limits<double>::quiet_NaN();
+	        double err_after_norm = std::numeric_limits<double>::quiet_NaN();
+	        double err_delta = std::numeric_limits<double>::quiet_NaN();
+	        double dgo_gap_before = std::numeric_limits<double>::quiet_NaN();
+	        double dgo_sigma_before = std::numeric_limits<double>::quiet_NaN();
+	        bool sample_0_5 = false;
+	        bool sample_1_0 = false;
+	        bool sample_2_0 = false;
+	        double dgo_gap_0_5 = std::numeric_limits<double>::quiet_NaN();
+	        double dgo_gap_1_0 = std::numeric_limits<double>::quiet_NaN();
+	        double dgo_gap_2_0 = std::numeric_limits<double>::quiet_NaN();
+	        double gt_err_0_5 = std::numeric_limits<double>::quiet_NaN();
+	        double gt_err_1_0 = std::numeric_limits<double>::quiet_NaN();
+	        double gt_err_2_0 = std::numeric_limits<double>::quiet_NaN();
+	    };
 
     // 延迟更新验证记录 (delayed_validation_enabled_ 时使用)
 	    struct DelayedUpdateValidation
@@ -883,7 +885,7 @@ struct DgoHealthState
     double dgo_velocity_pair_max_dt_ = 0.05;
     double max_observation_delay_ = 0.60;
     double current_delay_threshold_ = 0.020;
-    double max_history_match_dt_ = 0.06;
+    double max_history_match_dt_ = 0.1;
     double future_tolerance_ = 0.02;
     double delayed_update_gain_weight_ = 1.0;
     double max_nis_ = 25.0;
@@ -4303,40 +4305,42 @@ struct DgoHealthState
 		                               trace_ctx.gated_kvv);
 			        incrementAcceptedCounters(f, obs, true);
 
-	        // Camera trace: record accepted metrics
-	        if (obs.type == ObsType::CAMERA_BEARING)
-	        {
-	            const double cam_age = (f.stamp - obs.stamp).toSec();
-	            double err_delta_val = std::numeric_limits<double>::quiet_NaN();
-	            double corr_cos = std::numeric_limits<double>::quiet_NaN();
-	            double prop_gain = std::numeric_limits<double>::quiet_NaN();
-	            Eigen::Vector3d gt_hist;
-	            if (getRelativeGroundTruth(uav_id_, obs.target_id, trace_ctx.hist_stamp, gt_hist))
+		        // Camera trace: record accepted metrics
+		        if (obs.type == ObsType::CAMERA_BEARING)
+		        {
+		            const double cam_age = (f.stamp - obs.stamp).toSec();
+		            double err_delta_val = std::numeric_limits<double>::quiet_NaN();
+		            double corr_cos = std::numeric_limits<double>::quiet_NaN();
+		            double prop_gain = std::numeric_limits<double>::quiet_NaN();
+		            double eb = std::numeric_limits<double>::quiet_NaN(); // err before norm
+		            double ea = std::numeric_limits<double>::quiet_NaN(); // err after norm
+		            Eigen::Vector3d gt_hist;
+		            if (getRelativeGroundTruth(uav_id_, obs.target_id, trace_ctx.hist_stamp, gt_hist))
+		            {
+		                const Eigen::Vector3d before = trace_ctx.hist_before.head<3>();
+		                const Eigen::Vector3d after  = trace_ctx.hist_after.head<3>();
+		                const Eigen::Vector3d corr = after - before;
+		                const Eigen::Vector3d err_before = before - gt_hist;
+		                eb = err_before.norm();
+		                ea = (after - gt_hist).norm();
+		                err_delta_val = ea - eb;
+		                const double denom = corr.norm() * err_before.norm();
+		                if (denom > 1e-9) corr_cos = corr.dot(err_before) / denom;
+		            }
+		            const double hist_delta = (trace_ctx.hist_after.head<3>() - trace_ctx.hist_before.head<3>()).norm();
+		            const double current_delta = (f.cache.back().X_post.head<3>() - current_before_replay.head<3>()).norm();
+		            if (hist_delta > 1e-9) prop_gain = current_delta / hist_delta;
+			            recordCameraAccepted(f, obs.mission_stage, cam_age, replay_residual_norm, err_delta_val, corr_cos, prop_gain);
+	            // Record camera impact
 	            {
-	                const Eigen::Vector3d before = trace_ctx.hist_before.head<3>();
-	                const Eigen::Vector3d after  = trace_ctx.hist_after.head<3>();
-	                const Eigen::Vector3d corr = after - before;
-	                const Eigen::Vector3d err_before = before - gt_hist;
-	                const double eb = err_before.norm();
-	                const double ea = (after - gt_hist).norm();
-	                err_delta_val = ea - eb;
-	                const double denom = corr.norm() * err_before.norm();
-	                if (denom > 1e-9) corr_cos = corr.dot(err_before) / denom;
+	                double dgo_gap = std::numeric_limits<double>::quiet_NaN();
+	                Eigen::Vector3d dgo_rel;
+	                double dgo_age;
+	                if (getLatestDgoForTarget(obs.target_id, f.stamp, dgo_rel, dgo_age))
+	                    dgo_gap = (f.X.head<3>() - dgo_rel).norm();
+	                double dgo_sigma = adaptiveDgoPositionNoiseStd(f, obs_eff);
+	                recordCameraImpact(f, obs.mission_stage, eb, ea, dgo_gap, dgo_sigma);
 	            }
-	            const double hist_delta = (trace_ctx.hist_after.head<3>() - trace_ctx.hist_before.head<3>()).norm();
-	            const double current_delta = (f.cache.back().X_post.head<3>() - current_before_replay.head<3>()).norm();
-	            if (hist_delta > 1e-9) prop_gain = current_delta / hist_delta;
-		            recordCameraAccepted(f, obs.mission_stage, cam_age, replay_residual_norm, err_delta_val, corr_cos, prop_gain);
-            // Record camera impact
-            {
-                double dgo_gap = std::numeric_limits<double>::quiet_NaN();
-                Eigen::Vector3d dgo_rel;
-                double dgo_age;
-                if (getLatestDgoForTarget(obs.target_id, f.stamp, dgo_rel, dgo_age))
-                    dgo_gap = (f.X.head<3>() - dgo_rel).norm();
-                double dgo_sigma = adaptiveDgoPositionNoiseStd(f, obs_eff);
-                recordCameraImpact(f, obs.mission_stage, err_delta_val, dgo_gap, dgo_sigma);
-            }
             if (camera_recent_dgo_downweight_enabled_)
             {
                 f.camera_recent_until = f.stamp + ros::Duration(camera_recent_dgo_downweight_duration_);
@@ -4523,17 +4527,21 @@ struct DgoHealthState
 	            writeStateTrace(f);
 	    }
 
-    void recordCameraImpact(Filter &f, int stage, double err_before, double dgo_gap_before, double dgo_sigma_before)
-    {
-        CameraImpactEvent e;
-        e.accept_stamp = f.stamp;
-        e.target_id = f.target_id;
-        e.stage = stage;
-        e.err_before = err_before;
-        e.dgo_gap_before = dgo_gap_before;
-        e.dgo_sigma_before = dgo_sigma_before;
-        f.camera_impact_pending.push_back(e);
-    }
+	    void recordCameraImpact(Filter &f, int stage,
+	                            double err_before_norm, double err_after_norm,
+	                            double dgo_gap_before, double dgo_sigma_before)
+	    {
+	        CameraImpactEvent e;
+	        e.accept_stamp = f.stamp;
+	        e.target_id = f.target_id;
+	        e.stage = stage;
+	        e.err_before_norm = err_before_norm;
+	        e.err_after_norm = err_after_norm;
+	        e.err_delta = err_after_norm - err_before_norm;
+	        e.dgo_gap_before = dgo_gap_before;
+	        e.dgo_sigma_before = dgo_sigma_before;
+	        f.camera_impact_pending.push_back(e);
+	    }
 
     void sampleCameraImpacts(Filter &f)
     {
@@ -4585,50 +4593,52 @@ struct DgoHealthState
         }
     }
 
-    void writeCameraImpactSummary()
-    {
-        if (!trace_enabled_ || csv_dir_.empty()) return;
-        const std::string self_name = "iris_" + std::to_string(uav_id_);
-        const std::string path = csv_dir_ + "/" + self_name + "_camera_impact_summary.csv";
-        std::ofstream csv(path.c_str(), std::ios::out | std::ios::trunc);
-        if (!csv.is_open()) return;
-        csv << "camera_accept_time,target_id,stage,"
-            << "err_before,dgo_gap_before,dgo_sigma_before,"
-            << "dgo_gap_0_5s,dgo_gap_delta_0_5s,"
-            << "dgo_gap_1_0s,dgo_gap_delta_1_0s,"
-            << "dgo_gap_2_0s,dgo_gap_delta_2_0s,"
-            << "gt_err_0_5s,gt_err_delta_0_5s,"
-            << "gt_err_1_0s,gt_err_delta_1_0s,"
-            << "gt_err_2_0s,gt_err_delta_2_0s\n";
-        for (int t = 0; t < uav_num_; ++t)
-        {
-            if (t == uav_id_) continue;
-            for (const auto &e : filters_[t].camera_impact_completed)
-            {
-                double dgo_delta_0_5 = std::isfinite(e.dgo_gap_before) && std::isfinite(e.dgo_gap_0_5)
-                    ? e.dgo_gap_0_5 - e.dgo_gap_before : std::numeric_limits<double>::quiet_NaN();
-                double dgo_delta_1_0 = std::isfinite(e.dgo_gap_before) && std::isfinite(e.dgo_gap_1_0)
-                    ? e.dgo_gap_1_0 - e.dgo_gap_before : std::numeric_limits<double>::quiet_NaN();
-                double dgo_delta_2_0 = std::isfinite(e.dgo_gap_before) && std::isfinite(e.dgo_gap_2_0)
-                    ? e.dgo_gap_2_0 - e.dgo_gap_before : std::numeric_limits<double>::quiet_NaN();
-                double gt_delta_0_5 = std::isfinite(e.err_before) && std::isfinite(e.gt_err_0_5)
-                    ? e.gt_err_0_5 - e.err_before : std::numeric_limits<double>::quiet_NaN();
-                double gt_delta_1_0 = std::isfinite(e.err_before) && std::isfinite(e.gt_err_1_0)
-                    ? e.gt_err_1_0 - e.err_before : std::numeric_limits<double>::quiet_NaN();
-                double gt_delta_2_0 = std::isfinite(e.err_before) && std::isfinite(e.gt_err_2_0)
-                    ? e.gt_err_2_0 - e.err_before : std::numeric_limits<double>::quiet_NaN();
-                csv << e.accept_stamp.toSec() << "," << e.target_id << "," << e.stage << ","
-                    << e.err_before << "," << e.dgo_gap_before << "," << e.dgo_sigma_before << ","
-                    << e.dgo_gap_0_5 << "," << dgo_delta_0_5 << ","
-                    << e.dgo_gap_1_0 << "," << dgo_delta_1_0 << ","
-                    << e.dgo_gap_2_0 << "," << dgo_delta_2_0 << ","
-                    << e.gt_err_0_5 << "," << gt_delta_0_5 << ","
-                    << e.gt_err_1_0 << "," << gt_delta_1_0 << ","
-                    << e.gt_err_2_0 << "," << gt_delta_2_0 << "\n";
-            }
-        }
-        csv.close();
-    }
+	    void writeCameraImpactSummary()
+	    {
+	        if (!trace_enabled_ || csv_dir_.empty()) return;
+	        const std::string self_name = "iris_" + std::to_string(uav_id_);
+	        const std::string path = csv_dir_ + "/" + self_name + "_camera_impact_summary.csv";
+	        std::ofstream csv(path.c_str(), std::ios::out | std::ios::trunc);
+	        if (!csv.is_open()) return;
+	        csv << "camera_accept_time,target_id,stage,"
+	            << "err_before_norm,err_after_norm,err_delta,"
+	            << "dgo_gap_before,dgo_sigma_before,"
+	            << "dgo_gap_0_5s,dgo_gap_delta_0_5s,"
+	            << "dgo_gap_1_0s,dgo_gap_delta_1_0s,"
+	            << "dgo_gap_2_0s,dgo_gap_delta_2_0s,"
+	            << "gt_err_0_5s,gt_err_delta_0_5s,"
+	            << "gt_err_1_0s,gt_err_delta_1_0s,"
+	            << "gt_err_2_0s,gt_err_delta_2_0s\n";
+	        for (int t = 0; t < uav_num_; ++t)
+	        {
+	            if (t == uav_id_) continue;
+	            for (const auto &e : filters_[t].camera_impact_completed)
+	            {
+	                double dgo_delta_0_5 = std::isfinite(e.dgo_gap_before) && std::isfinite(e.dgo_gap_0_5)
+	                    ? e.dgo_gap_0_5 - e.dgo_gap_before : std::numeric_limits<double>::quiet_NaN();
+	                double dgo_delta_1_0 = std::isfinite(e.dgo_gap_before) && std::isfinite(e.dgo_gap_1_0)
+	                    ? e.dgo_gap_1_0 - e.dgo_gap_before : std::numeric_limits<double>::quiet_NaN();
+	                double dgo_delta_2_0 = std::isfinite(e.dgo_gap_before) && std::isfinite(e.dgo_gap_2_0)
+	                    ? e.dgo_gap_2_0 - e.dgo_gap_before : std::numeric_limits<double>::quiet_NaN();
+	                double gt_delta_0_5 = std::isfinite(e.err_after_norm) && std::isfinite(e.gt_err_0_5)
+	                    ? e.gt_err_0_5 - e.err_after_norm : std::numeric_limits<double>::quiet_NaN();
+	                double gt_delta_1_0 = std::isfinite(e.err_after_norm) && std::isfinite(e.gt_err_1_0)
+	                    ? e.gt_err_1_0 - e.err_after_norm : std::numeric_limits<double>::quiet_NaN();
+	                double gt_delta_2_0 = std::isfinite(e.err_after_norm) && std::isfinite(e.gt_err_2_0)
+	                    ? e.gt_err_2_0 - e.err_after_norm : std::numeric_limits<double>::quiet_NaN();
+	                csv << e.accept_stamp.toSec() << "," << e.target_id << "," << e.stage << ","
+	                    << e.err_before_norm << "," << e.err_after_norm << "," << e.err_delta << ","
+	                    << e.dgo_gap_before << "," << e.dgo_sigma_before << ","
+	                    << e.dgo_gap_0_5 << "," << dgo_delta_0_5 << ","
+	                    << e.dgo_gap_1_0 << "," << dgo_delta_1_0 << ","
+	                    << e.dgo_gap_2_0 << "," << dgo_delta_2_0 << ","
+	                    << e.gt_err_0_5 << "," << gt_delta_0_5 << ","
+	                    << e.gt_err_1_0 << "," << gt_delta_1_0 << ","
+	                    << e.gt_err_2_0 << "," << gt_delta_2_0 << "\n";
+	            }
+	        }
+	        csv.close();
+	    }
 
     void writeCameraTraceSummary()
     {
