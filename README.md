@@ -20,6 +20,14 @@
 - [run_28~run_31](#run_28run_31-dgo-融合历元时间系统重构)
 - [run_34~run_35](#run_34run_35-任务完成自动停止--速度源修正--evaluator-飞行窗口停止)
 - [run_36~run_38](#run_36run_38-uwb-时间戳语义修正)
+- [run_39~run_41](#run_39run_41-修改无人机移动速度为1ms)
+- [run_42](#run_42-到达锁存逻辑修复--速度记录修复)
+- [run_43](#run_43-到达判定加入速度阈值--settle-改为稳定计时--translate-速度上限修复)
+- [run_44](#run_44-稳定判断加入真值速度--掉头缓冲拆分--非对称加减速)
+- [run_45](#run_45-expand-独立参数闭环--返回-1-ms-目标)
+- [run_46~run_56](#run_46run_56)
+- [run_57~run_61](#run_57run_61)
+- [run_69](#run_69)
 
 ---
 
@@ -2332,11 +2340,15 @@ roslaunch sensors xtdrone_mission.launch run_id:=46
 不指定 `run_id` 时回退到 `src/sensors/logs/` 向后兼容。
 
 run_46 通过运动控制与 DGO 验收。编队完整完成 EXPAND_SHRINK、TRANSLATE、CHASE_RESTORE 和降落流程；EXPAND_SHRINK RETURN 不再出现大幅过冲；最小机间距 1.376 m，高于 0.8 m 安全阈值；DGO 相对定位 RMSE 为 0.097~0.124 m。TRANSLATE 阶段控制指令达到 1.0 m/s，速度诊断差分速度最高约 1.15 m/s；Gazebo GT 速度峰值约 0.99 m/s，可视为工程意义上的 1 m/s 动态验收通过。
-run_46~run_56记录EKF-DGO算法数据
+### run_46~run_56
 
-run51~55回退至run_41的代码版本，更符合论文实际
+记录 EKF-DGO 算法数据。
 
-run_56修改如下：
+注：run51~55 回退至 run_41 的代码版本，更符合论文实际。
+
+#### run_56 修改
+
+
 
 主要问题：
 
@@ -2362,7 +2374,7 @@ run_56修改如下：
   - src/algorithm/launch/dgo_full_mission.launch:28
   - src/test/launch/ekf_dgo_test.launch:24
 
-run_57~run_61
+### run_57~run_61
 
 ESKF NEES 调参已经有效，run_60/run_61 的 NEES pos 和 NEES vel 已经接近可接受区间；
 run_61 的 DGO 结果非常好，动态 RMSE 约 0.119 m，已经接近甚至优于你之前 run_41 的论文量级；
@@ -2371,7 +2383,8 @@ run_58–run_60 的不稳定主要不是 UWB 时间戳问题，而是视觉角�
 修改内容：
 ...
 
-run_69:
+### run_69
+
 修改的内容：
 原参数：
 <param name="flow_base_noise_std" value="0.025"/>
